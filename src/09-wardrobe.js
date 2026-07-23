@@ -59,39 +59,6 @@
     return false;
   }
 
-  function migrateLegacyContainerState() {
-    if (!globalThis.Player) return false;
-    const legacyItem = getLegacyContainerItem(Player);
-    if (!legacyItem) return false;
-    if (persistenceBlocked) {
-      warn("检测到旧版容器，但衣柜读取状态不安全；未清理或写回", wardrobeReadState);
-      return false;
-    }
-    const legacyRaw = legacyItem.Property?.CustomComposition;
-    const legacyComposition = legacyRaw ? normalizeComposition(legacyRaw) : null;
-    if (legacyComposition?.layers?.length) {
-      const signature = JSON.stringify(legacyComposition.layers);
-      let match = wardrobe.schemes.find(scheme => JSON.stringify(normalizeComposition(scheme.composition).layers) === signature);
-      if (!match && wardrobe.schemes.length < MAX_SCHEMES) {
-        match = { id: uid(), composition: legacyComposition };
-        wardrobe.schemes.unshift(match);
-      }
-      if (match) wardrobe.equippedIds = [...new Set([...(wardrobe.equippedIds || []), match.id])];
-    }
-    Player.Appearance = (Player.Appearance || []).filter(item => !isLegacyContainerItem(item));
-    wardrobe.appearanceSanitizedVersion = APPEARANCE_SANITIZED_VERSION;
-    persistWardrobe();
-    CharacterRefresh(Player, false, false);
-    try {
-      if (typeof globalThis.ServerPlayerAppearanceSync === "function") ServerPlayerAppearanceSync();
-      if (typeof globalThis.ServerPlayerIsInChatRoom === "function" && ServerPlayerIsInChatRoom() && typeof globalThis.ChatRoomCharacterUpdate === "function") ChatRoomCharacterUpdate(Player);
-    } catch (error) {
-      warn("旧版容器清理已在本地完成，但服务器同步失败", error);
-    }
-    log("已迁移并精确清除旧版 CustomOutfit 容器");
-    return true;
-  }
-
   function openWardrobe() {
     restoreEditorAppearance();
     loadWardrobe();

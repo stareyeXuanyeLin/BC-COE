@@ -2,7 +2,7 @@
 
 > **当前状态：私有开发与测试版本。** 本项目尚未正式发布，不建议未参与测试的用户安装、转载或分发。功能、兼容性和完整生命周期仍在持续验证中。
 
-COE Mirror 是 [COE-Echo-Remote v1.8.1](https://github.com/liliMozi/openhanako) 的 UX 优化衍生版，当前版本 **1.0.0**，面向 Bondage Club R130。它在 Remote 已验证的核心共享链路基础上，专注于**用户交互体验的打磨**——让远端服装的查看、切换、反馈更直观顺畅。
+COE Mirror 是 [COE-Echo-Remote v1.8.1](https://github.com/liliMozi/openhanako) 的 UX 优化衍生版，当前运行时版本 **1.8.1**，面向 Bondage Club R130。它在 Remote 已验证的核心共享链路基础上，专注于**用户交互体验的打磨**，让远端服装的查看、切换和反馈更直观顺畅。
 
 > 本项目的母版 COE-Echo-Remote 已完成核心功能验证（发现、请求、分片传输、快照接收和远端静态绘制组成的核心共享链路已在 R130 双账号私人房实机跑通），留作稳定基底与功能权威。Mirror 版只做交互层优化，不修改协议、数据结构或渲染核心。
 
@@ -37,6 +37,8 @@ CharacterRefresh(character, false, false)
 ```
 
 Hidden 协议使用 `COE_RVS/1`，不产生普通聊天、耳语或动作消息。
+
+COE Mirror 通过本地衣柜、COE Remote 快照协议和绘制阶段 Synthetic Rendering 工作。它不创建、不穿戴、不同步名为 `CustomOutfit` 的正式服装项目，也不在启动时读取或迁移 `CustomComposition`。Synthetic Item 在 `ServerAppearanceBundle` 边界按 `__coeMaterialId` 过滤，不能进入服务器 Appearance Bundle。
 
 ## 偏好与诊断
 

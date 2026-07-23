@@ -46,7 +46,7 @@ normalizeWardrobe → compactWardrobeForStorage → JSON → LZ/json 编码
 
 ## Appearance / Bundle
 
-本地和远端 Synthetic Item 都不会持久加入正式 Appearance。`CommonDrawAppearanceBuild` 的临时替换由 `try/finally` 恢复；`ServerAppearanceBundle` 额外过滤 `__coeMaterialId` 和精确旧容器。视觉代理的 `Asset` 兼容属性是非枚举、只读的运行时引用，不进入 compact wardrobe、远端 snapshot 或 Bundle。
+本地和远端 Synthetic Item 都不会持久加入正式 Appearance。`CommonDrawAppearanceBuild` 的临时替换由 `try/finally` 恢复；`ServerAppearanceBundle` 只额外过滤 `__coeMaterialId`。视觉代理的 `Asset` 兼容属性是非枚举、只读的运行时引用，不进入 compact wardrobe、远端 snapshot 或 Bundle。
 
 远端快照接受、CLEAR 和生命周期清理后只调用：
 
@@ -56,7 +56,7 @@ CharacterRefresh(character, false, false)
 
 不会为远端显示调用 ServerPlayerAppearanceSync、ChatRoomCharacterUpdate 或 ChatRoomCharacterItemUpdate。
 
-静态扫描发现的服务器 Appearance/ChatRoom 同步均位于继承的 `migrateLegacyContainerState()`，只在检测到精确旧 CustomOutfit 容器且衣柜可安全读取时执行，用于迁移/清理而非 COE Remote 传播。普通加载、远端消息、能力分析、Echo 变化和 UI 打开不会触发。
+正常运行源码已移除旧 `CustomOutfit` 容器的创建、读取、迁移和入站/出站过滤。启动阶段不读取 `CustomComposition`，不修改 `Player.Appearance`，不调用服务器 Appearance 同步或聊天室角色更新。旧衣柜记录中遗留的迁移标记会在下一次规范化写出时自然丢弃，不参与当前架构。
 
 实机仍需记录：
 

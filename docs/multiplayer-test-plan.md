@@ -11,13 +11,13 @@ JSON.stringify(ServerAppearanceBundle(Player.Appearance)).length
 CustomOutfitEditor.status()
 ```
 
-Appearance/Bundle 不得出现 `CustomOutfit`、`CustomComposition`、`__coeMaterialId`、`COE_RVS`、revision/hash/chunk/snapshot、Canvas/WebGL/Function 或 Echo PersistentData。
+Appearance/Bundle 不得出现 `CustomOutfit`、`CustomComposition`、`__coeMaterialId`、`COE_RVS`、revision/hash/chunk/snapshot、Canvas/WebGL/Function 或 Echo PersistentData。启动前后还应对比 `Player.Appearance`，确认插件未执行旧容器迁移，也未主动触发服务器 Appearance 或聊天室角色同步。
 
 ## 阶段
 
-1. **Node 门禁**：`npm test`、`npm run build`、`npm run check`、基线 24/24 hash。
+1. **Node 门禁**：`npm test`、`npm run build`、`npm run check`；静态扫描确认正常运行源码无旧容器常量、识别/迁移函数、`CustomComposition` 和主动 Appearance/聊天室同步调用。
 2. **单客户端虚拟远端 Character**：transport 不启用；验证 A/B 按 MemberNumber 隔离、无 snapshot 原引用、CLEAR/leave 后消失、CommonDraw throw 后引用恢复。
-3. **双客户端私人房，仅握手**：两项偏好默认关闭；Hidden 消息不可见；一方无插件无聊天/异常；STATE 不 ping-pong。
+3. **双客户端私人房，仅握手**：两项偏好默认关闭；Hidden 消息不可见；一方无插件无聊天/异常；STATE 不 ping-pong；双方启动时正式 Appearance 保持不变。
 4. **固定虚拟 snapshot**：先 1 Vanilla material/1 layer；确认接收端静态显示、发送端与接收端正式 Appearance 不变。
 5. **真实当前方案**：多 material/layer、颜色、Type、优先级、偏移、透明度；换装 hash/revision、关闭共享 CLEAR、关闭接收、本地刷新。
 6. **生命周期**：成员离开/重进、换房、刷新页面、断线重连；旧 session/revision/chunk 不得复活。

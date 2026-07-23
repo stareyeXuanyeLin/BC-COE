@@ -26,13 +26,8 @@
   const MOD_NAME = "CustomOutfitEditor";
   const VERSION = "1.8.1";
   console.info(`[${MOD_NAME}] userscript injected`, location.href);
-  // The plugin switch is a normal outerwear slot item, so it can be found and toggled from the game's clothing UI.
-  const CONTAINER_GROUP = "ClothOuter";
-  const LEGACY_CONTAINER_GROUP = "ItemMisc";
-  const CONTAINER_ASSET = "CustomOutfit";
   const SETTINGS_KEY = "CustomOutfitEditor";
   const STORAGE_KEY = "BC.CustomOutfitEditor.v1";
-  const APPEARANCE_SANITIZED_VERSION = 1;
   const STYLE_ID = "coe-style";
   const BUTTON_ID = "coe-entry-button";
   const ROOT_ID = "coe-root";
@@ -49,7 +44,7 @@
   let editing = null;
   let editingId = null;
   let syntheticByCharacter = new WeakMap();
-  let wardrobe = { version: 4, schemes: [], equippedIds: [], appearanceSanitizedVersion: 0 };
+  let wardrobe = { version: 4, schemes: [], equippedIds: [] };
   let wardrobeReadState = { status: "absent", source: null, server: null, local: null, conflict: false };
   let persistenceBlocked = false;
   let duplicateInstance = false;
@@ -57,7 +52,6 @@
   let capabilityCache = new WeakMap();
   let runtimeMaterialState = new Map();
   let diagnostics = {
-    inboundLegacyFiltered: 0,
     outboundSyntheticFiltered: 0,
     skippedMaterials: [],
     lastWarnings: [],
@@ -218,7 +212,6 @@
       version: 4,
       schemes,
       equippedIds: [...new Set(equippedIds)],
-      appearanceSanitizedVersion: clamp(raw?.appearanceSanitizedVersion, 0, APPEARANCE_SANITIZED_VERSION),
     };
   }
 
@@ -297,7 +290,6 @@
       schemes: normalized.schemes.map(entry => ({ id: entry.id, composition: compactCompositionForStorage(entry.composition) })),
       equippedIds: normalized.equippedIds,
     };
-    if (normalized.appearanceSanitizedVersion) compact.appearanceSanitizedVersion = normalized.appearanceSanitizedVersion;
     if (utf8Bytes(compact) > MAX_WARDROBE_BYTES) throw new Error("wardrobe-byte-budget");
     return compact;
   }
@@ -399,16 +391,6 @@
 
 
 
-  function isLegacyContainerItem(item) {
-    const groupName = item?.Asset?.Group?.Name;
-    return item?.Asset?.Name === CONTAINER_ASSET
-      && (groupName === CONTAINER_GROUP || groupName === LEGACY_CONTAINER_GROUP);
-  }
-
-  function getLegacyContainerItem(character) {
-    return character?.Appearance?.find(isLegacyContainerItem) || null;
-  }
-
   function isLocalPlayer(character) {
     return !!character && character === globalThis.Player;
   }
@@ -424,7 +406,7 @@
     if (!group || group.Category !== "Appearance" || group.AllowNone !== true) return false;
     const name = group.Name || "";
     const protectedNames = /^(Body|Head|Hair|Eyes|Eyebrows|Mouth|Nose|Ears|Hands|Height|Blush|Emoticon)/;
-    return !protectedNames.test(name) && asset.Name !== CONTAINER_ASSET;
+    return !protectedNames.test(name);
   }
 
   function shiftOrigin(origin, offset) {
@@ -451,7 +433,7 @@
   function getMaterialAssets(query = "") {
     const q = query.trim().toLowerCase();
     return (globalThis.Asset || []).filter(asset => {
-      if (!asset?.Wear || asset.IsLock || asset.Name === CONTAINER_ASSET) return false;
+      if (!asset?.Wear || asset.IsLock) return false;
       if (!asset.Layer?.some(isDrawableLayer)) return false;
       const text = `${asset.Group?.Name || ""} ${asset.Name || ""} ${asset.Description || ""}`.toLowerCase();
       return !q || text.includes(q);
@@ -871,19 +853,10 @@
       return next(args);
     });
 
-    modApi.hookFunction("ServerAppearanceLoadFromBundle", 1000, (args, next) => {
-      if (Array.isArray(args[2])) {
-        const before = args[2].length;
-        args[2] = args[2].filter(item => !(item?.Name === CONTAINER_ASSET && (item?.Group === CONTAINER_GROUP || item?.Group === LEGACY_CONTAINER_GROUP)));
-        diagnostics.inboundLegacyFiltered += before - args[2].length;
-      }
-      return next(args);
-    });
-
     modApi.hookFunction("ServerAppearanceBundle", 1000, (args, next) => {
       if (Array.isArray(args[0])) {
         const before = args[0].length;
-        args[0] = args[0].filter(item => !item?.__coeMaterialId && !isLegacyContainerItem(item));
+        args[0] = args[0].filter(item => !item?.__coeMaterialId);
         diagnostics.outboundSyntheticFiltered += before - args[0].length;
       }
       return next(args);
@@ -1133,39 +1106,6 @@
     if (!persistenceBlocked) return true;
     toast(`衣柜只读保护：${wardrobeReadState.status}`, "error");
     return false;
-  }
-
-  function migrateLegacyContainerState() {
-    if (!globalThis.Player) return false;
-    const legacyItem = getLegacyContainerItem(Player);
-    if (!legacyItem) return false;
-    if (persistenceBlocked) {
-      warn("检测到旧版容器，但衣柜读取状态不安全；未清理或写回", wardrobeReadState);
-      return false;
-    }
-    const legacyRaw = legacyItem.Property?.CustomComposition;
-    const legacyComposition = legacyRaw ? normalizeComposition(legacyRaw) : null;
-    if (legacyComposition?.layers?.length) {
-      const signature = JSON.stringify(legacyComposition.layers);
-      let match = wardrobe.schemes.find(scheme => JSON.stringify(normalizeComposition(scheme.composition).layers) === signature);
-      if (!match && wardrobe.schemes.length < MAX_SCHEMES) {
-        match = { id: uid(), composition: legacyComposition };
-        wardrobe.schemes.unshift(match);
-      }
-      if (match) wardrobe.equippedIds = [...new Set([...(wardrobe.equippedIds || []), match.id])];
-    }
-    Player.Appearance = (Player.Appearance || []).filter(item => !isLegacyContainerItem(item));
-    wardrobe.appearanceSanitizedVersion = APPEARANCE_SANITIZED_VERSION;
-    persistWardrobe();
-    CharacterRefresh(Player, false, false);
-    try {
-      if (typeof globalThis.ServerPlayerAppearanceSync === "function") ServerPlayerAppearanceSync();
-      if (typeof globalThis.ServerPlayerIsInChatRoom === "function" && ServerPlayerIsInChatRoom() && typeof globalThis.ChatRoomCharacterUpdate === "function") ChatRoomCharacterUpdate(Player);
-    } catch (error) {
-      warn("旧版容器清理已在本地完成，但服务器同步失败", error);
-    }
-    log("已迁移并精确清除旧版 CustomOutfit 容器");
-    return true;
   }
 
   function openWardrobe() {
@@ -2541,7 +2481,6 @@
       activeMaterialCount: runtimeMaterialState.size,
       skippedMaterials: diagnostics.skippedMaterials,
       lastWarnings: diagnostics.lastWarnings.slice(-20),
-      inboundLegacyFiltered: diagnostics.inboundLegacyFiltered,
       outboundSyntheticFiltered: diagnostics.outboundSyntheticFiltered,
       remoteProtocol: REMOTE_PROTOCOL,
       sharingEnabled: remotePrefs.sharingEnabled,
@@ -2647,7 +2586,6 @@
     try {
       const readState = loadWardrobe();
       if (readState.status === "deferred") return;
-      migrateLegacyContainerState();
       syncEquippedSchemes();
       initializeRemoteController();
       exposeAPI();
@@ -2664,7 +2602,7 @@
     globalThis.__COE_TEST_API__ = {
       normalizeWardrobe, compactWardrobeForStorage, packWardrobe, unpackWardrobeDetailed,
       stableInsertSyntheticLayers, coeAssetLayerSort: stableInsertSyntheticLayers, analyzeSourceAsset, sanitizePlainRecord,
-      buildSyntheticItems, buildLocalSyntheticItems, buildRemoteSyntheticItems, makeSyntheticLayers, statusSnapshot, isLegacyContainerItem,
+      buildSyntheticItems, buildLocalSyntheticItems, buildRemoteSyntheticItems, makeSyntheticLayers, statusSnapshot,
       isDrawableLayer, normalizedMaterialColors, normalizePickerColor, validateRemoteSnapshot, canonicalRemoteSnapshot, sha256Base64Url,
       parseRemoteContent, serializeRemoteEnvelope, encodeRemoteText, decodeRemoteText, splitRemoteData,
       createRemoteStore, setRemotePeer, setPendingRequest, pendingRequestFor, addRemoteChunk, expireRemoteAssemblies,

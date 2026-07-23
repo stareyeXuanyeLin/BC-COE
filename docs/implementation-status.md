@@ -1,10 +1,10 @@
 # COE Remote 1.8.1 实施状态
 
-更新日期：2026-07-22
+更新日期：2026-07-24
 
 ## 当前结论
 
-线路二的源码、Node 自动化、构建、语法检查和上游基线复核已经完成。1.8.0 已完成一次双账号私人房实测：双方同时安装并开启插件后，可以互相看见真实自定义服装，未弹出 BC/BCX 错误窗口。1.8.1 在此基础上过滤 R130 已移除的旧姿势键，避免合成图层重复放大 Echo 的 `LegsOpen` 警告。
+线路二的源码和自动化已经完成。1.8.0 已完成一次双账号私人房实测：双方同时安装并开启插件后，可以互相看见真实自定义服装，未弹出 BC/BCX 错误窗口。1.8.1 在此基础上过滤 R130 已移除的旧姿势键，并从 Mirror 正常运行时移除旧 `CustomOutfit` 正式服装容器机制。本次移除后的静态扫描、Node 测试、构建和语法检查均已通过。
 
 ```text
 实现完成 → 自动化门禁通过 → 1.8.0 双客户端真实方案互见通过 → 1.8.1 等待页面复测
@@ -21,6 +21,8 @@
 - BC、Echo、其他本机已加载静态图片素材的线路二投影；
 - 动态/Extended/Archetype 禁用及 Property 二次清洗；
 - Appearance/Bundle 隔离和 CommonDraw `try/finally`；
+- 旧 `CustomOutfit` / `CustomComposition` 容器迁移与入站/出站过滤已移除；
+- 初始化不修改或主动同步 `Player.Appearance`，Bundle 只过滤 `__coeMaterialId` Synthetic Item；
 - 默认关闭、彼此独立的共享/接收开关；
 - RemotePrefs 与 wardrobe schema v4 隔离；
 - status plain summary；
@@ -30,18 +32,16 @@
 ## 自动化门禁
 
 ```text
-npm test                 47/47 通过
+静态扫描                 通过
+npm test                 51/51 通过
 npm run build            通过
 npm run check            通过
-上游 COE-Echo v1.6.2    24/24 SHA-256 一致
 ```
 
 产物：
 
 ```text
-dist/CustomOutfitEditorEchoRemote.user.js
-140,518 bytes
-SHA-256 8f1ea6a60f1bc3c5846fc19ae3dfcd44ec34c060e78f556a857881f0cea6dd6d
+dist/CustomOutfitEditorEchoMirror.user.js
 ```
 
 ## 尚未完成
@@ -61,5 +61,5 @@ SHA-256 8f1ea6a60f1bc3c5846fc19ae3dfcd44ec34c060e78f556a857881f0cea6dd6d
 ## 文档效力
 
 - `protocol-spec.md`、`threat-model.md`、`architecture.md`、`known-limitations.md` 描述当前 1.8.1 实现。
-- `communication-research.md`、`phase2-implementation-research.md` 是实施前研究档案；其中阶段停止点、严格 Vanilla/Echo allowlist 路线和旧测试数量不再代表当前实现。
+- `communication-research.md`、`phase2-implementation-research.md`、`R130-hidden-mod-communication-refactoring-reference.md` 是实施前研究档案；其中阶段停止点、旧容器清理例外、严格 Vanilla/Echo allowlist 路线和旧测试数量不再代表当前实现。
 - 若研究档案与当前规范冲突，以任务文档、当前源码和上述四份 1.8.1 文档为准。

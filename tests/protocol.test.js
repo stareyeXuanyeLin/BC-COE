@@ -27,6 +27,29 @@ test('snapshot validator rejects pollution keys, non-finite values and illegal P
   assert.throws(() => api.validateRemoteSnapshot(property), /property-key/);
 });
 
+test('local remote snapshot contains only compact visual fields', () => {
+  const asset = makeAsset();
+  const { api } = load({ assets: [asset] });
+  const composition = {
+    version: 3,
+    name: 'CustomOutfit',
+    CustomComposition: { denied: true },
+    Player: { Appearance: [] },
+    materials: [{ id: 'm', sourceGroup: 'Cloth', sourceAsset: 'Dress', colors: ['#fff'], sourceProperty: {} }],
+    layers: [{ materialId: 'm', sourceGroup: 'Cloth', sourceAsset: 'Dress', sourceLayer: 'Base', sourceLayerIndex: 0, priority: 10, offsetX: 0, offsetY: 0, opacity: 1, __coeMaterialId: 'denied' }],
+    recycle: [],
+  };
+  api.setActiveCompositionForTest(composition);
+  const value = api.buildLocalRemoteSnapshot();
+  assert.deepEqual(Object.keys(value), ['v', 'm', 'l']);
+  assert.deepEqual(Object.keys(value.m[0]), ['g', 'a', 'c']);
+  assert.deepEqual(Object.keys(value.l[0]), ['m', 'n', 'i', 'p', 'x', 'y', 'o']);
+  const text = JSON.stringify(value);
+  for (const forbidden of ['CustomOutfit', 'CustomComposition', '__coeMaterialId', 'Appearance']) {
+    assert.equal(text.includes(forbidden), false, forbidden);
+  }
+});
+
 test('decoded byte budget is enforced and chunk split stays bounded', () => {
   const { api } = load();
   const encoded = api.encodeRemoteText('x'.repeat(32769));

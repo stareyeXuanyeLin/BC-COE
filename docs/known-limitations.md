@@ -20,6 +20,10 @@ COE Remote 只复制本机已加载 Asset 的普通图片层。以下内容不�
 - 硬预算之外的方案不会共享；不会用 Dictionary 绕过限制。
 - 自动请求只重试一次；持续丢包时需等待新的 STATE、切换接收开关或重新入房。
 
+## 旧版数据兼容
+
+正常运行时不再自动导入或清理旧 `CustomOutfit` / `CustomComposition` 数据。需要从旧容器恢复方案时，应使用独立的一次性迁移工具；Mirror 启动流程不会为兼容旧数据而修改或同步 `Player.Appearance`。
+
 ## 本地与 Mod 兼容
 
 - Remote Edition 与旧 COE/COE-Echo 不能同时启用。

@@ -1,6 +1,6 @@
 # 回归记录
 
-日期：2026-07-22  
+日期：2026-07-24  
 环境：Windows / Node 24.16.0 / PowerShell / BC R130 目标。
 
 ## 1.8.1 自动化结果
@@ -12,21 +12,18 @@ npm run check
 node scripts/verify-upstream.mjs
 ```
 
-结果：
+本次结果：
 
-- Node：47/47 通过；
-- 构建：通过；
+- Node：51/51 通过；
+- 构建：通过，生成 `dist/CustomOutfitEditorEchoMirror.user.js`；
 - dist `node --check`：通过；
-- COE-Echo v1.6.2 只读基线：24/24 SHA-256 一致；
-- 产物：`dist/CustomOutfitEditorEchoRemote.user.js`；
-- 大小：140,518 bytes；
-- SHA-256：`8f1ea6a60f1bc3c5846fc19ae3dfcd44ec34c060e78f556a857881f0cea6dd6d`。
+- 静态扫描：通过，正常运行源码和构建产物均无旧容器标识与同步调用。
 
 ## 覆盖范围
 
 ### 继承的本地回归
 
-无 synthetic 原引用、base 顺序和同 priority 稳定插入；静态视觉代理；动态标志不可重新启用；LSCG `Asset.Group` 回退；Property 清洗；compact wardrobe；存储损坏/冲突保护；正式同 Asset 冲突；Bundle synthetic/旧容器过滤；CommonDraw finally 恢复。
+无 synthetic 原引用、base 顺序和同 priority 稳定插入；静态视觉代理；动态标志不可重新启用；LSCG `Asset.Group` 回退；Property 清洗；compact wardrobe；存储损坏/冲突保护；正式同 Asset 冲突；Bundle 仅过滤 Synthetic Item；不安装旧容器入站 Hook；CommonDraw finally 恢复。
 
 ### Protocol
 
@@ -52,7 +49,7 @@ node scripts/verify-upstream.mjs
 
 ## 静态红线复核
 
-未发现 `ServerSocket.emit`、Dictionary 协议、普通 Chat/Whisper/Emote 承载、eval/Function、远端动态标志启用、网络对象进入 `normalizeComposition()`、snapshot 写入正式 Appearance。服务器 Appearance 同步调用只保留在继承的**旧 CustomOutfit 容器精确迁移/清理**路径，不用于远端显示或传播。
+未发现 `ServerSocket.emit`、Dictionary 协议、普通 Chat/Whisper/Emote 承载、eval/Function、远端动态标志启用、网络对象进入 `normalizeComposition()` 或 snapshot 写入正式 Appearance。正常运行源码已无旧容器常量、识别/迁移函数、`CustomComposition` 读取、`ServerPlayerAppearanceSync`、`ChatRoomCharacterUpdate` 和旧容器入站过滤；出站 Bundle 仍保留 `__coeMaterialId` 防线。
 
 ## 尚未执行的实机阶段
 

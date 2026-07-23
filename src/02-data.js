@@ -119,7 +119,6 @@
       version: 4,
       schemes,
       equippedIds: [...new Set(equippedIds)],
-      appearanceSanitizedVersion: clamp(raw?.appearanceSanitizedVersion, 0, APPEARANCE_SANITIZED_VERSION),
     };
   }
 
@@ -198,7 +197,6 @@
       schemes: normalized.schemes.map(entry => ({ id: entry.id, composition: compactCompositionForStorage(entry.composition) })),
       equippedIds: normalized.equippedIds,
     };
-    if (normalized.appearanceSanitizedVersion) compact.appearanceSanitizedVersion = normalized.appearanceSanitizedVersion;
     if (utf8Bytes(compact) > MAX_WARDROBE_BYTES) throw new Error("wardrobe-byte-budget");
     return compact;
   }

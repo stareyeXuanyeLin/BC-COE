@@ -181,19 +181,10 @@
       return next(args);
     });
 
-    modApi.hookFunction("ServerAppearanceLoadFromBundle", 1000, (args, next) => {
-      if (Array.isArray(args[2])) {
-        const before = args[2].length;
-        args[2] = args[2].filter(item => !(item?.Name === CONTAINER_ASSET && (item?.Group === CONTAINER_GROUP || item?.Group === LEGACY_CONTAINER_GROUP)));
-        diagnostics.inboundLegacyFiltered += before - args[2].length;
-      }
-      return next(args);
-    });
-
     modApi.hookFunction("ServerAppearanceBundle", 1000, (args, next) => {
       if (Array.isArray(args[0])) {
         const before = args[0].length;
-        args[0] = args[0].filter(item => !item?.__coeMaterialId && !isLegacyContainerItem(item));
+        args[0] = args[0].filter(item => !item?.__coeMaterialId);
         diagnostics.outboundSyntheticFiltered += before - args[0].length;
       }
       return next(args);

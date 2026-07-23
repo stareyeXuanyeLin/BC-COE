@@ -12,6 +12,12 @@
 - `14-remote-controller`：本地快照、revision、STATE/REQUEST/CHUNK/CLEAR 状态机、偏好和房间生命周期。
 - `15-bootstrap`：重复实例检测、Hook 安装、初始化、API/status 接线。
 
+## 正式 Appearance 边界
+
+COE Mirror 的当前架构只有三部分：本地衣柜、`COE_RVS/1` Remote Snapshot 和绘制阶段 Synthetic Rendering。运行时不创建或穿戴 `CustomOutfit` 正式服装项目，不读取 `CustomComposition`，也不安装旧容器入站过滤 Hook。
+
+`ServerAppearanceBundle` Hook 只承担一项职责：过滤带 `__coeMaterialId` 的临时 Synthetic Item。它不会改写或筛除其它正式服装项目。初始化在衣柜读取完成后只同步本地启用方案、初始化 Remote Controller 并暴露 API，不执行 Appearance 迁移或服务器/聊天室外观同步。
+
 ## 数据流
 
 ```text

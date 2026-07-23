@@ -58,6 +58,15 @@ function compositionFor(asset) {
   };
 }
 
+test('runtime source no longer contains the legacy formal-container mechanism', () => {
+  const runtimeSource = parts.map(name => fs.readFileSync(path.join(root, 'src', name), 'utf8')).join('\n');
+  for (const forbidden of [
+    'CONTAINER_GROUP', 'LEGACY_CONTAINER_GROUP', 'CONTAINER_ASSET', 'APPEARANCE_SANITIZED_VERSION',
+    'isLegacyContainerItem', 'getLegacyContainerItem', 'migrateLegacyContainerState',
+    'ServerPlayerAppearanceSync', 'ChatRoomCharacterUpdate', 'CustomComposition',
+  ]) assert.equal(runtimeSource.includes(forbidden), false, forbidden);
+});
+
 test('editor module defines every helper used by the wardrobe entry flow', () => {
   const source = fs.readFileSync(path.join(root, 'src', '10-editor.js'), 'utf8');
   for (const name of ['openEditor', 'renderPoseControls', 'setPreviewPose']) {
@@ -227,7 +236,7 @@ test('compact serializer omits redundant/UI/runtime fields', () => {
   const raw = { version: 4, appearanceSanitizedVersion: 1, equippedIds: ['s'], schemes: [{ id: 's', updatedAt: 123, composition: { ...compositionFor(asset), materials: [{ ...compositionFor(asset).materials[0], collapsed: true, defaultColors: ['Default'], provider: 'echo' }], layers: [{ ...compositionFor(asset).layers[0], defaultOffsetX: 0, defaultOffsetY: 0, defaultColor: null, defaultPriority: 10, defaultOpacity: 1, sourceProperty: { Type: 'x' }, sourceColor: 'Default' }] } }] };
   const compact = api.compactWardrobeForStorage(raw);
   const text = JSON.stringify(compact);
-  for (const forbidden of ['updatedAt','collapsed','defaultOffsetX','defaultOffsetY','defaultColor','defaultPriority','defaultOpacity','provider','sourceColor']) assert.equal(text.includes(forbidden), false, forbidden);
+  for (const forbidden of ['updatedAt','appearanceSanitizedVersion','collapsed','defaultOffsetX','defaultOffsetY','defaultColor','defaultPriority','defaultOpacity','provider','sourceColor']) assert.equal(text.includes(forbidden), false, forbidden);
 });
 
 test('lz payload is deferred when LZString is not ready', () => {
@@ -271,16 +280,17 @@ test('remote CharacterAppearanceSortLayers result is returned unchanged', () => 
   assert.equal(result, base);
 });
 
-test('outbound bundle hook filters synthetic and legacy items only', () => {
+test('outbound bundle hook filters synthetic items and leaves formal items untouched', () => {
   const env = load();
   const hooks = {};
   env.api.installHooksForTest({ hookFunction(name, _priority, fn) { hooks[name] = fn; } });
   const normal = { Asset: makeAsset() };
   const synthetic = { Asset: makeAsset(), __coeMaterialId: 'x' };
-  const legacy = { Asset: { Name: 'CustomOutfit', Group: { Name: 'ClothOuter' } } };
-  const args = [[normal, synthetic, legacy]];
+  const otherFormalItem = { Asset: makeAsset('ClothOuter', 'OtherFormalItem') };
+  const args = [[normal, synthetic, otherFormalItem]];
   const result = hooks.ServerAppearanceBundle(args, nextArgs => nextArgs[0]);
-  assert.deepEqual(result, [normal]);
+  assert.deepEqual(result, [normal, otherFormalItem]);
+  assert.equal(env.api.statusSnapshot().outboundSyntheticFiltered, 1);
 });
 
 test('CommonDraw finally restores Appearance and AppearanceLayers when downstream throws', () => {
@@ -298,15 +308,11 @@ test('CommonDraw finally restores Appearance and AppearanceLayers when downstrea
   assert.equal(env.player.AppearanceLayers, originalLayers);
 });
 
-test('legacy inbound filter matches only exact historical group/name tuples', () => {
+test('renderer does not install an inbound Appearance bundle filter', () => {
   const env = load();
   const hooks = {};
   env.api.installHooksForTest({ hookFunction(name, _priority, fn) { hooks[name] = fn; } });
-  const exact = { Name: 'CustomOutfit', Group: 'ClothOuter' };
-  const sameNameOtherGroup = { Name: 'CustomOutfit', Group: 'Cloth' };
-  const args = [null, null, [exact, sameNameOtherGroup]];
-  const result = hooks.ServerAppearanceLoadFromBundle(args, nextArgs => nextArgs[2]);
-  assert.deepEqual(result, [sameNameOtherGroup]);
+  assert.equal(hooks.ServerAppearanceLoadFromBundle, undefined);
 });
 
 test('drawable layer predicate consistently rejects missing images and locked layers', () => {

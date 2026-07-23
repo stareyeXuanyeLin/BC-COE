@@ -1,13 +1,8 @@
   const MOD_NAME = "CustomOutfitEditor";
   const VERSION = "1.8.1";
   console.info(`[${MOD_NAME}] userscript injected`, location.href);
-  // The plugin switch is a normal outerwear slot item, so it can be found and toggled from the game's clothing UI.
-  const CONTAINER_GROUP = "ClothOuter";
-  const LEGACY_CONTAINER_GROUP = "ItemMisc";
-  const CONTAINER_ASSET = "CustomOutfit";
   const SETTINGS_KEY = "CustomOutfitEditor";
   const STORAGE_KEY = "BC.CustomOutfitEditor.v1";
-  const APPEARANCE_SANITIZED_VERSION = 1;
   const STYLE_ID = "coe-style";
   const BUTTON_ID = "coe-entry-button";
   const ROOT_ID = "coe-root";
@@ -24,7 +19,7 @@
   let editing = null;
   let editingId = null;
   let syntheticByCharacter = new WeakMap();
-  let wardrobe = { version: 4, schemes: [], equippedIds: [], appearanceSanitizedVersion: 0 };
+  let wardrobe = { version: 4, schemes: [], equippedIds: [] };
   let wardrobeReadState = { status: "absent", source: null, server: null, local: null, conflict: false };
   let persistenceBlocked = false;
   let duplicateInstance = false;
@@ -32,7 +27,6 @@
   let capabilityCache = new WeakMap();
   let runtimeMaterialState = new Map();
   let diagnostics = {
-    inboundLegacyFiltered: 0,
     outboundSyntheticFiltered: 0,
     skippedMaterials: [],
     lastWarnings: [],

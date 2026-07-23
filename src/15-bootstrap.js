@@ -27,7 +27,6 @@
       activeMaterialCount: runtimeMaterialState.size,
       skippedMaterials: diagnostics.skippedMaterials,
       lastWarnings: diagnostics.lastWarnings.slice(-20),
-      inboundLegacyFiltered: diagnostics.inboundLegacyFiltered,
       outboundSyntheticFiltered: diagnostics.outboundSyntheticFiltered,
       remoteProtocol: REMOTE_PROTOCOL,
       sharingEnabled: remotePrefs.sharingEnabled,
@@ -133,7 +132,6 @@
     try {
       const readState = loadWardrobe();
       if (readState.status === "deferred") return;
-      migrateLegacyContainerState();
       syncEquippedSchemes();
       initializeRemoteController();
       exposeAPI();
@@ -150,7 +148,7 @@
     globalThis.__COE_TEST_API__ = {
       normalizeWardrobe, compactWardrobeForStorage, packWardrobe, unpackWardrobeDetailed,
       stableInsertSyntheticLayers, coeAssetLayerSort: stableInsertSyntheticLayers, analyzeSourceAsset, sanitizePlainRecord,
-      buildSyntheticItems, buildLocalSyntheticItems, buildRemoteSyntheticItems, makeSyntheticLayers, statusSnapshot, isLegacyContainerItem,
+      buildSyntheticItems, buildLocalSyntheticItems, buildRemoteSyntheticItems, makeSyntheticLayers, statusSnapshot,
       isDrawableLayer, normalizedMaterialColors, normalizePickerColor, validateRemoteSnapshot, canonicalRemoteSnapshot, sha256Base64Url,
       parseRemoteContent, serializeRemoteEnvelope, encodeRemoteText, decodeRemoteText, splitRemoteData,
       createRemoteStore, setRemotePeer, setPendingRequest, pendingRequestFor, addRemoteChunk, expireRemoteAssemblies,

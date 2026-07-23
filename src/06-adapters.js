@@ -1,0 +1,91 @@
+  function sanitizePlainRecord(value, schemaKeys = null, depth = 0) {
+    if (value == null) return {};
+    if (depth > 2 || Object.prototype.toString.call(value) !== "[object Object]") throw new Error("property-not-plain");
+    const entries = Object.entries(value);
+    if (entries.length > 16) throw new Error("property-too-many-keys");
+    const output = {};
+    for (const [key, entry] of entries) {
+      if (!/^[A-Za-z0-9_]{1,24}$/.test(key) || (schemaKeys && !schemaKeys.has(key))) throw new Error("property-key-denied");
+      if (typeof entry === "boolean") output[key] = entry;
+      else if (Number.isInteger(entry) && Math.abs(entry) <= 9999) output[key] = entry;
+      else if (typeof entry === "string" && entry.length <= 40) output[key] = entry;
+      else throw new Error("property-value-denied");
+    }
+    return output;
+  }
+
+  function sanitizeVisualProperty(value, _analysis, asset) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    const output = {};
+    if (typeof value.Mirror === "boolean") output.Mirror = value.Mirror;
+    if (typeof value.Invert === "boolean") output.Invert = value.Invert;
+    // Type/TypeRecord only select image variants. Preserve their small primitive
+    // subset regardless of provider; malformed records simply fall back to defaults.
+    if (typeof value.Type === "string" && value.Type.length <= 40) output.Type = value.Type;
+    if (value.TypeRecord != null) {
+      try {
+        const keys = new Set((asset?.Layer || []).flatMap(layer => Array.isArray(layer.CreateLayerTypes) ? layer.CreateLayerTypes : []));
+        output.TypeRecord = sanitizePlainRecord(value.TypeRecord, keys.size ? keys : null);
+      } catch (_) { /* use the asset's default image variant */ }
+    }
+    return utf8Bytes(output) <= 1024 ? output : {};
+  }
+
+  function sanitizeVisualPoseMapping(mapping) {
+    if (!mapping || typeof mapping !== "object" || Array.isArray(mapping)) return mapping;
+    // R130 removed some legacy pose names (notably LegsOpen), while older Echo
+    // assets can still carry them. BC ignores those entries but warns on every
+    // synthetic redraw, so strip only keys the current runtime does not know.
+    if (typeof PoseRecord !== "object" || !PoseRecord) return mapping;
+    const output = {};
+    let changed = false;
+    for (const [poseName, poseType] of Object.entries(mapping)) {
+      if (Object.prototype.hasOwnProperty.call(PoseRecord, poseName)) output[poseName] = poseType;
+      else changed = true;
+    }
+    return changed ? output : mapping;
+  }
+
+  function createVisualLayerProxy(layer) {
+    const poseMapping = sanitizeVisualPoseMapping(layer?.PoseMapping);
+    return poseMapping === layer?.PoseMapping ? { ...layer } : { ...layer, PoseMapping: poseMapping };
+  }
+
+  function createVisualAssetProxy(asset) {
+    // COE is a static layer compositor, not a second formal item system. A shallow
+    // proxy keeps image-path/pose/color metadata while preventing CommonDraw from
+    // invoking the source asset's dynamic or ExtendedItem behavior on a synthetic item.
+    // LSCG treats unregistered Asset-like objects as Items and reads `.Asset.Group`;
+    // expose the source Asset through that compatibility shape without registering
+    // the proxy globally. Its opacity hook also tries to enable DynamicBeforeDraw,
+    // so inert dynamic flags deliberately ignore external writes.
+    const proxy = {
+      ...asset,
+      Archetype: null,
+      AssetArchetype: null,
+      Extended: false,
+      __coeVisualProxy: true,
+      __coeSourceAsset: asset,
+    };
+    Object.defineProperty(proxy, "Asset", { value: asset, enumerable: false, configurable: false, writable: false });
+    for (const key of ["DynamicBeforeDraw", "DynamicAfterDraw", "DynamicScriptDraw"]) {
+      Object.defineProperty(proxy, key, { enumerable: true, configurable: false, get: () => false, set: () => {} });
+    }
+    return proxy;
+  }
+
+  function buildStaticSynthetic({ character, material, refs, asset, analysis }) {
+    const drawable = refs.map(ref => ({ ref, sourceLayer: resolveSourceLayer(asset, ref) }))
+      .filter(entry => isDrawableLayer(entry.sourceLayer))
+      .sort((a, b) => (a.ref.sourceLayerIndex ?? asset.Layer.indexOf(a.sourceLayer)) - (b.ref.sourceLayerIndex ?? asset.Layer.indexOf(b.sourceLayer)));
+    if (!drawable.length) throw new Error("no-drawable-layer");
+    const visualAsset = createVisualAssetProxy(asset);
+    const item = {
+      Asset: visualAsset,
+      Color: resolveMaterialColors(material, asset, refs),
+      Property: sanitizeVisualProperty(material.sourceProperty || refs[0]?.sourceProperty || {}, analysis, asset),
+      __coeMaterialId: material.id,
+    };
+    if (utf8Bytes({ material: compactMaterialForStorage(material), refs: refs.map(compactLayerForStorage) }) > MAX_MATERIAL_BYTES) throw new Error("material-byte-budget");
+    return { material, item, drawable, analysis };
+  }

@@ -1,9 +1,8 @@
 // ==UserScript==
-// @name         Bondage Club - 自定义服装编辑器 Echo Mirror
-// @name:en      Bondage Club - Custom Outfit Editor Echo Mirror Edition
-// @namespace    https://github.com/liliMozi/openhanako
+// @name         Bondage Club - Custom Outfit Editor
+// @namespace    https://github.com/stareyeXuanyeLin/BC-COE
 // @version      1.0.0
-// @description  COE-Echo Mirror——远端视觉展示的用户交互体验优化版；基于 Remote v1.8.1 核心链路。
+// @description  制作中（WIP）。仓库公开仅便于 Tampermonkey 引用，不建议使用。
 // @author       凡尘 / 佩菈
 // @match        https://www.bondageprojects.com/R*/*
 // @match        https://bondageprojects.com/R*/*
@@ -16,8 +15,8 @@
 // @match        http://localhost:*/*
 // @run-at       document-end
 // @grant        none
-// @downloadURL  https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE-Echo-Mirror/main/dist/CustomOutfitEditorEchoMirror.user.js
-// @updateURL    https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE-Echo-Mirror/main/dist/CustomOutfitEditorEchoMirror.user.js
+// @downloadURL  https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/main/dist/CustomOutfitEditorEchoMirror.user.js
+// @updateURL    https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/main/dist/CustomOutfitEditorEchoMirror.user.js
 // ==/UserScript==
 
 (() => {

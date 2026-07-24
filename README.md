@@ -1,10 +1,9 @@
-# Custom Outfit Editor Echo Mirror（COE Mirror）
+# Bondage Club - Custom Outfit Editor（BC-COE）
 
-> **当前状态：私有开发与测试版本。** 本项目尚未正式发布，不建议未参与测试的用户安装、转载或分发。功能、兼容性和完整生命周期仍在持续验证中。
+> **⚠️ 制作中（WIP）**  
+> 此仓库设为公开仅为了 Tampermonkey 能通过 raw 链接引用脚本。插件仍在开发中，不建议安装或使用，请勿在社群中传播。使用即视为接受遇到一切未知 Bug 的风险。
 
-COE Mirror 是 [COE-Echo-Remote v1.8.1](https://github.com/liliMozi/openhanako) 的 UX 优化衍生版，当前运行时版本 **1.8.1**，面向 Bondage Club R130。它在 Remote 已验证的核心共享链路基础上，专注于**用户交互体验的打磨**，让远端服装的查看、切换和反馈更直观顺畅。
-
-> 本项目的母版 COE-Echo-Remote 已完成核心功能验证（发现、请求、分片传输、快照接收和远端静态绘制组成的核心共享链路已在 R130 双账号私人房实机跑通），留作稳定基底与功能权威。Mirror 版只做交互层优化，不修改协议、数据结构或渲染核心。
+COE 系列是 Bondage Club 的自定义服装编辑器插件。本仓库（BC-COE）为 COE-Echo-Mirror 的继任版本。
 
 ## 安装与启用
 
@@ -12,7 +11,7 @@ COE Mirror 是 [COE-Echo-Remote v1.8.1](https://github.com/liliMozi/openhanako) 
 
 安装轻量加载器，每次进入游戏时从仓库实时拉取最新代码。仓库更新后**不需要**重新安装脚本。
 
-[![Install Loader](https://img.shields.io/badge/Tampermonkey-%E2%86%95%20%E5%AE%89%E8%A3%85%E5%8A%A0%E8%BD%BD%E5%99%A8-00485B?labelColor=1c1c1c&logo=tampermonkey)](https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE-Echo-Mirror/main/dist/CustomOutfitEditorEchoMirror.loader.user.js)
+[![Install Loader](https://img.shields.io/badge/Tampermonkey-%E2%86%95%20%E5%AE%89%E8%A3%85%E5%8A%A0%E8%BD%BD%E5%99%A8-00485B?labelColor=1c1c1c&logo=tampermonkey)](https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/main/dist/CustomOutfitEditorEchoMirror.loader.user.js)
 
 点击上方按钮，Tampermonkey 弹出安装提示后确认安装。完整刷新 BC 页面即可使用。
 
@@ -27,7 +26,7 @@ COE Mirror 是 [COE-Echo-Remote v1.8.1](https://github.com/liliMozi/openhanako) 
 - 向同房间用户共享当前外观；
 - 显示同房间用户的外观。
 
-两项默认关闭且彼此独立。对方也必须安装兼容版本（Mirror 或 Remote 均可，因协议兼容）。Mirror Edition 与旧 COE/COE-Echo 共用 `CustomOutfitEditor` 运行时和衣柜身份，不能同时启用。
+两项默认关闭且彼此独立。对方也必须安装兼容版本（Mirror 或 Remote 均可，因协议兼容）。
 
 ## 会与不会共享什么
 
@@ -52,7 +51,7 @@ CharacterRefresh(character, false, false)
 
 Hidden 协议使用 `COE_RVS/1`，不产生普通聊天、耳语或动作消息。
 
-COE Mirror 通过本地衣柜、COE Remote 快照协议和绘制阶段 Synthetic Rendering 工作。它不创建、不穿戴、不同步名为 `CustomOutfit` 的正式服装项目，也不在启动时读取或迁移 `CustomComposition`。Synthetic Item 在 `ServerAppearanceBundle` 边界按 `__coeMaterialId` 过滤，不能进入服务器 Appearance Bundle。
+COE 通过本地衣柜、COE Remote 快照协议和绘制阶段 Synthetic Rendering 工作。它不创建、不穿戴、不同步名为 `CustomOutfit` 的正式服装项目，也不在启动时读取或迁移 `CustomComposition`。Synthetic Item 在 `ServerAppearanceBundle` 边界按 `__coeMaterialId` 过滤，不能进入服务器 Appearance Bundle。
 
 ## 偏好与诊断
 
@@ -74,7 +73,7 @@ BC.CustomOutfitEditor.RemotePrefs.v1.<accountId>
 - 使用原版颜色代码输入、复制与粘贴；
 - 直接使用并维护账号的 `Player.SavedColors` 常用颜色；
 - 使用原版确认、取消和还原默认操作；
-- 单层默认按实际 `ColorIndex` 恢复，整件多颜色槽默认仍由“整件默认”准确恢复；
+- 单层默认按实际 `ColorIndex` 恢复，整件多颜色槽默认仍由"整件默认"准确恢复；
 - 为 COE 打开的原版面板提供不透明背景，避免与底部编辑器透叠。
 
 实现与验收记录见 `docs/mirror-ux-round-1-color-picker.md`。
@@ -86,8 +85,6 @@ BC.CustomOutfitEditor.RemotePrefs.v1.<accountId>
 - **信息呈现**：远端用户的方案状态以更直观的方式展示（如角色名旁指示器、小图标等）
 - **错误处理**：缺失素材、断线重连等场景的用户友好提示，替代静默跳过
 - **设置界面**：更清晰的分组、说明文字和交互控件
-
-> 这些优化不会改变协议兼容性——Mirror 版仍可与 Remote 版互操作。
 
 ## 开发与验证
 
@@ -101,10 +98,10 @@ npm run check
 
 ## 文档
 
-原项目文档保留于 `docs/` 目录，Mirror 版新增/修改的文档会以 `docs/mirror-*.md` 格式存放。
+原项目文档保留于 `docs/` 目录。
 
-- `docs/mirror-ux-round-1-color-picker.md`：Mirror 第一轮颜色交互实现与验收记录
+- `docs/mirror-ux-round-1-color-picker.md`：第一轮颜色交互实现与验收记录
 - `docs/architecture.md`：模块和绘制生命周期（原版）
-- `docs/protocol-spec.md`：协议、canonical、状态机和预算（原版，Mirror 不修改）
+- `docs/protocol-spec.md`：协议、canonical、状态机和预算（原版）
 - `docs/known-limitations.md`：静态投影和兼容限制
 - `docs/multiplayer-test-plan.md`：逐阶段实机计划

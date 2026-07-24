@@ -1,6 +1,8 @@
 # Bondage Club - Custom Outfit Editor（BC-COE）
 
-COE 系列是 Bondage Club 的自定义服装编辑器插件。本仓库（BC-COE）为 COE-Echo-Mirror 的继任版本，支持本地自定义衣柜与同房间静态视觉共享。
+> **开发中提示**：本插件目前仍在开发中。当前公开发布仅为方便通过篡改猴插件拉取代码和进行测试，不建议发现本插件的用户在正式环境中使用。
+
+COE 系列是 Bondage Club 的自定义服装编辑器插件，支持本地自定义衣柜与同房间静态视觉共享。
 
 ## 安装
 

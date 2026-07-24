@@ -2,9 +2,9 @@
 // @name         Bondage Club - Custom Outfit Editor（远程加载器）
 // @name:zh-CN   Bondage Club - 自定义服装编辑器（远程加载器）
 // @namespace    https://github.com/stareyeXuanyeLin/BC-COE
-// @version      1.2.3
-// @description  Loads the Custom Outfit Editor as a Tampermonkey dependency.
-// @description:zh-CN 通过 Tampermonkey 依赖机制加载自定义服装编辑器，避免页面 CSP 拦截。
+// @version      1.2.4
+// @description  Loads the latest Custom Outfit Editor from the CDN on every page load.
+// @description:zh-CN 每次进入页面时从 CDN 拉取最新的自定义服装编辑器。
 // @author       凡尘 / 佩菈
 // @match        https://www.bondageprojects.com/R*/BondageClub*
 // @match        https://bondageprojects.com/R*/BondageClub*
@@ -22,12 +22,20 @@
 // @grant        none
 // @noframes
 // @run-at       document-end
-// @require      https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/main/dist/CustomOutfitEditorEchoMirror.user.js?v=1.2.3
 // @downloadURL  https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/main/dist/CustomOutfitEditorEchoMirror.loader.user.js
 // @updateURL    https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/main/dist/CustomOutfitEditorEchoMirror.loader.user.js
 // ==/UserScript==
 
 (function () {
     "use strict";
-    console.info("[COE Loader] v1.2.3 active; core loaded through Tampermonkey @require from GitHub Raw.");
+
+    if (window.__COE_ECHO_MIRROR_LOADER_ACTIVE__) return;
+    window.__COE_ECHO_MIRROR_LOADER_ACTIVE__ = true;
+
+    const script = document.createElement("script");
+    const timestamp = Date.now();
+    script.src = `https://cdn.jsdelivr.net/gh/stareyeXuanyeLin/BC-COE@main/dist/CustomOutfitEditorEchoMirror.user.js?timestamp=${timestamp}`;
+    script.onload = () => console.info(`[COE Loader] core loaded from CDN (cache key ${timestamp}).`);
+    script.onerror = () => console.error("[COE Loader] failed to load the core script from CDN.");
+    (document.head || document.documentElement).appendChild(script);
 })();

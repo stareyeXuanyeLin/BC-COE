@@ -8,11 +8,11 @@ COE 系列是 Bondage Club 的自定义服装编辑器插件，支持本地自�
 
 ### 加载器安装（推荐）
 
-安装轻量加载器后，Tampermonkey 会把主程序作为 `@require` 依赖加载。主程序在用户脚本阶段执行，不经过 BC 页面动态 `<script>` 注入，因此不会被页面 CSP 拦截。加载器和主程序均从 GitHub Raw 获取，避免 jsDelivr 分支缓存继续返回旧版本。仓库更新后，Tampermonkey 会按自身的脚本更新周期获取新版本；若要立即获取更新，可在 Tampermonkey 面板手动检查更新。
+安装轻量加载器后，Tampermonkey 会在每次进入 BC 页面时通过动态 `<script>` 从 CDN 拉取最新主程序。主程序 URL 带有当前时间戳，用于避免浏览器或 CDN 复用旧缓存，因此开发阶段无需等待 Tampermonkey 的版本检查。此方案依赖页面允许加载 CDN 外部脚本；如果 BC 或浏览器策略拦截动态脚本，加载器可能无法工作。仓库更新后，重新进入 BC 页面即可尝试加载最新版本。
 
-[![Install Loader](https://img.shields.io/badge/Tampermonkey-%E2%86%95%20%E5%AE%89%E8%A3%85%E5%8A%A0%E8%BD%BD%E5%99%A8-00485B?labelColor=1c1c1c&logo=tampermonkey)](https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/main/dist/CustomOutfitEditorEchoMirror.loader.user.js?v=1.2.1)
+[![Install Loader](https://img.shields.io/badge/Tampermonkey-%E2%86%95%20%E5%AE%89%E8%A3%85%E5%8A%A0%E8%BD%BD%E5%99%A8-00485B?labelColor=1c1c1c&logo=tampermonkey)](https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/main/dist/CustomOutfitEditorEchoMirror.loader.user.js?v=1.2.4)
 
-点击上方按钮，Tampermonkey 弹出安装提示后确认安装。完整刷新 BC 页面即可使用。
+点击上方按钮，Tampermonkey 弹出安装提示后确认安装。完整刷新 BC 页面即可使用；开发阶段主程序会在每次进入页面时从 CDN 重新拉取。
 
 ### 完整脚本安装
 

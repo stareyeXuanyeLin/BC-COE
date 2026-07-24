@@ -235,6 +235,12 @@
     if (typeof value.Type === "string" && value.Type.length <= 40) output.Type = value.Type;
     if (typeof value.Mirror === "boolean") output.Mirror = value.Mirror;
     if (typeof value.Invert === "boolean") output.Invert = value.Invert;
+    if (typeof value.Rotation === "number" && isFinite(value.Rotation) && value.Rotation !== 0)
+      output.Rotation = clamp(value.Rotation, -Math.PI, Math.PI);
+    if (typeof value.ScaleX === "number" && isFinite(value.ScaleX) && Math.abs(value.ScaleX - 1) > 0.001)
+      output.ScaleX = clamp(value.ScaleX, 0.25, 3.0);
+    if (typeof value.ScaleY === "number" && isFinite(value.ScaleY) && Math.abs(value.ScaleY - 1) > 0.001)
+      output.ScaleY = clamp(value.ScaleY, 0.25, 3.0);
     if (value.TypeRecord && Object.getPrototypeOf(value.TypeRecord) === Object.prototype) {
       try { output.TypeRecord = sanitizePlainRecord(value.TypeRecord); } catch (_) { /* denied */ }
     }
@@ -599,6 +605,12 @@
     const output = {};
     if (typeof value.Mirror === "boolean") output.Mirror = value.Mirror;
     if (typeof value.Invert === "boolean") output.Invert = value.Invert;
+    if (typeof value.Rotation === "number" && isFinite(value.Rotation) && value.Rotation !== 0)
+      output.Rotation = clamp(value.Rotation, -Math.PI, Math.PI);
+    if (typeof value.ScaleX === "number" && isFinite(value.ScaleX) && Math.abs(value.ScaleX - 1) > 0.001)
+      output.ScaleX = clamp(value.ScaleX, 0.25, 3.0);
+    if (typeof value.ScaleY === "number" && isFinite(value.ScaleY) && Math.abs(value.ScaleY - 1) > 0.001)
+      output.ScaleY = clamp(value.ScaleY, 0.25, 3.0);
     // Type/TypeRecord only select image variants. Preserve their small primitive
     // subset regardless of provider; malformed records simply fall back to defaults.
     if (typeof value.Type === "string" && value.Type.length <= 40) output.Type = value.Type;
@@ -737,6 +749,126 @@
       }
     }
     return groups;
+  }
+
+  // 从纹理 URL 解析出资产和图层，获取纹理原始宽高
+  function resolveTextureDimensions(url) {
+    try {
+      // BC 纹理 URL 形如 ./Assets/Female3DCG/Group/Asset/Layer.png
+      var parts = url.match(/(?:\.\/)?Assets\/([^/]+)\/([^/]+)\/(.+)\.(png|jpg)$/);
+      if (!parts) return null;
+      var family = parts[1];
+      var groupName = parts[2];
+      var rest = parts[3];
+      var slashIdx = rest.lastIndexOf("/");
+      var assetName = slashIdx >= 0 ? rest.slice(0, slashIdx) : rest;
+      var layerName = slashIdx >= 0 ? rest.slice(slashIdx + 1) : rest;
+      var asset = AssetGet(family, groupName, assetName);
+      if (!asset) return null;
+      var layer = asset.Layer ? asset.Layer.find(function(l) { return l.Name === layerName || l.Image === layerName; }) : null;
+      if (!layer) return null;
+      return { w: layer.DrawingWidth || asset.Width || 100, h: layer.DrawingHeight || asset.Height || 100 };
+    } catch (_) { return null; }
+  }
+
+  // 合成图层的变换参数渲染穿线
+  function installTransformRenderHooks() {
+    // --- ExtendedItemGetDrawingOptions hook ---
+    // 为 COE 合成 item 注入 Mirror/Invert（BC 原生消费）以及 Rotation/ScaleX/ScaleY（供 GLDrawImage 包装消费）
+    try {
+      if (typeof modApi.hookFunction === "function") {
+        modApi.hookFunction("ExtendedItemGetDrawingOptions", 5, function(args, next) {
+          var item = args[0];
+          var base = next(args) || {};
+          if (!item || !item.__coeMaterialId) return base;
+          var p = item.Property || {};
+          base.Mirror = p.Mirror === true;
+          base.Invert = p.Invert === true;
+          // 只传递非缺省值，保持 drawOptions 精简
+          if (typeof p.Rotation === "number" && p.Rotation !== 0) base.Rotation = p.Rotation;
+          if (typeof p.ScaleX === "number" && Math.abs(p.ScaleX - 1) > 0.001) base.ScaleX = p.ScaleX;
+          if (typeof p.ScaleY === "number" && Math.abs(p.ScaleY - 1) > 0.001) base.ScaleY = p.ScaleY;
+          return base;
+        });
+      }
+    } catch (_) { /* ExtendedItemGetDrawingOptions hook 不可用；Mirror/Invert 以默认行为 fallback */ }
+
+    // --- GLDrawImage 包装：加入旋转和缩放的矩阵变换 ---
+    try {
+      if (typeof GLDrawImage !== "function" || typeof m4 !== "object") return;
+      var _gldrawOriginal = GLDrawImage;
+      GLDrawImage = function coeGLDrawImage(url, gl, dstX, dstY, options, offsetX) {
+        try {
+          var opts = options || {};
+        var rotation = opts.Rotation;
+        var scaleX = opts.ScaleX;
+        var scaleY = opts.ScaleY;
+
+        // 无变换时直接走原始函数，保持零开销
+        // 条件：rotation 为 falsy（0/undefined），且 ScaleX/ScaleY 为 undefined
+        if (!rotation && scaleX == null && scaleY == null) {
+          return _gldrawOriginal.call(window, url, gl, dstX, dstY, options, offsetX);
+        }
+
+        // --- 变换绘制 ---
+        // 策略：先用原始函数完成纹理绑定/着色器选择/透明度等 uniform 设置，
+        // 然后在同一 program 下用自定义矩阵覆盖 u_matrix 并再次绘制。
+        //
+        // ⚠️ 已知限制：当图层 opacity < 1 时，二次绘制会在原始位置留下透明度残影
+        // （原始绘制 + 变换绘制各渲染一次，低透明度叠加后两个位置都可见）。
+        // 优化方案：在调用原始函数前通过 gl.colorMask 禁止颜色输出，
+        // 让原始绘制只产生副作用（纹理绑定、uniform 设置）但不输出颜色。
+        // 然后恢复 colorMask 后用自定义矩阵绘制。
+        var colorMaskSaved;
+        try {
+          colorMaskSaved = gl.getParameter(gl.COLOR_WRITEMASK);
+          gl.colorMask(false, false, false, false);
+          _gldrawOriginal.call(window, url, gl, dstX, dstY, options, offsetX);
+        } finally {
+          if (colorMaskSaved) gl.colorMask(colorMaskSaved[0], colorMaskSaved[1], colorMaskSaved[2], colorMaskSaved[3]);
+        }
+
+        // 解析纹理尺寸
+        var dim = resolveTextureDimensions(url);
+        if (!dim) return;
+        var texW = dim.w, texH = dim.h;
+        var cx = texW / 2, cy = texH / 2;
+        var sx = typeof scaleX === "number" ? scaleX : 1;
+        var sy = typeof scaleY === "number" ? scaleY : 1;
+        var off = typeof offsetX === "number" ? offsetX : 0;
+        var mirror = opts.Mirror === true;
+        var invert = opts.Invert === true;
+
+        var program = gl.getParameter(gl.CURRENT_PROGRAM);
+        if (!program) return;
+
+        // 获取 u_matrix 位置。BC 的 GLDraw 在 program 上缓存了此位置，
+        // 但用 gl.getUniformLocation 更健壮，不依赖内部实现。
+        var uMatrix = program.u_matrix || gl.getUniformLocation(program, "u_matrix");
+        if (!uMatrix) return;
+
+        var matrix = m4.orthographic(0, gl.canvas.width, gl.canvas.height, 0, -1, 1);
+        matrix = m4.translate(matrix, dstX + off + cx, dstY + cy, 0);
+        if (rotation) {
+          // BC 的 m4 库可能用 zRotate 命名，标准 gl-matrix 用 rotateZ。
+          // 优先用 zRotate（BC 原生），否则 fallback 到标准路径。
+          matrix = typeof m4.zRotate === "function"
+            ? m4.zRotate(matrix, rotation)
+            : m4.multiply(matrix, m4.zRotation(rotation));
+        }
+        matrix = m4.scale(matrix, sx, sy, 1);
+        matrix = m4.translate(matrix, -cx, -cy, 0);
+        matrix = m4.scale(matrix, (mirror ? -1 : 1) * texW, (invert ? -1 : 1) * texH, 1);
+
+        gl.uniformMatrix4fv(uMatrix, false, matrix);
+        gl.drawArrays(gl.TRIANGLES, 0, 6);
+        } catch (_coeTransformErr) {
+          // 任何异常不传播到 BC 绘制循环，降级为原始绘制
+          try { _gldrawOriginal.call(window, url, gl, dstX, dstY, options, offsetX); } catch (_e2) {}
+        }
+      };
+      GLDrawImage._coeTransformWrapped = true;
+    } catch (_) { /* GLDrawImage 包装失败，Rotation/Scale 渲染不可用 */ }
   }
 
   // Backward-compatible internal alias used by the local editor tests/API.
@@ -924,6 +1056,8 @@
         character.AppearanceLayers = originalLayers;
       }
     });
+
+    installTransformRenderHooks();
   }
 
 
@@ -1426,7 +1560,11 @@
     const group = document.createElement("section");
     group.className = `coe-material-editor${material.hidden ? " coe-hidden" : ""}${material.collapsed ? " coe-collapsed" : ""}`;
     const overallLabel = uniform ? colors[0] : "多种颜色";
-    group.innerHTML = `<div class="coe-material-editor-head"><button class="coe-collapse" type="button" data-collapse>${material.collapsed ? "▶" : "▼"}</button><div class="coe-material-identity"><strong>${escapeHTML(material.label || asset?.Description || material.sourceAsset)}</strong><span class="coe-muted">${escapeHTML(material.sourceGroup)} · ${layers.length} 层</span></div><label class="coe-overall-color">整体颜色<button type="button" class="coe-color-choice" data-overall-color title="使用游戏原版颜色选择器统一修改所有可着色颜色槽"><span class="coe-color-swatch"></span><code>${escapeHTML(overallLabel)}</code></button></label><button class="coe-btn" data-hide-material>${material.hidden ? "显示" : "隐藏"}</button><button class="coe-btn" data-reset-material>整件默认</button><button class="coe-btn coe-danger" data-remove-material>移除素材</button></div><div class="coe-material-editor-layers"></div>`;
+    var sp = material.sourceProperty || {};
+    var rotDeg = Math.round(((sp.Rotation || 0) * 180 / Math.PI) * 100) / 100;
+    var scaleXVal = typeof sp.ScaleX === "number" ? sp.ScaleX : 1;
+    var scaleYVal = typeof sp.ScaleY === "number" ? sp.ScaleY : 1;
+    group.innerHTML = `<div class="coe-material-editor-head"><button class="coe-collapse" type="button" data-collapse>${material.collapsed ? "▶" : "▼"}</button><div class="coe-material-identity"><strong>${escapeHTML(material.label || asset?.Description || material.sourceAsset)}</strong><span class="coe-muted">${escapeHTML(material.sourceGroup)} · ${layers.length} 层</span></div><label class="coe-overall-color">整体颜色<button type="button" class="coe-color-choice" data-overall-color title="使用游戏原版颜色选择器统一修改所有可着色颜色槽"><span class="coe-color-swatch"></span><code>${escapeHTML(overallLabel)}</code></button></label><button class="coe-btn" data-hide-material>${material.hidden ? "显示" : "隐藏"}</button><button class="coe-btn" data-reset-material>整件默认</button><button class="coe-btn coe-danger" data-remove-material>移除素材</button></div><div class="coe-material-transform"><label>旋转<input type="number" step="1" min="-180" max="180" data-transform="rotation" value="${rotDeg}">°</label><label>缩放 X<input type="number" step="0.05" min="0.25" max="3" data-transform="scalex" value="${scaleXVal}"></label><label>缩放 Y<input type="number" step="0.05" min="0.25" max="3" data-transform="scaley" value="${scaleYVal}"></label></div><div class="coe-material-editor-layers"></div>`;
     updateColorChoice(group.querySelector("[data-overall-color]"), overallColor, defaultHex, overallLabel);
     group.querySelector("[data-collapse]").addEventListener("click", () => {
       material.collapsed = !material.collapsed;
@@ -1461,8 +1599,39 @@
         layer.color = null;
         layer.hidden = false;
       });
+      // 重置变换参数
+      if (material.sourceProperty) {
+        delete material.sourceProperty.Rotation;
+        delete material.sourceProperty.ScaleX;
+        delete material.sourceProperty.ScaleY;
+      }
       refreshPreviewLoop();
       renderLayerList(list);
+    });
+
+    // 变换参数输入监听
+    group.querySelectorAll("[data-transform]").forEach(function(input) {
+      input.addEventListener("input", function() {
+        var raw = parseFloat(this.value);
+        if (isNaN(raw)) return;
+        if (!material.sourceProperty) material.sourceProperty = {};
+        var key = this.dataset.transform;
+        if (key === "rotation") {
+          raw = clamp(raw, -180, 180);
+          raw = Math.round(raw);
+          material.sourceProperty.Rotation = raw * Math.PI / 180;
+          this.value = raw;
+        } else if (key === "scalex") {
+          raw = clamp(raw, 0.25, 3.0);
+          material.sourceProperty.ScaleX = raw;
+          this.value = raw;
+        } else if (key === "scaley") {
+          raw = clamp(raw, 0.25, 3.0);
+          material.sourceProperty.ScaleY = raw;
+          this.value = raw;
+        }
+        refreshPreviewLoop();
+      });
     });
     group.querySelector("[data-remove-material]").addEventListener("click", () => {
       const materialId = material.id;
@@ -1487,7 +1656,7 @@
       const colorValue = displayHexColor(material.colors[colorIndex], displayHexColor(asset?.DefaultColor?.[colorIndex], "#ffffff"));
       const card = document.createElement("article");
       card.className = `coe-layer${layer.hidden ? " coe-hidden" : ""}`;
-      card.innerHTML = `<div class="coe-layer-top"><span class="coe-layer-name" title="${escapeHTML(`${layer.sourceGroup}/${layer.sourceAsset}/${layerName}`)}">${escapeHTML(layerName)}</span>${sourceLayer?.ColorGroup ? `<span class="coe-badge">颜色组：${escapeHTML(sourceLayer.ColorGroup)}</span>` : ""}<button type="button" class="coe-btn" data-hide>${layer.hidden ? "显示" : "隐藏"}</button><button type="button" class="coe-btn" data-reset>本层默认</button><button type="button" class="coe-btn coe-danger" data-remove>清除</button></div><div class="coe-controls"><label>图层位置<input type="number" min="-99" max="99" step="1" data-key="priority" value="${layer.priority}"></label><label>偏移 X<input type="number" min="-1200" max="1200" step="1" data-key="offsetX" value="${layer.offsetX}"></label><label>偏移 Y<input type="number" min="-1200" max="1200" step="1" data-key="offsetY" value="${layer.offsetY}"></label><label>透明度<input type="number" min="0" max="1" step="0.05" data-key="opacity" value="${layer.opacity}"></label><label>图层颜色<button type="button" class="coe-color-choice" data-layer-color="${layerIndex}" ${canColor ? "" : "disabled"} title="${canColor ? `使用游戏原版颜色选择器编辑颜色槽 ${colorIndex}` : "原版将此图层标记为不可着色"}"><span class="coe-color-swatch"></span><code>${escapeHTML(material.colors[colorIndex] || "Default")}</code></button></label></div>`;
+      card.innerHTML = `<div class="coe-layer-top"><span class="coe-layer-name" title="${escapeHTML(`${layer.sourceGroup}/${layer.sourceAsset}/${layerName}`)}">${escapeHTML(layerName)}</span>${sourceLayer?.ColorGroup ? `<span class="coe-badge">颜色组：${escapeHTML(sourceLayer.ColorGroup)}</span>` : ""}<button type="button" class="coe-btn" data-hide>${layer.hidden ? "显示" : "隐藏"}</button><button type="button" class="coe-btn" data-copy>复制</button><button type="button" class="coe-btn" data-reset>本层默认</button><button type="button" class="coe-btn coe-danger" data-remove>清除</button></div><div class="coe-controls"><label>图层位置<input type="number" min="-99" max="99" step="1" data-key="priority" value="${layer.priority}"></label><label>偏移 X<input type="number" min="-1200" max="1200" step="1" data-key="offsetX" value="${layer.offsetX}"></label><label>偏移 Y<input type="number" min="-1200" max="1200" step="1" data-key="offsetY" value="${layer.offsetY}"></label><label>透明度<input type="number" min="0" max="1" step="0.05" data-key="opacity" value="${layer.opacity}"></label><label>图层颜色<button type="button" class="coe-color-choice" data-layer-color="${layerIndex}" ${canColor ? "" : "disabled"} title="${canColor ? `使用游戏原版颜色选择器编辑颜色槽 ${colorIndex}` : "原版将此图层标记为不可着色"}"><span class="coe-color-swatch"></span><code>${escapeHTML(material.colors[colorIndex] || "Default")}</code></button></label></div>`;
       updateColorChoice(card.querySelector("[data-layer-color]"), material.colors[colorIndex] || "Default", colorValue);
       card.querySelector("[data-hide]").addEventListener("click", () => {
         layer.hidden = !layer.hidden;
@@ -1502,6 +1671,14 @@
         layer.hidden = false;
         layer.color = null;
         if (canColor) material.colors[colorIndex] = material.defaultColors?.[colorIndex] || asset?.DefaultColor?.[colorIndex] || "Default";
+        refreshPreviewLoop();
+        renderLayerList(list);
+      });
+      card.querySelector("[data-copy]").addEventListener("click", () => {
+        var copy = Object.assign({}, layer);
+        copy.layerLabel = (layer.layerLabel || getLayerLabelByRef(layer) || layer.sourceLayer || "默认图层") + "_copy";
+        var idx = editing.layers.indexOf(layer);
+        editing.layers.splice(idx + 1, 0, copy);
         refreshPreviewLoop();
         renderLayerList(list);
       });
@@ -1705,7 +1882,7 @@
 
 
 
-  const REMOTE_PROTOCOL = "COE_RVS/1";
+  const REMOTE_PROTOCOL = "COE_RVS/2";
   const REMOTE_PREFIX = `${REMOTE_PROTOCOL}|`;
   const REMOTE_LIMITS = Object.freeze({
     content: 1800, chunkData: 1200, chunks: 32, snapshotBytes: 32768,
@@ -1767,7 +1944,7 @@
   function validateRemoteProperty(value) {
     if (value == null) return undefined;
     if (!remotePlainObject(value)) throw new Error("snapshot-property");
-    const allowed = new Set(["Type", "Mirror", "Invert", "TypeRecord"]);
+    const allowed = new Set(["Type", "Mirror", "Invert", "Rotation", "ScaleX", "ScaleY", "TypeRecord"]);
     const output = {};
     for (const key of Object.keys(value)) {
       if (!allowed.has(key) || POLLUTION_KEYS.has(key)) throw new Error("snapshot-property-key");
@@ -1780,6 +1957,18 @@
     if (value.Invert != null) {
       if (typeof value.Invert !== "boolean") throw new Error("snapshot-property-invert");
       output.Invert = value.Invert;
+    }
+    if (value.Rotation != null) {
+      if (typeof value.Rotation !== "number" || !Number.isFinite(value.Rotation)) throw new Error("snapshot-property-rotation");
+      output.Rotation = normalizeRemoteNumber(value.Rotation, -Math.PI, Math.PI);
+    }
+    if (value.ScaleX != null) {
+      if (typeof value.ScaleX !== "number" || !Number.isFinite(value.ScaleX)) throw new Error("snapshot-property-scalex");
+      output.ScaleX = normalizeRemoteNumber(value.ScaleX, 0.25, 3.0);
+    }
+    if (value.ScaleY != null) {
+      if (typeof value.ScaleY !== "number" || !Number.isFinite(value.ScaleY)) throw new Error("snapshot-property-scaley");
+      output.ScaleY = normalizeRemoteNumber(value.ScaleY, 0.25, 3.0);
     }
     if (value.TypeRecord != null) output.TypeRecord = sanitizePlainRecord(value.TypeRecord);
     return Object.keys(output).length ? output : undefined;

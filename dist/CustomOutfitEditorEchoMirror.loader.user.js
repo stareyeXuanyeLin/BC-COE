@@ -22,8 +22,8 @@
 // @grant        none
 // @noframes
 // @run-at       document-end
-// @downloadURL  https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/main/dist/CustomOutfitEditorEchoMirror.loader.user.js
-// @updateURL    https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/main/dist/CustomOutfitEditorEchoMirror.loader.user.js
+// @downloadURL  https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/layer-transform/dist/CustomOutfitEditorEchoMirror.loader.user.js
+// @updateURL    https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/layer-transform/dist/CustomOutfitEditorEchoMirror.loader.user.js
 // ==/UserScript==
 
 (function () {
@@ -34,7 +34,7 @@
 
     const script = document.createElement("script");
     const timestamp = Date.now();
-    script.src = `https://cdn.jsdelivr.net/gh/stareyeXuanyeLin/BC-COE@main/dist/CustomOutfitEditorEchoMirror.user.js?timestamp=${timestamp}`;
+    script.src = `https://cdn.jsdelivr.net/gh/stareyeXuanyeLin/BC-COE@layer-transform/dist/CustomOutfitEditorEchoMirror.user.js?timestamp=${timestamp}`;
     script.onload = () => console.info(`[COE Loader] core loaded from CDN (cache key ${timestamp}).`);
     script.onerror = () => console.error("[COE Loader] failed to load the core script from CDN.");
     (document.head || document.documentElement).appendChild(script);

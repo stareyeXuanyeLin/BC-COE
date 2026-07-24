@@ -8,15 +8,17 @@ COE Mirror 是 [COE-Echo-Remote v1.8.1](https://github.com/liliMozi/openhanako) 
 
 ## 安装与启用
 
-### 一键安装（推荐）
+### 加载器安装（推荐）
 
-[![Install with Tampermonkey](https://img.shields.io/badge/Tampermonkey-%E2%86%95%20%E4%B8%80%E9%94%AE%E5%AE%89%E8%A3%85-00485B?labelColor=1c1c1c&logo=tampermonkey)](https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE-Echo-Mirror/main/dist/CustomOutfitEditorEchoMirror.user.js)
+安装轻量加载器，每次进入游戏时从仓库实时拉取最新代码。仓库更新后**不需要**重新安装脚本。
 
-点击上方按钮，Tampermonkey 会自动弹出安装提示。安装完成后完整刷新 BC 页面即可使用。
+[![Install Loader](https://img.shields.io/badge/Tampermonkey-%E2%86%95%20%E5%AE%89%E8%A3%85%E5%8A%A0%E8%BD%BD%E5%99%A8-00485B?labelColor=1c1c1c&logo=tampermonkey)](https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE-Echo-Mirror/main/dist/CustomOutfitEditorEchoMirror.loader.user.js)
 
-### 手动安装
+点击上方按钮，Tampermonkey 弹出安装提示后确认安装。完整刷新 BC 页面即可使用。
 
-将 `dist/CustomOutfitEditorEchoMirror.user.js` 拖拽到浏览器 Tampermonkey 管理面板，或手动新建脚本并粘贴全部代码。
+### 完整脚本安装
+
+将 `dist/CustomOutfitEditorEchoMirror.user.js` 拖拽到浏览器 Tampermonkey 管理面板，或手动新建脚本并粘贴全部代码。注意：完整安装方式每次更新都需要重新安装此文件。
 
 ### 启用方式
 

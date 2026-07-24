@@ -4,6 +4,14 @@
 // @version      1.0.0
 // @description  轻量加载器，从仓库实时加载完整代码。仓库更新后无需重新安装此脚本。
 // @author       凡尘 / 佩菈
+// @match        https://www.bondageprojects.com/R*/BondageClub*
+// @match        https://bondageprojects.com/R*/BondageClub*
+// @match        https://www.bondageprojects.elementfx.com/R*/BondageClub*
+// @match        https://bondageprojects.elementfx.com/R*/BondageClub*
+// @match        https://bondage-europe.com/R*/BondageClub*
+// @match        https://www.bondage-europe.com/R*/BondageClub*
+// @match        https://bondage-asia.com/club/R*/BondageClub*
+// @match        https://www.bondage-asia.com/club/R*/BondageClub*
 // @include      /^https:\/\/(www\.)?bondageprojects\.elementfx\.com\/R\d+\/(BondageClub|\d+)(\/((index|\d+)\.html)?)?$/
 // @include      /^https:\/\/(www\.)?bondageprojects\.com\/R\d+\/(BondageClub|\d+)(\/((index|\d+)\.html)?)?$/
 // @include      /^https:\/\/(www\.)?bondage-europe\.com\/R\d+\/(BondageClub|\d+)(\/((index|\d+)\.html)?)?$/
@@ -17,6 +25,6 @@
     "use strict";
     const script = document.createElement("script");
     const timestamp = new Date().getTime();
-    script.src = "https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/main/dist/CustomOutfitEditorEchoMirror.user.js?t=" + timestamp;
+    script.src = "https://cdn.jsdelivr.net/gh/stareyeXuanyeLin/BC-COE@main/dist/CustomOutfitEditorEchoMirror.user.js?t=" + timestamp;
     document.head.appendChild(script);
 })();

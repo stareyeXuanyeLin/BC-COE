@@ -197,8 +197,7 @@
       const character = args[0];
       const baseLayers = next(args) || [];
       if (isLocalPlayer(character)) {
-        let workingBase = baseLayers;
-        if (uiMode === "editor") workingBase = baseLayers.filter(layer => !isEditorRemovableAsset(layer?.Asset));
+        const workingBase = baseLayers;
         const groups = buildLocalSyntheticItems(character);
         syntheticByCharacter.set(character, groups);
         if (!groups.length) return workingBase;

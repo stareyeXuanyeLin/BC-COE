@@ -64,7 +64,7 @@
     loadWardrobe();
     ensureEquippedIds();
     syncEquippedSchemes();
-    const body = rootShell("自定义服装衣柜", '<button class="coe-btn coe-primary" data-action="new">＋ 新建方案</button><button class="coe-btn" data-action="unequip-all">全部卸下</button>');
+    const body = rootShell("自定义服装衣柜", '<button class="coe-btn coe-primary" data-action="new">＋ 新建方案</button><button class="coe-btn" data-action="unequip-all">全部卸下</button><button class="coe-btn" data-action="close">关闭</button>');
     uiMode = "wardrobe";
     const root = document.getElementById(ROOT_ID);
     root.classList.add("coe-wardrobe-root");

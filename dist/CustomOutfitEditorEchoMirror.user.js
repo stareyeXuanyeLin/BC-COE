@@ -871,8 +871,7 @@
       const character = args[0];
       const baseLayers = next(args) || [];
       if (isLocalPlayer(character)) {
-        let workingBase = baseLayers;
-        if (uiMode === "editor") workingBase = baseLayers.filter(layer => !isEditorRemovableAsset(layer?.Asset));
+        const workingBase = baseLayers;
         const groups = buildLocalSyntheticItems(character);
         syntheticByCharacter.set(character, groups);
         if (!groups.length) return workingBase;
@@ -948,7 +947,8 @@
 
   function updateEntryButton() {
     if (!initialized || !document.body) return;
-    const shouldShow = globalThis.CurrentScreen === "Appearance" && !document.getElementById(ROOT_ID);
+    const isEditingSelf = !globalThis.CharacterAppearanceSelection || globalThis.CharacterAppearanceSelection === globalThis.Player;
+    const shouldShow = globalThis.CurrentScreen === "Appearance" && !document.getElementById(ROOT_ID) && isEditingSelf;
     let button = document.getElementById(BUTTON_ID);
     if (shouldShow && !button) {
       button = document.createElement("button");
@@ -967,7 +967,7 @@
     const root = document.createElement("div");
     root.id = ROOT_ID;
     root.dataset.coeVersion = VERSION;
-    root.innerHTML = `<section class="coe-panel"><header class="coe-head"><div class="coe-brand"><span class="coe-brand-mark">✦</span><div><h2>${escapeHTML(title)}</h2><span class="coe-build">${MOD_NAME} v${escapeHTML(VERSION)} · Appearance Workspace</span></div></div><div class="coe-actions">${actions}<button class="coe-btn" data-action="close">关闭</button></div></header><main class="coe-body"></main></section>`;
+    root.innerHTML = `<section class="coe-panel"><header class="coe-head"><div class="coe-brand"><span class="coe-brand-mark">✦</span><div><h2>${escapeHTML(title)}</h2><span class="coe-build">${MOD_NAME} v${escapeHTML(VERSION)} · Appearance Workspace</span></div></div><div class="coe-actions">${actions}</div></header><main class="coe-body"></main></section>`;
     root.addEventListener("mousedown", event => event.stopPropagation());
     root.addEventListener("mouseup", event => event.stopPropagation());
     root.addEventListener("click", event => {
@@ -1115,7 +1115,7 @@
     loadWardrobe();
     ensureEquippedIds();
     syncEquippedSchemes();
-    const body = rootShell("自定义服装衣柜", '<button class="coe-btn coe-primary" data-action="new">＋ 新建方案</button><button class="coe-btn" data-action="unequip-all">全部卸下</button>');
+    const body = rootShell("自定义服装衣柜", '<button class="coe-btn coe-primary" data-action="new">＋ 新建方案</button><button class="coe-btn" data-action="unequip-all">全部卸下</button><button class="coe-btn" data-action="close">关闭</button>');
     uiMode = "wardrobe";
     const root = document.getElementById(ROOT_ID);
     root.classList.add("coe-wardrobe-root");

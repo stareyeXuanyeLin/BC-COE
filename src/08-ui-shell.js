@@ -17,7 +17,8 @@
 
   function updateEntryButton() {
     if (!initialized || !document.body) return;
-    const shouldShow = globalThis.CurrentScreen === "Appearance" && !document.getElementById(ROOT_ID);
+    const isEditingSelf = !globalThis.CharacterAppearanceSelection || globalThis.CharacterAppearanceSelection === globalThis.Player;
+    const shouldShow = globalThis.CurrentScreen === "Appearance" && !document.getElementById(ROOT_ID) && isEditingSelf;
     let button = document.getElementById(BUTTON_ID);
     if (shouldShow && !button) {
       button = document.createElement("button");
@@ -36,7 +37,7 @@
     const root = document.createElement("div");
     root.id = ROOT_ID;
     root.dataset.coeVersion = VERSION;
-    root.innerHTML = `<section class="coe-panel"><header class="coe-head"><div class="coe-brand"><span class="coe-brand-mark">✦</span><div><h2>${escapeHTML(title)}</h2><span class="coe-build">${MOD_NAME} v${escapeHTML(VERSION)} · Appearance Workspace</span></div></div><div class="coe-actions">${actions}<button class="coe-btn" data-action="close">关闭</button></div></header><main class="coe-body"></main></section>`;
+    root.innerHTML = `<section class="coe-panel"><header class="coe-head"><div class="coe-brand"><span class="coe-brand-mark">✦</span><div><h2>${escapeHTML(title)}</h2><span class="coe-build">${MOD_NAME} v${escapeHTML(VERSION)} · Appearance Workspace</span></div></div><div class="coe-actions">${actions}</div></header><main class="coe-body"></main></section>`;
     root.addEventListener("mousedown", event => event.stopPropagation());
     root.addEventListener("mouseup", event => event.stopPropagation());
     root.addEventListener("click", event => {

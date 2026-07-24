@@ -2,7 +2,7 @@
 // @name         Bondage Club - Custom Outfit Editor（远程加载器）
 // @name:zh-CN   Bondage Club - 自定义服装编辑器（远程加载器）
 // @namespace    https://github.com/stareyeXuanyeLin/BC-COE
-// @version      1.2.0
+// @version      1.2.1
 // @description  Loads the Custom Outfit Editor as a Tampermonkey dependency.
 // @description:zh-CN 通过 Tampermonkey 依赖机制加载自定义服装编辑器，避免页面 CSP 拦截。
 // @author       凡尘 / 佩菈
@@ -22,12 +22,12 @@
 // @grant        none
 // @noframes
 // @run-at       document-end
-// @require      https://cdn.jsdelivr.net/gh/stareyeXuanyeLin/BC-COE@main/dist/CustomOutfitEditorEchoMirror.user.js
-// @downloadURL  https://cdn.jsdelivr.net/gh/stareyeXuanyeLin/BC-COE@main/dist/CustomOutfitEditorEchoMirror.loader.user.js
-// @updateURL    https://cdn.jsdelivr.net/gh/stareyeXuanyeLin/BC-COE@main/dist/CustomOutfitEditorEchoMirror.loader.user.js
+// @require      https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/main/dist/CustomOutfitEditorEchoMirror.user.js
+// @downloadURL  https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/main/dist/CustomOutfitEditorEchoMirror.loader.user.js
+// @updateURL    https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/main/dist/CustomOutfitEditorEchoMirror.loader.user.js
 // ==/UserScript==
 
 (function () {
     "use strict";
-    console.info("[COE Loader] v1.2.0 active; core loaded through Tampermonkey @require.");
+    console.info("[COE Loader] v1.2.1 active; core loaded through Tampermonkey @require from GitHub Raw.");
 })();

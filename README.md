@@ -6,13 +6,15 @@ COE 系列是 Bondage Club 的自定义服装编辑器插件。本仓库（BC-CO
 
 ### 加载器安装（推荐）
 
-安装轻量加载器后，每次进入游戏时自动从 CDN 加载最新代码。仓库更新后**不需要**重新安装脚本。
+安装轻量加载器后，Tampermonkey 会把主程序作为 `@require` 依赖加载。主程序在用户脚本阶段执行，不经过 BC 页面动态 `<script>` 注入，因此不会被页面 CSP 拦截。仓库更新后，Tampermonkey 会按自身的脚本更新周期获取新版本；若要立即获取更新，可在 Tampermonkey 面板手动检查更新。
 
-[![Install Loader](https://img.shields.io/badge/Tampermonkey-%E2%86%95%20%E5%AE%89%E8%A3%85%E5%8A%A0%E8%BD%BD%E5%99%A8-00485B?labelColor=1c1c1c&logo=tampermonkey)](https://cdn.jsdelivr.net/gh/stareyeXuanyeLin/BC-COE@main/dist/CustomOutfitEditorEchoMirror.loader.user.js)
+[![Install Loader](https://img.shields.io/badge/Tampermonkey-%E2%86%95%20%E5%AE%89%E8%A3%85%E5%8A%A0%E8%BD%BD%E5%99%A8-00485B?labelColor=1c1c1c&logo=tampermonkey)](https://cdn.jsdelivr.net/gh/stareyeXuanyeLin/BC-COE@main/dist/CustomOutfitEditorEchoMirror.loader.user.js?v=1.2.0)
 
 点击上方按钮，Tampermonkey 弹出安装提示后确认安装。完整刷新 BC 页面即可使用。
 
 ### 完整脚本安装
+
+如果加载器已经安装过旧版本，请先在 Tampermonkey 面板中删除旧的“远程加载器”，再通过上方按钮重新安装 1.2.0。旧版加载器曾经使用 `raw.githubusercontent.com` 动态注入主程序，可能因 MIME 类型或页面 CSP 而完全不执行。
 
 将 `dist/CustomOutfitEditorEchoMirror.user.js` 拖拽到浏览器 Tampermonkey 管理面板，或手动新建脚本并粘贴全部代码。采用此方式时，每次更新需要重新安装此文件。
 

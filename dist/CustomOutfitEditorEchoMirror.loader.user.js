@@ -2,9 +2,9 @@
 // @name         Bondage Club - Custom Outfit Editor（远程加载器）
 // @name:zh-CN   Bondage Club - 自定义服装编辑器（远程加载器）
 // @namespace    https://github.com/stareyeXuanyeLin/BC-COE
-// @version      1.1.0
-// @description  Always loads the latest Custom Outfit Editor from CDN. Update core code without reinstalling the loader.
-// @description:zh-CN 从 CDN 自动加载最新版自定义服装编辑器；更新核心代码时无需重新安装本加载器。
+// @version      1.2.0
+// @description  Loads the Custom Outfit Editor as a Tampermonkey dependency.
+// @description:zh-CN 通过 Tampermonkey 依赖机制加载自定义服装编辑器，避免页面 CSP 拦截。
 // @author       凡尘 / 佩菈
 // @match        https://www.bondageprojects.com/R*/BondageClub*
 // @match        https://bondageprojects.com/R*/BondageClub*
@@ -20,32 +20,14 @@
 // @include      /^https:\/\/(www\.)?bondage-asia\.com\/club\/R\d+\/(BondageClub|\d+)(\/((index|\d+)\.html)?)?$/
 // @include      /^https?:\/\/localhost:\d+\/(BondageClub|\d+)(\/((index|\d+)\.html)?)?$/
 // @grant        none
+// @noframes
 // @run-at       document-end
+// @require      https://cdn.jsdelivr.net/gh/stareyeXuanyeLin/BC-COE@main/dist/CustomOutfitEditorEchoMirror.user.js
+// @downloadURL  https://cdn.jsdelivr.net/gh/stareyeXuanyeLin/BC-COE@main/dist/CustomOutfitEditorEchoMirror.loader.user.js
+// @updateURL    https://cdn.jsdelivr.net/gh/stareyeXuanyeLin/BC-COE@main/dist/CustomOutfitEditorEchoMirror.loader.user.js
 // ==/UserScript==
 
 (function () {
     "use strict";
-
-    const SCRIPT_ID = "coe-echo-mirror-remote-script";
-    const REMOTE_URL = "https://cdn.jsdelivr.net/gh/stareyeXuanyeLin/BC-COE@main/dist/CustomOutfitEditorEchoMirror.user.js";
-
-    if (document.getElementById(SCRIPT_ID)) {
-        console.info("[COE Loader] Remote script is already loading or loaded.");
-        return;
-    }
-
-    const script = document.createElement("script");
-    script.id = SCRIPT_ID;
-    script.async = true;
-    script.src = REMOTE_URL + "?t=" + Date.now();
-
-    script.addEventListener("load", function () {
-        console.info("[COE Loader] Latest patch loaded from CDN.");
-    }, { once: true });
-
-    script.addEventListener("error", function () {
-        console.error("[COE Loader] Failed to load: " + REMOTE_URL);
-    }, { once: true });
-
-    (document.head || document.documentElement).appendChild(script);
+    console.info("[COE Loader] v1.2.0 active; core loaded through Tampermonkey @require.");
 })();

@@ -140,6 +140,12 @@
     if (typeof value.Type === "string" && value.Type.length <= 40) output.Type = value.Type;
     if (typeof value.Mirror === "boolean") output.Mirror = value.Mirror;
     if (typeof value.Invert === "boolean") output.Invert = value.Invert;
+    if (typeof value.Rotation === "number" && isFinite(value.Rotation) && value.Rotation !== 0)
+      output.Rotation = clamp(value.Rotation, -Math.PI, Math.PI);
+    if (typeof value.ScaleX === "number" && isFinite(value.ScaleX) && Math.abs(value.ScaleX - 1) > 0.001)
+      output.ScaleX = clamp(value.ScaleX, 0.25, 3.0);
+    if (typeof value.ScaleY === "number" && isFinite(value.ScaleY) && Math.abs(value.ScaleY - 1) > 0.001)
+      output.ScaleY = clamp(value.ScaleY, 0.25, 3.0);
     if (value.TypeRecord && Object.getPrototypeOf(value.TypeRecord) === Object.prototype) {
       try { output.TypeRecord = sanitizePlainRecord(value.TypeRecord); } catch (_) { /* denied */ }
     }

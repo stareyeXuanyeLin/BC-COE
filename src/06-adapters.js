@@ -19,6 +19,12 @@
     const output = {};
     if (typeof value.Mirror === "boolean") output.Mirror = value.Mirror;
     if (typeof value.Invert === "boolean") output.Invert = value.Invert;
+    if (typeof value.Rotation === "number" && isFinite(value.Rotation) && value.Rotation !== 0)
+      output.Rotation = clamp(value.Rotation, -Math.PI, Math.PI);
+    if (typeof value.ScaleX === "number" && isFinite(value.ScaleX) && Math.abs(value.ScaleX - 1) > 0.001)
+      output.ScaleX = clamp(value.ScaleX, 0.25, 3.0);
+    if (typeof value.ScaleY === "number" && isFinite(value.ScaleY) && Math.abs(value.ScaleY - 1) > 0.001)
+      output.ScaleY = clamp(value.ScaleY, 0.25, 3.0);
     // Type/TypeRecord only select image variants. Preserve their small primitive
     // subset regardless of provider; malformed records simply fall back to defaults.
     if (typeof value.Type === "string" && value.Type.length <= 40) output.Type = value.Type;

@@ -226,7 +226,11 @@
     const group = document.createElement("section");
     group.className = `coe-material-editor${material.hidden ? " coe-hidden" : ""}${material.collapsed ? " coe-collapsed" : ""}`;
     const overallLabel = uniform ? colors[0] : "多种颜色";
-    group.innerHTML = `<div class="coe-material-editor-head"><button class="coe-collapse" type="button" data-collapse>${material.collapsed ? "▶" : "▼"}</button><div class="coe-material-identity"><strong>${escapeHTML(material.label || asset?.Description || material.sourceAsset)}</strong><span class="coe-muted">${escapeHTML(material.sourceGroup)} · ${layers.length} 层</span></div><label class="coe-overall-color">整体颜色<button type="button" class="coe-color-choice" data-overall-color title="使用游戏原版颜色选择器统一修改所有可着色颜色槽"><span class="coe-color-swatch"></span><code>${escapeHTML(overallLabel)}</code></button></label><button class="coe-btn" data-hide-material>${material.hidden ? "显示" : "隐藏"}</button><button class="coe-btn" data-reset-material>整件默认</button><button class="coe-btn coe-danger" data-remove-material>移除素材</button></div><div class="coe-material-editor-layers"></div>`;
+    var sp = material.sourceProperty || {};
+    var rotDeg = Math.round(((sp.Rotation || 0) * 180 / Math.PI) * 100) / 100;
+    var scaleXVal = typeof sp.ScaleX === "number" ? sp.ScaleX : 1;
+    var scaleYVal = typeof sp.ScaleY === "number" ? sp.ScaleY : 1;
+    group.innerHTML = `<div class="coe-material-editor-head"><button class="coe-collapse" type="button" data-collapse>${material.collapsed ? "▶" : "▼"}</button><div class="coe-material-identity"><strong>${escapeHTML(material.label || asset?.Description || material.sourceAsset)}</strong><span class="coe-muted">${escapeHTML(material.sourceGroup)} · ${layers.length} 层</span></div><label class="coe-overall-color">整体颜色<button type="button" class="coe-color-choice" data-overall-color title="使用游戏原版颜色选择器统一修改所有可着色颜色槽"><span class="coe-color-swatch"></span><code>${escapeHTML(overallLabel)}</code></button></label><button class="coe-btn" data-hide-material>${material.hidden ? "显示" : "隐藏"}</button><button class="coe-btn" data-reset-material>整件默认</button><button class="coe-btn coe-danger" data-remove-material>移除素材</button></div><div class="coe-material-transform"><label>旋转<input type="number" step="1" min="-180" max="180" data-transform="rotation" value="${rotDeg}">°</label><label>缩放 X<input type="number" step="0.05" min="0.25" max="3" data-transform="scalex" value="${scaleXVal}"></label><label>缩放 Y<input type="number" step="0.05" min="0.25" max="3" data-transform="scaley" value="${scaleYVal}"></label></div><div class="coe-material-editor-layers"></div>`;
     updateColorChoice(group.querySelector("[data-overall-color]"), overallColor, defaultHex, overallLabel);
     group.querySelector("[data-collapse]").addEventListener("click", () => {
       material.collapsed = !material.collapsed;
@@ -261,8 +265,39 @@
         layer.color = null;
         layer.hidden = false;
       });
+      // 重置变换参数
+      if (material.sourceProperty) {
+        delete material.sourceProperty.Rotation;
+        delete material.sourceProperty.ScaleX;
+        delete material.sourceProperty.ScaleY;
+      }
       refreshPreviewLoop();
       renderLayerList(list);
+    });
+
+    // 变换参数输入监听
+    group.querySelectorAll("[data-transform]").forEach(function(input) {
+      input.addEventListener("input", function() {
+        var raw = parseFloat(this.value);
+        if (isNaN(raw)) return;
+        if (!material.sourceProperty) material.sourceProperty = {};
+        var key = this.dataset.transform;
+        if (key === "rotation") {
+          raw = clamp(raw, -180, 180);
+          raw = Math.round(raw);
+          material.sourceProperty.Rotation = raw * Math.PI / 180;
+          this.value = raw;
+        } else if (key === "scalex") {
+          raw = clamp(raw, 0.25, 3.0);
+          material.sourceProperty.ScaleX = raw;
+          this.value = raw;
+        } else if (key === "scaley") {
+          raw = clamp(raw, 0.25, 3.0);
+          material.sourceProperty.ScaleY = raw;
+          this.value = raw;
+        }
+        refreshPreviewLoop();
+      });
     });
     group.querySelector("[data-remove-material]").addEventListener("click", () => {
       const materialId = material.id;
@@ -287,7 +322,7 @@
       const colorValue = displayHexColor(material.colors[colorIndex], displayHexColor(asset?.DefaultColor?.[colorIndex], "#ffffff"));
       const card = document.createElement("article");
       card.className = `coe-layer${layer.hidden ? " coe-hidden" : ""}`;
-      card.innerHTML = `<div class="coe-layer-top"><span class="coe-layer-name" title="${escapeHTML(`${layer.sourceGroup}/${layer.sourceAsset}/${layerName}`)}">${escapeHTML(layerName)}</span>${sourceLayer?.ColorGroup ? `<span class="coe-badge">颜色组：${escapeHTML(sourceLayer.ColorGroup)}</span>` : ""}<button type="button" class="coe-btn" data-hide>${layer.hidden ? "显示" : "隐藏"}</button><button type="button" class="coe-btn" data-reset>本层默认</button><button type="button" class="coe-btn coe-danger" data-remove>清除</button></div><div class="coe-controls"><label>图层位置<input type="number" min="-99" max="99" step="1" data-key="priority" value="${layer.priority}"></label><label>偏移 X<input type="number" min="-1200" max="1200" step="1" data-key="offsetX" value="${layer.offsetX}"></label><label>偏移 Y<input type="number" min="-1200" max="1200" step="1" data-key="offsetY" value="${layer.offsetY}"></label><label>透明度<input type="number" min="0" max="1" step="0.05" data-key="opacity" value="${layer.opacity}"></label><label>图层颜色<button type="button" class="coe-color-choice" data-layer-color="${layerIndex}" ${canColor ? "" : "disabled"} title="${canColor ? `使用游戏原版颜色选择器编辑颜色槽 ${colorIndex}` : "原版将此图层标记为不可着色"}"><span class="coe-color-swatch"></span><code>${escapeHTML(material.colors[colorIndex] || "Default")}</code></button></label></div>`;
+      card.innerHTML = `<div class="coe-layer-top"><span class="coe-layer-name" title="${escapeHTML(`${layer.sourceGroup}/${layer.sourceAsset}/${layerName}`)}">${escapeHTML(layerName)}</span>${sourceLayer?.ColorGroup ? `<span class="coe-badge">颜色组：${escapeHTML(sourceLayer.ColorGroup)}</span>` : ""}<button type="button" class="coe-btn" data-hide>${layer.hidden ? "显示" : "隐藏"}</button><button type="button" class="coe-btn" data-copy>复制</button><button type="button" class="coe-btn" data-reset>本层默认</button><button type="button" class="coe-btn coe-danger" data-remove>清除</button></div><div class="coe-controls"><label>图层位置<input type="number" min="-99" max="99" step="1" data-key="priority" value="${layer.priority}"></label><label>偏移 X<input type="number" min="-1200" max="1200" step="1" data-key="offsetX" value="${layer.offsetX}"></label><label>偏移 Y<input type="number" min="-1200" max="1200" step="1" data-key="offsetY" value="${layer.offsetY}"></label><label>透明度<input type="number" min="0" max="1" step="0.05" data-key="opacity" value="${layer.opacity}"></label><label>图层颜色<button type="button" class="coe-color-choice" data-layer-color="${layerIndex}" ${canColor ? "" : "disabled"} title="${canColor ? `使用游戏原版颜色选择器编辑颜色槽 ${colorIndex}` : "原版将此图层标记为不可着色"}"><span class="coe-color-swatch"></span><code>${escapeHTML(material.colors[colorIndex] || "Default")}</code></button></label></div>`;
       updateColorChoice(card.querySelector("[data-layer-color]"), material.colors[colorIndex] || "Default", colorValue);
       card.querySelector("[data-hide]").addEventListener("click", () => {
         layer.hidden = !layer.hidden;
@@ -302,6 +337,14 @@
         layer.hidden = false;
         layer.color = null;
         if (canColor) material.colors[colorIndex] = material.defaultColors?.[colorIndex] || asset?.DefaultColor?.[colorIndex] || "Default";
+        refreshPreviewLoop();
+        renderLayerList(list);
+      });
+      card.querySelector("[data-copy]").addEventListener("click", () => {
+        var copy = Object.assign({}, layer);
+        copy.layerLabel = (layer.layerLabel || getLayerLabelByRef(layer) || layer.sourceLayer || "默认图层") + "_copy";
+        var idx = editing.layers.indexOf(layer);
+        editing.layers.splice(idx + 1, 0, copy);
         refreshPreviewLoop();
         renderLayerList(list);
       });

@@ -1,4 +1,4 @@
-  const REMOTE_PROTOCOL = "COE_RVS/1";
+  const REMOTE_PROTOCOL = "COE_RVS/2";
   const REMOTE_PREFIX = `${REMOTE_PROTOCOL}|`;
   const REMOTE_LIMITS = Object.freeze({
     content: 1800, chunkData: 1200, chunks: 32, snapshotBytes: 32768,
@@ -60,7 +60,7 @@
   function validateRemoteProperty(value) {
     if (value == null) return undefined;
     if (!remotePlainObject(value)) throw new Error("snapshot-property");
-    const allowed = new Set(["Type", "Mirror", "Invert", "TypeRecord"]);
+    const allowed = new Set(["Type", "Mirror", "Invert", "Rotation", "ScaleX", "ScaleY", "TypeRecord"]);
     const output = {};
     for (const key of Object.keys(value)) {
       if (!allowed.has(key) || POLLUTION_KEYS.has(key)) throw new Error("snapshot-property-key");
@@ -73,6 +73,18 @@
     if (value.Invert != null) {
       if (typeof value.Invert !== "boolean") throw new Error("snapshot-property-invert");
       output.Invert = value.Invert;
+    }
+    if (value.Rotation != null) {
+      if (typeof value.Rotation !== "number" || !Number.isFinite(value.Rotation)) throw new Error("snapshot-property-rotation");
+      output.Rotation = normalizeRemoteNumber(value.Rotation, -Math.PI, Math.PI);
+    }
+    if (value.ScaleX != null) {
+      if (typeof value.ScaleX !== "number" || !Number.isFinite(value.ScaleX)) throw new Error("snapshot-property-scalex");
+      output.ScaleX = normalizeRemoteNumber(value.ScaleX, 0.25, 3.0);
+    }
+    if (value.ScaleY != null) {
+      if (typeof value.ScaleY !== "number" || !Number.isFinite(value.ScaleY)) throw new Error("snapshot-property-scaley");
+      output.ScaleY = normalizeRemoteNumber(value.ScaleY, 0.25, 3.0);
     }
     if (value.TypeRecord != null) output.TypeRecord = sanitizePlainRecord(value.TypeRecord);
     return Object.keys(output).length ? output : undefined;

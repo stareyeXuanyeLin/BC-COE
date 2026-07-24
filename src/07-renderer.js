@@ -65,6 +65,126 @@
     return groups;
   }
 
+  // 从纹理 URL 解析出资产和图层，获取纹理原始宽高
+  function resolveTextureDimensions(url) {
+    try {
+      // BC 纹理 URL 形如 ./Assets/Female3DCG/Group/Asset/Layer.png
+      var parts = url.match(/(?:\.\/)?Assets\/([^/]+)\/([^/]+)\/(.+)\.(png|jpg)$/);
+      if (!parts) return null;
+      var family = parts[1];
+      var groupName = parts[2];
+      var rest = parts[3];
+      var slashIdx = rest.lastIndexOf("/");
+      var assetName = slashIdx >= 0 ? rest.slice(0, slashIdx) : rest;
+      var layerName = slashIdx >= 0 ? rest.slice(slashIdx + 1) : rest;
+      var asset = AssetGet(family, groupName, assetName);
+      if (!asset) return null;
+      var layer = asset.Layer ? asset.Layer.find(function(l) { return l.Name === layerName || l.Image === layerName; }) : null;
+      if (!layer) return null;
+      return { w: layer.DrawingWidth || asset.Width || 100, h: layer.DrawingHeight || asset.Height || 100 };
+    } catch (_) { return null; }
+  }
+
+  // 合成图层的变换参数渲染穿线
+  function installTransformRenderHooks() {
+    // --- ExtendedItemGetDrawingOptions hook ---
+    // 为 COE 合成 item 注入 Mirror/Invert（BC 原生消费）以及 Rotation/ScaleX/ScaleY（供 GLDrawImage 包装消费）
+    try {
+      if (typeof modApi.hookFunction === "function") {
+        modApi.hookFunction("ExtendedItemGetDrawingOptions", 5, function(args, next) {
+          var item = args[0];
+          var base = next(args) || {};
+          if (!item || !item.__coeMaterialId) return base;
+          var p = item.Property || {};
+          base.Mirror = p.Mirror === true;
+          base.Invert = p.Invert === true;
+          // 只传递非缺省值，保持 drawOptions 精简
+          if (typeof p.Rotation === "number" && p.Rotation !== 0) base.Rotation = p.Rotation;
+          if (typeof p.ScaleX === "number" && Math.abs(p.ScaleX - 1) > 0.001) base.ScaleX = p.ScaleX;
+          if (typeof p.ScaleY === "number" && Math.abs(p.ScaleY - 1) > 0.001) base.ScaleY = p.ScaleY;
+          return base;
+        });
+      }
+    } catch (_) { /* ExtendedItemGetDrawingOptions hook 不可用；Mirror/Invert 以默认行为 fallback */ }
+
+    // --- GLDrawImage 包装：加入旋转和缩放的矩阵变换 ---
+    try {
+      if (typeof GLDrawImage !== "function" || typeof m4 !== "object") return;
+      var _gldrawOriginal = GLDrawImage;
+      GLDrawImage = function coeGLDrawImage(url, gl, dstX, dstY, options, offsetX) {
+        try {
+          var opts = options || {};
+        var rotation = opts.Rotation;
+        var scaleX = opts.ScaleX;
+        var scaleY = opts.ScaleY;
+
+        // 无变换时直接走原始函数，保持零开销
+        // 条件：rotation 为 falsy（0/undefined），且 ScaleX/ScaleY 为 undefined
+        if (!rotation && scaleX == null && scaleY == null) {
+          return _gldrawOriginal.call(window, url, gl, dstX, dstY, options, offsetX);
+        }
+
+        // --- 变换绘制 ---
+        // 策略：先用原始函数完成纹理绑定/着色器选择/透明度等 uniform 设置，
+        // 然后在同一 program 下用自定义矩阵覆盖 u_matrix 并再次绘制。
+        //
+        // ⚠️ 已知限制：当图层 opacity < 1 时，二次绘制会在原始位置留下透明度残影
+        // （原始绘制 + 变换绘制各渲染一次，低透明度叠加后两个位置都可见）。
+        // 优化方案：在调用原始函数前通过 gl.colorMask 禁止颜色输出，
+        // 让原始绘制只产生副作用（纹理绑定、uniform 设置）但不输出颜色。
+        // 然后恢复 colorMask 后用自定义矩阵绘制。
+        var colorMaskSaved;
+        try {
+          colorMaskSaved = gl.getParameter(gl.COLOR_WRITEMASK);
+          gl.colorMask(false, false, false, false);
+          _gldrawOriginal.call(window, url, gl, dstX, dstY, options, offsetX);
+        } finally {
+          if (colorMaskSaved) gl.colorMask(colorMaskSaved[0], colorMaskSaved[1], colorMaskSaved[2], colorMaskSaved[3]);
+        }
+
+        // 解析纹理尺寸
+        var dim = resolveTextureDimensions(url);
+        if (!dim) return;
+        var texW = dim.w, texH = dim.h;
+        var cx = texW / 2, cy = texH / 2;
+        var sx = typeof scaleX === "number" ? scaleX : 1;
+        var sy = typeof scaleY === "number" ? scaleY : 1;
+        var off = typeof offsetX === "number" ? offsetX : 0;
+        var mirror = opts.Mirror === true;
+        var invert = opts.Invert === true;
+
+        var program = gl.getParameter(gl.CURRENT_PROGRAM);
+        if (!program) return;
+
+        // 获取 u_matrix 位置。BC 的 GLDraw 在 program 上缓存了此位置，
+        // 但用 gl.getUniformLocation 更健壮，不依赖内部实现。
+        var uMatrix = program.u_matrix || gl.getUniformLocation(program, "u_matrix");
+        if (!uMatrix) return;
+
+        var matrix = m4.orthographic(0, gl.canvas.width, gl.canvas.height, 0, -1, 1);
+        matrix = m4.translate(matrix, dstX + off + cx, dstY + cy, 0);
+        if (rotation) {
+          // BC 的 m4 库可能用 zRotate 命名，标准 gl-matrix 用 rotateZ。
+          // 优先用 zRotate（BC 原生），否则 fallback 到标准路径。
+          matrix = typeof m4.zRotate === "function"
+            ? m4.zRotate(matrix, rotation)
+            : m4.multiply(matrix, m4.zRotation(rotation));
+        }
+        matrix = m4.scale(matrix, sx, sy, 1);
+        matrix = m4.translate(matrix, -cx, -cy, 0);
+        matrix = m4.scale(matrix, (mirror ? -1 : 1) * texW, (invert ? -1 : 1) * texH, 1);
+
+        gl.uniformMatrix4fv(uMatrix, false, matrix);
+        gl.drawArrays(gl.TRIANGLES, 0, 6);
+        } catch (_coeTransformErr) {
+          // 任何异常不传播到 BC 绘制循环，降级为原始绘制
+          try { _gldrawOriginal.call(window, url, gl, dstX, dstY, options, offsetX); } catch (_e2) {}
+        }
+      };
+      GLDrawImage._coeTransformWrapped = true;
+    } catch (_) { /* GLDrawImage 包装失败，Rotation/Scale 渲染不可用 */ }
+  }
+
   // Backward-compatible internal alias used by the local editor tests/API.
   const buildSyntheticItems = buildLocalSyntheticItems;
 
@@ -250,4 +370,6 @@
         character.AppearanceLayers = originalLayers;
       }
     });
+
+    installTransformRenderHooks();
   }

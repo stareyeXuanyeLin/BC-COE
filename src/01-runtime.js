@@ -38,6 +38,7 @@
   let layerNameCache = null;
   let layerNameCachePromise = null;
   let colorPickerSession = null;
+  let colorPickerClosing = false;
 
   const log = (...args) => console.log(`[${MOD_NAME}]`, ...args);
   const warn = (...args) => console.warn(`[${MOD_NAME}]`, ...args);

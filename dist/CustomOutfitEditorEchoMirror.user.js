@@ -64,6 +64,7 @@
   let layerNameCache = null;
   let layerNameCachePromise = null;
   let colorPickerSession = null;
+  let colorPickerClosing = false;
 
   const log = (...args) => console.log(`[${MOD_NAME}]`, ...args);
   const warn = (...args) => console.warn(`[${MOD_NAME}]`, ...args);
@@ -1249,12 +1250,30 @@
     if (code) code.textContent = label;
   }
 
+  function unloadOwnedColorPicker(root = null) {
+    if (colorPickerClosing) return;
+    const picker = root || document.getElementById("color-picker");
+    if (!picker && typeof globalThis.ColorPickerUnload !== "function") return;
+    colorPickerClosing = true;
+    try {
+      const unload = typeof globalThis.ColorPickerUnload === "function" ? globalThis.ColorPickerUnload : null;
+      unload?.();
+    } catch (error) {
+      warn("关闭原版颜色选择器失败", error);
+    } finally {
+      colorPickerClosing = false;
+    }
+    const remaining = document.getElementById("color-picker");
+    if (remaining && (remaining === picker || remaining.classList.contains("coe-owned-color-picker"))) remaining.remove();
+  }
+
   function closeOwnedColorPicker() {
     const session = colorPickerSession;
-    if (!session) return;
-    session.finish();
-    const unload = typeof globalThis.ColorPickerUnload === "function" ? globalThis.ColorPickerUnload : null;
-    try { unload?.(); } catch (error) { warn("关闭原版颜色选择器失败", error); }
+    const picker = session?.root || document.getElementById("color-picker");
+    // session 可能已在原版 onExit 中被清空，但带有 COE 标记的残留节点仍需卸载。
+    if (!session && !(picker?.classList.contains("coe-owned-color-picker"))) return;
+    session?.finish();
+    unloadOwnedColorPicker(picker);
   }
 
   async function openGameColorPicker({ heading, currentColor, defaultColor, onAccept }) {
@@ -1299,12 +1318,14 @@
         onExit: ({ colors }, save) => {
           const selected = normalizePickerColor(colors?.[0], initialColor);
           session.finish();
+          // 原版关闭回调不会保证清理 #color-picker，主动卸载并清除残留节点。
+          unloadOwnedColorPicker(session.root || document.getElementById("color-picker"));
           if (!save || uiMode !== "editor" || !editing || typeof onAccept !== "function") return;
           try { onAccept(selected); } catch (error) { warn("应用颜色失败", error); toast("颜色没有应用成功", "error"); }
         },
       });
       if (session.closed) {
-        try { globalThis.ColorPickerUnload?.(); } catch (_) { /* already closed */ }
+        unloadOwnedColorPicker(session.root || document.getElementById("color-picker"));
         return true;
       }
       session.root = root || document.getElementById("color-picker");
@@ -1316,6 +1337,7 @@
       return true;
     } catch (error) {
       session.finish();
+      unloadOwnedColorPicker(session.root || document.getElementById("color-picker"));
       warn("原版颜色选择器打开失败", error);
       return false;
     }

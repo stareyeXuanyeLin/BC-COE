@@ -1,6 +1,6 @@
 // ==UserScript==
-// @name         Bondage Club - Custom Outfit Editor（远程加载器）
-// @name:zh-CN   Bondage Club - 自定义服装编辑器（远程加载器）
+// @name         Bondage Club - Custom Outfit Editor（测试版加载器）
+// @name:zh-CN   Bondage Club - 自定义服装编辑器（测试版加载器）
 // @namespace    https://github.com/stareyeXuanyeLin/BC-COE
 // @version      1.2.4
 // @description  Loads the latest Custom Outfit Editor from the CDN on every page load.
@@ -29,8 +29,8 @@
 (function () {
     "use strict";
 
-    if (window.__COE_ECHO_MIRROR_LOADER_ACTIVE__) return;
-    window.__COE_ECHO_MIRROR_LOADER_ACTIVE__ = true;
+    if (window.__COE_ECHO_MIRROR_LOADER_BETA__) return;
+    window.__COE_ECHO_MIRROR_LOADER_BETA__ = true;
 
     const script = document.createElement("script");
     const timestamp = Date.now();

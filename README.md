@@ -8,7 +8,19 @@ COE Mirror 是 [COE-Echo-Remote v1.8.1](https://github.com/liliMozi/openhanako) 
 
 ## 安装与启用
 
-安装 `dist/CustomOutfitEditorEchoMirror.user.js`，完整刷新 BC 页面，然后在 Appearance →「自定义服装衣柜」中分别选择：
+### 一键安装（推荐）
+
+[![Install with Tampermonkey](https://img.shields.io/badge/Tampermonkey-%E2%86%95%20%E4%B8%80%E9%94%AE%E5%AE%89%E8%A3%85-00485B?labelColor=1c1c1c&logo=tampermonkey)](https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE-Echo-Mirror/main/dist/CustomOutfitEditorEchoMirror.user.js)
+
+点击上方按钮，Tampermonkey 会自动弹出安装提示。安装完成后完整刷新 BC 页面即可使用。
+
+### 手动安装
+
+将 `dist/CustomOutfitEditorEchoMirror.user.js` 拖拽到浏览器 Tampermonkey 管理面板，或手动新建脚本并粘贴全部代码。
+
+### 启用方式
+
+安装完成后，进入 Appearance →「自定义服装衣柜」中分别选择：
 
 - 向同房间用户共享当前外观；
 - 显示同房间用户的外观。

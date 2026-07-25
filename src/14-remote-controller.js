@@ -73,7 +73,11 @@
       if (Object.keys(property).length) compact.p = property;
       visibleMaterials.push(compact);
       for (const ref of refs) {
-        layers.push({ m: index, n: ref.sourceLayer == null ? null : ref.sourceLayer, i: Number.isInteger(ref.sourceLayerIndex) ? ref.sourceLayerIndex : 0, p: ref.priority, x: ref.offsetX, y: ref.offsetY, o: ref.opacity });
+        var snapshotLayer = { m: index, n: ref.sourceLayer == null ? null : ref.sourceLayer, i: Number.isInteger(ref.sourceLayerIndex) ? ref.sourceLayerIndex : 0, p: ref.priority, x: ref.offsetX, y: ref.offsetY, o: ref.opacity };
+        if (typeof ref.rotation === "number" && ref.rotation !== 0) snapshotLayer.r = ref.rotation;
+        if (typeof ref.scaleX === "number" && Math.abs(ref.scaleX - 1) > 0.001) snapshotLayer.sx = ref.scaleX;
+        if (typeof ref.scaleY === "number" && Math.abs(ref.scaleY - 1) > 0.001) snapshotLayer.sy = ref.scaleY;
+        layers.push(snapshotLayer);
       }
     }
     return validateRemoteSnapshot({ v: 1, m: visibleMaterials, l: layers });

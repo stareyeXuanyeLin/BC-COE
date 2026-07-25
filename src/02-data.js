@@ -2,11 +2,25 @@
     return `${group}\u0000${asset}`;
   }
 
+  function normalizeLayerTransform(raw) {
+    const rotation = typeof raw.rotation === "number" && isFinite(raw.rotation) && raw.rotation !== 0
+      ? clamp(raw.rotation, -Math.PI, Math.PI)
+      : undefined;
+    const scaleX = typeof raw.scaleX === "number" && isFinite(raw.scaleX) && Math.abs(raw.scaleX - 1) > 0.001
+      ? clamp(raw.scaleX, 0.25, 3.0)
+      : undefined;
+    const scaleY = typeof raw.scaleY === "number" && isFinite(raw.scaleY) && Math.abs(raw.scaleY - 1) > 0.001
+      ? clamp(raw.scaleY, 0.25, 3.0)
+      : undefined;
+    return { rotation, scaleX, scaleY };
+  }
+
   function normalizeLayer(raw) {
     if (!raw || typeof raw !== "object") return null;
     const sourceGroup = typeof raw.sourceGroup === "string" ? raw.sourceGroup : "";
     const sourceAsset = typeof raw.sourceAsset === "string" ? raw.sourceAsset : "";
     if (!sourceGroup || !sourceAsset) return null;
+    const transform = normalizeLayerTransform(raw);
     return {
       materialId: typeof raw.materialId === "string" && raw.materialId ? raw.materialId : null,
       sourceGroup,
@@ -27,6 +41,12 @@
       defaultColor: typeof raw.defaultColor === "string" && raw.defaultColor.trim() ? raw.defaultColor.trim() : null,
       sourceColor: sanitizeColor(raw.sourceColor),
       sourceProperty: sanitizeSourceProperty(raw.sourceProperty),
+      rotation: transform.rotation,
+      defaultRotation: undefined,
+      scaleX: transform.scaleX,
+      defaultScaleX: undefined,
+      scaleY: transform.scaleY,
+      defaultScaleY: undefined,
     };
   }
 
@@ -140,12 +160,6 @@
     if (typeof value.Type === "string" && value.Type.length <= 40) output.Type = value.Type;
     if (typeof value.Mirror === "boolean") output.Mirror = value.Mirror;
     if (typeof value.Invert === "boolean") output.Invert = value.Invert;
-    if (typeof value.Rotation === "number" && isFinite(value.Rotation) && value.Rotation !== 0)
-      output.Rotation = clamp(value.Rotation, -Math.PI, Math.PI);
-    if (typeof value.ScaleX === "number" && isFinite(value.ScaleX) && Math.abs(value.ScaleX - 1) > 0.001)
-      output.ScaleX = clamp(value.ScaleX, 0.25, 3.0);
-    if (typeof value.ScaleY === "number" && isFinite(value.ScaleY) && Math.abs(value.ScaleY - 1) > 0.001)
-      output.ScaleY = clamp(value.ScaleY, 0.25, 3.0);
     if (value.TypeRecord && Object.getPrototypeOf(value.TypeRecord) === Object.prototype) {
       try { output.TypeRecord = sanitizePlainRecord(value.TypeRecord); } catch (_) { /* denied */ }
     }
@@ -166,6 +180,9 @@
     };
     if (layer.hidden) output.hidden = true;
     if (layer.color) output.color = layer.color;
+    if (typeof layer.rotation === "number" && layer.rotation !== 0) output.rotation = layer.rotation;
+    if (typeof layer.scaleX === "number" && Math.abs(layer.scaleX - 1) > 0.001) output.scaleX = layer.scaleX;
+    if (typeof layer.scaleY === "number" && Math.abs(layer.scaleY - 1) > 0.001) output.scaleY = layer.scaleY;
     return output;
   }
 

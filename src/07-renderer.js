@@ -53,10 +53,13 @@
         // Capability analysis is diagnostic only. Every loaded asset is projected to
         // inert static image layers; unsupported dynamic behavior is not invoked.
         analysis = analyzeAssetCached(sourceAsset);
-        const group = buildStaticSynthetic({ character, material, refs, asset: sourceAsset, analysis });
-        group.materialOrder = materialOrder;
-        group.drawable.forEach((entry, sourceOrder) => { entry.sourceOrder = sourceOrder; });
-        groups.push(group);
+        const layerGroups = buildStaticSynthetic({ character, material, refs, asset: sourceAsset, analysis });
+        for (let sourceOrder = 0; sourceOrder < layerGroups.length; sourceOrder++) {
+          const group = layerGroups[sourceOrder];
+          group.materialOrder = materialOrder;
+          group.drawable[0].sourceOrder = sourceOrder;
+          groups.push(group);
+        }
         runtimeMaterialState.set(material.id, { disabled: false, analysis: cloneJSON(analysis), reason: null });
       } catch (error) {
         recordMaterialSkip(material, analysis, "buildSynthetic", error);
@@ -194,7 +197,7 @@
     const refsByMaterial = new Map();
     for (const layer of snapshot.l || []) {
       if (!refsByMaterial.has(layer.m)) refsByMaterial.set(layer.m, []);
-      refsByMaterial.get(layer.m).push({
+      var remoteRef = {
         materialId: `remote:${memberNumber}:${layer.m}`,
         sourceGroup: snapshot.m[layer.m]?.g,
         sourceAsset: snapshot.m[layer.m]?.a,
@@ -205,7 +208,11 @@
         offsetY: layer.y,
         opacity: layer.o,
         hidden: false,
-      });
+      };
+      if (typeof layer.r === "number" && layer.r !== 0) remoteRef.rotation = layer.r;
+      if (typeof layer.sx === "number" && Math.abs(layer.sx - 1) > 0.001) remoteRef.scaleX = layer.sx;
+      if (typeof layer.sy === "number" && Math.abs(layer.sy - 1) > 0.001) remoteRef.scaleY = layer.sy;
+      refsByMaterial.get(layer.m).push(remoteRef);
     }
     const groups = [];
     for (let materialOrder = 0; materialOrder < (snapshot.m || []).length; materialOrder++) {
@@ -226,10 +233,13 @@
           if (!isDrawableLayer(sourceLayer)) throw new Error("source-layer-not-drawable");
         }
         analysis = analyzeAssetCached(sourceAsset);
-        const group = buildStaticSynthetic({ character, material, refs, asset: sourceAsset, analysis });
-        group.materialOrder = materialOrder;
-        group.drawable.forEach((entry, sourceOrder) => { entry.sourceOrder = sourceOrder; });
-        groups.push(group);
+        const layerGroups = buildStaticSynthetic({ character, material, refs, asset: sourceAsset, analysis });
+        for (let sourceOrder = 0; sourceOrder < layerGroups.length; sourceOrder++) {
+          const group = layerGroups[sourceOrder];
+          group.materialOrder = materialOrder;
+          group.drawable[0].sourceOrder = sourceOrder;
+          groups.push(group);
+        }
       } catch (error) {
         remoteStore.stats.remoteMaterialsSkipped++;
         remoteDiagnostic("remote-material-skipped", memberNumber, `${compact.g}/${compact.a}:${error?.message || error}`);

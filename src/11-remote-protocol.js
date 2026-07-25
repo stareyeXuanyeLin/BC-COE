@@ -107,7 +107,7 @@
     });
     const layers = value.l.map(layer => {
       if (!remotePlainObject(layer)) throw new Error("snapshot-layer");
-      for (const key of Object.keys(layer)) if (!new Set(["m", "n", "i", "p", "x", "y", "o"]).has(key)) throw new Error("snapshot-layer-key");
+      for (const key of Object.keys(layer)) if (!new Set(["m", "n", "i", "p", "x", "y", "o", "r", "sx", "sy"]).has(key)) throw new Error("snapshot-layer-key");
       const output = {
         m: remoteInteger(layer.m, "material-index", 0, Math.max(0, materials.length - 1)),
         n: layer.n == null ? null : remoteString(layer.n, "layer-name"),
@@ -117,6 +117,18 @@
         y: normalizeRemoteNumber(layer.y, -1200, 1200),
         o: normalizeRemoteNumber(layer.o, 0, 1),
       };
+      if (layer.r != null) {
+        if (typeof layer.r !== "number" || !Number.isFinite(layer.r)) throw new Error("snapshot-layer-rotation");
+        output.r = normalizeRemoteNumber(layer.r, -Math.PI, Math.PI);
+      }
+      if (layer.sx != null) {
+        if (typeof layer.sx !== "number" || !Number.isFinite(layer.sx)) throw new Error("snapshot-layer-scalex");
+        output.sx = normalizeRemoteNumber(layer.sx, 0.25, 3.0);
+      }
+      if (layer.sy != null) {
+        if (typeof layer.sy !== "number" || !Number.isFinite(layer.sy)) throw new Error("snapshot-layer-scaley");
+        output.sy = normalizeRemoteNumber(layer.sy, 0.25, 3.0);
+      }
       return output;
     });
     const snapshot = { v: 1, m: materials, l: layers };

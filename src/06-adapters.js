@@ -19,12 +19,6 @@
     const output = {};
     if (typeof value.Mirror === "boolean") output.Mirror = value.Mirror;
     if (typeof value.Invert === "boolean") output.Invert = value.Invert;
-    if (typeof value.Rotation === "number" && isFinite(value.Rotation) && value.Rotation !== 0)
-      output.Rotation = clamp(value.Rotation, -Math.PI, Math.PI);
-    if (typeof value.ScaleX === "number" && isFinite(value.ScaleX) && Math.abs(value.ScaleX - 1) > 0.001)
-      output.ScaleX = clamp(value.ScaleX, 0.25, 3.0);
-    if (typeof value.ScaleY === "number" && isFinite(value.ScaleY) && Math.abs(value.ScaleY - 1) > 0.001)
-      output.ScaleY = clamp(value.ScaleY, 0.25, 3.0);
     // Type/TypeRecord only select image variants. Preserve their small primitive
     // subset regardless of provider; malformed records simply fall back to defaults.
     if (typeof value.Type === "string" && value.Type.length <= 40) output.Type = value.Type;
@@ -85,13 +79,29 @@
       .filter(entry => isDrawableLayer(entry.sourceLayer))
       .sort((a, b) => (a.ref.sourceLayerIndex ?? asset.Layer.indexOf(a.sourceLayer)) - (b.ref.sourceLayerIndex ?? asset.Layer.indexOf(b.sourceLayer)));
     if (!drawable.length) throw new Error("no-drawable-layer");
-    const visualAsset = createVisualAssetProxy(asset);
-    const item = {
-      Asset: visualAsset,
-      Color: resolveMaterialColors(material, asset, refs),
-      Property: sanitizeVisualProperty(material.sourceProperty || refs[0]?.sourceProperty || {}, analysis, asset),
-      __coeMaterialId: material.id,
-    };
-    if (utf8Bytes({ material: compactMaterialForStorage(material), refs: refs.map(compactLayerForStorage) }) > MAX_MATERIAL_BYTES) throw new Error("material-byte-budget");
-    return { material, item, drawable, analysis };
+    // Byte budget check 在拆分前对整个素材+所有引用做一次
+    if (utf8Bytes({ material: compactMaterialForStorage(material), refs: refs.map(compactLayerForStorage) }) > MAX_MATERIAL_BYTES)
+      throw new Error("material-byte-budget");
+    const colors = resolveMaterialColors(material, asset, refs);
+    const baseProperty = sanitizeVisualProperty(material.sourceProperty || {}, analysis, asset);
+    // 每层生成独立的 Item，Property 各自携带该层的变换
+    const results = drawable.map((entry, index) => {
+      const { ref, sourceLayer } = entry;
+      const visualAsset = createVisualAssetProxy(asset);
+      const perLayerProperty = { ...baseProperty };
+      if (typeof ref.rotation === "number" && isFinite(ref.rotation) && ref.rotation !== 0)
+        perLayerProperty.Rotation = clamp(ref.rotation, -Math.PI, Math.PI);
+      if (typeof ref.scaleX === "number" && isFinite(ref.scaleX) && Math.abs(ref.scaleX - 1) > 0.001)
+        perLayerProperty.ScaleX = clamp(ref.scaleX, 0.25, 3.0);
+      if (typeof ref.scaleY === "number" && isFinite(ref.scaleY) && Math.abs(ref.scaleY - 1) > 0.001)
+        perLayerProperty.ScaleY = clamp(ref.scaleY, 0.25, 3.0);
+      const item = {
+        Asset: visualAsset,
+        Color: colors,
+        Property: perLayerProperty,
+        __coeMaterialId: `${material.id}:${ref.sourceLayerIndex ?? index}`,
+      };
+      return { material, item, drawable: [{ ref, sourceLayer }], analysis };
+    });
+    return results;
   }

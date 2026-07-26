@@ -19,12 +19,6 @@
   let editing = null;
   let editingId = null;
   let syntheticByCharacter = new WeakMap();
-  // 最近一帧实际绘制几何，供编辑器把 client 坐标转换为 BC canvas 坐标。
-  // key 是非持久化的运行时图层 key，绝不进入方案或远程协议。
-  let renderedTransformGeometry = new Map();
-  let renderedTransformCanvas = null;
-  function getRenderedTransformGeometry(key) { return renderedTransformGeometry.get(key) || null; }
-  function getRenderedTransformCanvas() { return renderedTransformCanvas; }
   let wardrobe = { version: 5, schemes: [], equippedIds: [] };
   let wardrobeReadState = { status: "absent", source: null, server: null, local: null, conflict: false };
   let persistenceBlocked = false;

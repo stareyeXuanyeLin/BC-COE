@@ -35,9 +35,6 @@
     for (let layerIndex = 0; layerIndex < composition.layers.length; layerIndex++) {
       const ref = composition.layers[layerIndex];
       if (ref.hidden) continue;
-      // index-based key remains stable across render normalization and distinguishes
-      // copied layers that intentionally reference the same source image.
-      ref.__coeTransformKey = `local:${layerIndex}`;
       const material = materialMap.get(ref.materialId);
       if (!material || material.hidden) continue;
       if (!groupedRefs.has(material.id)) groupedRefs.set(material.id, []);
@@ -73,6 +70,141 @@
     return groups;
   }
 
+  const CONTENT_ALPHA_THRESHOLD = 16;
+  const CONTENT_MIN_PIXELS = 4;
+  const CONTENT_SCAN_MAX_EDGE = 512;
+  const textureContentPivotCache = new Map();
+  let contentPivotRefreshScheduled = false;
+
+  // Alpha 边界只依赖纹理本身，与颜色、Mirror、Invert 和图层变换无关。
+  // 因此扫描结果按 URL 缓存，不能在每帧读取像素。
+  function scanAlphaBounds(data, width, height, threshold = CONTENT_ALPHA_THRESHOLD) {
+    if (!data || !Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) return null;
+    let minX = width;
+    let minY = height;
+    let maxX = -1;
+    let maxY = -1;
+    let count = 0;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const alpha = data[(y * width + x) * 4 + 3];
+        if (!(Number(alpha) >= threshold)) continue;
+        count++;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+    if (count < CONTENT_MIN_PIXELS || maxX < minX || maxY < minY) return null;
+    return { minX, minY, maxX, maxY, count };
+  }
+
+  function contentPivotFromBounds(bounds, width, height) {
+    if (!bounds || !(Number(width) > 0) || !(Number(height) > 0)) return { x: 0.5, y: 0.5 };
+    const x = (Number(bounds.minX) + Number(bounds.maxX) + 1) / 2 / Number(width);
+    const y = (Number(bounds.minY) + Number(bounds.maxY) + 1) / 2 / Number(height);
+    return {
+      x: Number.isFinite(x) ? clamp(x, 0, 1) : 0.5,
+      y: Number.isFinite(y) ? clamp(y, 0, 1) : 0.5,
+    };
+  }
+
+  function scheduleContentPivotRefresh() {
+    if (contentPivotRefreshScheduled) return;
+    contentPivotRefreshScheduled = true;
+    const refresh = () => {
+      contentPivotRefreshScheduled = false;
+      try {
+        if (typeof globalThis.CharacterRefresh === "function" && globalThis.Player) {
+          CharacterRefresh(globalThis.Player, false, false);
+          const characters = Array.isArray(globalThis.ChatRoomCharacter) ? globalThis.ChatRoomCharacter : [];
+          for (const character of characters) {
+            if (character && character !== globalThis.Player) CharacterRefresh(character, false, false);
+          }
+        }
+      } catch (_) { /* Alpha 中心仅是视觉增强，刷新失败时保留几何中心 fallback */ }
+    };
+    if (typeof globalThis.requestAnimationFrame === "function") globalThis.requestAnimationFrame(refresh);
+    else if (typeof globalThis.setTimeout === "function") globalThis.setTimeout(refresh, 0);
+  }
+
+  function finishTextureContentPivot(url, pivot) {
+    const current = textureContentPivotCache.get(url);
+    if (!current || current.status !== "pending") return;
+    textureContentPivotCache.set(url, { status: "ready", pivot });
+    scheduleContentPivotRefresh();
+  }
+
+  function scanTextureContentPivot(url) {
+    if (!url || typeof document === "undefined" || typeof document.createElement !== "function") return;
+    const current = textureContentPivotCache.get(url);
+    if (current) return;
+    textureContentPivotCache.set(url, { status: "pending" });
+    try {
+      const ImageCtor = globalThis.Image;
+      // GLDrawLoadImage 已经维护了一份同 URL 的图片缓存。优先复用它，
+      // 避免另起一个 Image 导致第二份图片尚未加载，而 WebGL 原图其实已经可用。
+      const cachedImage = typeof globalThis.GLDrawImageCache?.get === "function"
+        ? globalThis.GLDrawImageCache.get(url) : null;
+      if (!cachedImage && typeof ImageCtor !== "function") throw new Error("image-constructor-unavailable");
+      const image = cachedImage || new ImageCtor();
+      let settled = false;
+      const fail = () => {
+        if (settled) return;
+        settled = true;
+        const pending = textureContentPivotCache.get(url);
+        if (pending?.status === "pending") textureContentPivotCache.set(url, { status: "failed" });
+      };
+      const complete = () => {
+        if (settled) return;
+        settled = true;
+        try {
+          const naturalWidth = Number(image.naturalWidth || image.width);
+          const naturalHeight = Number(image.naturalHeight || image.height);
+          if (!(naturalWidth > 0) || !(naturalHeight > 0)) throw new Error("image-dimensions-unavailable");
+          const ratio = Math.min(1, CONTENT_SCAN_MAX_EDGE / Math.max(naturalWidth, naturalHeight));
+          const width = Math.max(1, Math.round(naturalWidth * ratio));
+          const height = Math.max(1, Math.round(naturalHeight * ratio));
+          const canvas = document.createElement("canvas");
+          canvas.width = width;
+          canvas.height = height;
+          const context = canvas.getContext?.("2d", { willReadFrequently: true });
+          if (!context || typeof context.drawImage !== "function" || typeof context.getImageData !== "function") throw new Error("canvas-pixel-reader-unavailable");
+          context.clearRect?.(0, 0, width, height);
+          context.drawImage(image, 0, 0, width, height);
+          const imageData = context.getImageData(0, 0, width, height);
+          const bounds = scanAlphaBounds(imageData?.data, width, height);
+          finishTextureContentPivot(url, bounds ? contentPivotFromBounds(bounds, width, height) : { x: 0.5, y: 0.5 });
+        } catch (_) {
+          const pending = textureContentPivotCache.get(url);
+          if (pending?.status === "pending") textureContentPivotCache.set(url, { status: "failed" });
+          scheduleContentPivotRefresh();
+        }
+      };
+      if (typeof image.addEventListener === "function") {
+        image.addEventListener("load", complete, { once: true });
+        image.addEventListener("error", fail, { once: true });
+      } else {
+        image.onload = complete;
+        image.onerror = fail;
+      }
+      if (!cachedImage) image.src = url;
+      if (image.complete && Number(image.naturalWidth || image.width) > 0) complete();
+    } catch (_) {
+      const pending = textureContentPivotCache.get(url);
+      if (pending?.status === "pending") textureContentPivotCache.set(url, { status: "failed" });
+    }
+  }
+
+  function resolveTextureContentPivot(url) {
+    if (!url) return null;
+    const cached = textureContentPivotCache.get(url);
+    if (cached?.status === "ready" && cached.pivot) return cached.pivot;
+    if (!cached) scanTextureContentPivot(url);
+    return null;
+  }
+
   // 从纹理 URL 解析出资产和图层，获取纹理原始宽高
   function resolveTextureDimensions(url) {
     try {
@@ -99,36 +231,6 @@
     } catch (_) { return null; }
   }
 
-  function resolveRenderCanvas(gl = null) {
-    const canvas = gl?.canvas || globalThis.GL?.canvas || globalThis.MainCanvas ||
-      (typeof document?.querySelector === "function" ? document.querySelector("canvas") : null);
-    if (!canvas) return null;
-    const rect = typeof canvas.getBoundingClientRect === "function" ? canvas.getBoundingClientRect() : null;
-    const width = Number(canvas.width) > 0 ? Number(canvas.width) : Number(rect?.width) || 1;
-    const height = Number(canvas.height) > 0 ? Number(canvas.height) : Number(rect?.height) || 1;
-    renderedTransformCanvas = { canvas, width, height, rect: rect ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height } : null };
-    return renderedTransformCanvas;
-  }
-
-  function recordRenderedTransformGeometry(key, x, y, options = {}, url = "", dimensions = null, offsetX = 0, gl = null) {
-    if (!key || !Number.isFinite(Number(x)) || !Number.isFinite(Number(y))) return;
-    const canvas = resolveRenderCanvas(gl);
-    const dim = dimensions || resolveTextureDimensions(url) || {};
-    const width = Number(dim.w) > 0 ? Number(dim.w) : 1;
-    const height = Number(dim.h) > 0 ? Number(dim.h) : 1;
-    const rawX = Number(x) + (Number.isFinite(Number(offsetX)) ? Number(offsetX) : 0);
-    const rawY = Number(y);
-    const mirror = options.Mirror === true;
-    const invert = options.Invert === true;
-    const drawX = mirror ? (canvas?.width || 500) - rawX : rawX;
-    const drawY = invert ? (canvas?.height || 0) - rawY + 550 : rawY;
-    renderedTransformGeometry.set(key, {
-      key, drawX, drawY, rawX, rawY, textureWidth: width, textureHeight: height,
-      canvasWidth: canvas?.width || null, canvasHeight: canvas?.height || null,
-      mirror, invert, timestamp: Date.now(),
-    });
-  }
-
   // 合成图层的变换参数渲染穿线
   function installTransformRenderHooks() {
     // --- ExtendedItemGetDrawingOptions hook ---
@@ -145,16 +247,13 @@
           // 只传递非缺省值，保持 drawOptions 精简
           if (typeof p.Rotation === "number" && p.Rotation !== 0) base.Rotation = p.Rotation;
           if (typeof p.Scale === "number" && Math.abs(p.Scale - 1) > 0.001) base.Scale = p.Scale;
-          // 图层级 pivot
-          if (typeof p.PivotX === "number") base.PivotX = p.PivotX;
-          if (typeof p.PivotY === "number") base.PivotY = p.PivotY;
           // 素材服装组整体变换参数
           if (typeof p.OverallRotation === "number" && p.OverallRotation !== 0) base.OverallRotation = p.OverallRotation;
           if (typeof p.OverallScale === "number" && Math.abs(p.OverallScale - 1) > 0.001) base.OverallScale = p.OverallScale;
           if (typeof p.OverallOffsetX === "number") base.OverallOffsetX = p.OverallOffsetX;
           if (typeof p.OverallOffsetY === "number") base.OverallOffsetY = p.OverallOffsetY;
-          if (typeof p.OverallPivotX === "number") base.OverallPivotX = p.OverallPivotX;
-          if (typeof p.OverallPivotY === "number") base.OverallPivotY = p.OverallPivotY;
+          if (typeof p.OverallCenterX === "number") base.OverallCenterX = p.OverallCenterX;
+          if (typeof p.OverallCenterY === "number") base.OverallCenterY = p.OverallCenterY;
           return base;
         });
       }
@@ -167,16 +266,13 @@
       GLDrawImage = function coeGLDrawImage(url, gl, dstX, dstY, options, offsetX) {
         try {
           var opts = options || {};
-        var geometryKey = opts.__coeTransformKey;
-        if (geometryKey) recordRenderedTransformGeometry(geometryKey, dstX, dstY, opts, url, null, offsetX, gl);
         var rotation = typeof opts.Rotation === "number" ? opts.Rotation : 0;
         var scale = typeof opts.Scale === "number" ? opts.Scale : 1;
         var overallRotation = typeof opts.OverallRotation === "number" ? opts.OverallRotation : 0;
         var overallScale = typeof opts.OverallScale === "number" ? opts.OverallScale : 1;
         var overallOffsetX = typeof opts.OverallOffsetX === "number" ? opts.OverallOffsetX : 0;
         var overallOffsetY = typeof opts.OverallOffsetY === "number" ? opts.OverallOffsetY : 0;
-        // 无变换时直接走原始函数，保持零开销。自定义 pivot 本身不改变
-        // 图像，只有和旋转/缩放组合时才需要进入 GL 矩阵路径。
+        // 无变换时直接走原始函数，保持零开销。
         if (!rotation && Math.abs(scale - 1) <= 0.001 && !overallRotation && Math.abs(overallScale - 1) <= 0.001 &&
           !overallOffsetX && !overallOffsetY) {
           return _gldrawOriginal.call(window, url, gl, dstX, dstY, options, offsetX);
@@ -205,7 +301,6 @@
           return _gldrawOriginal.call(window, url, gl, dstX, dstY, options, offsetX);
         }
         var texW = dim.w, texH = dim.h;
-        if (geometryKey) recordRenderedTransformGeometry(geometryKey, dstX, dstY, opts, url, dim, offsetX, gl);
         var uniformScale = clamp(scale, 0.25, 3.0);
         var groupScale = clamp(overallScale, 0.25, 3.0);
         var off = typeof offsetX === "number" ? offsetX : 0;
@@ -217,12 +312,15 @@
         if (invert) drawY = gl.canvas.height - drawY + 550;
         var signedW = (mirror ? -1 : 1) * texW;
         var signedH = (invert ? -1 : 1) * texH;
-        var localPivotX = typeof opts.PivotX === "number" ? opts.PivotX : 0.5;
-        var localPivotY = typeof opts.PivotY === "number" ? opts.PivotY : 0.5;
-        var localPivotScreenX = drawX + localPivotX * signedW;
-        var localPivotScreenY = drawY + localPivotY * signedH;
-        var overallPivotX = typeof opts.OverallPivotX === "number" ? opts.OverallPivotX : localPivotScreenX;
-        var overallPivotY = typeof opts.OverallPivotY === "number" ? opts.OverallPivotY : localPivotScreenY;
+        // Alpha 扫描异步完成前使用纹理中点；完成后使用有效内容包围盒中心。
+        // 使用归一化局部坐标乘以 signedW/signedH，Mirror / Invert 会自然反映到屏幕坐标。
+        var contentPivot = (rotation || Math.abs(scale - 1) > 0.001) ? resolveTextureContentPivot(url) : null;
+        var localPivotX = contentPivot?.x ?? 0.5;
+        var localPivotY = contentPivot?.y ?? 0.5;
+        var localCenterScreenX = drawX + localPivotX * signedW;
+        var localCenterScreenY = drawY + localPivotY * signedH;
+        var overallCenterX = typeof opts.OverallCenterX === "number" ? opts.OverallCenterX : localCenterScreenX;
+        var overallCenterY = typeof opts.OverallCenterY === "number" ? opts.OverallCenterY : localCenterScreenY;
 
         var program = gl.getParameter(gl.CURRENT_PROGRAM);
         if (!program) return _gldrawOriginal.call(window, url, gl, dstX, dstY, options, offsetX);
@@ -233,24 +331,24 @@
         if (!uMatrix) return _gldrawOriginal.call(window, url, gl, dstX, dstY, options, offsetX);
 
         var matrix = m4.orthographic(0, gl.canvas.width, gl.canvas.height, 0, -1, 1);
-        // 顶点仍是单位正方形，所有 pivot 先转换到像素合成空间，再把
-        // 纹理尺寸放在矩阵最右端。矩阵顺序表达：整体 × 局部 × 原图。
-        matrix = m4.translate(matrix, overallPivotX + overallOffsetX, overallPivotY + overallOffsetY, 0);
+        // 顶点仍是单位正方形，局部使用素材中点，整体使用自动计算位置，
+        // 再把纹理尺寸放在矩阵最右端。矩阵顺序表达：整体 × 局部 × 原图。
+        matrix = m4.translate(matrix, overallCenterX + overallOffsetX, overallCenterY + overallOffsetY, 0);
         if (overallRotation) {
           matrix = typeof m4.zRotate === "function"
             ? m4.zRotate(matrix, overallRotation)
             : m4.multiply(matrix, m4.zRotation(overallRotation));
         }
         matrix = m4.scale(matrix, groupScale, groupScale, 1);
-        matrix = m4.translate(matrix, -overallPivotX, -overallPivotY, 0);
-        matrix = m4.translate(matrix, localPivotScreenX, localPivotScreenY, 0);
+        matrix = m4.translate(matrix, -overallCenterX, -overallCenterY, 0);
+        matrix = m4.translate(matrix, localCenterScreenX, localCenterScreenY, 0);
         if (rotation) {
           matrix = typeof m4.zRotate === "function"
             ? m4.zRotate(matrix, rotation)
             : m4.multiply(matrix, m4.zRotation(rotation));
         }
         matrix = m4.scale(matrix, uniformScale, uniformScale, 1);
-        matrix = m4.translate(matrix, -localPivotScreenX, -localPivotScreenY, 0);
+        matrix = m4.translate(matrix, -localCenterScreenX, -localCenterScreenY, 0);
         matrix = m4.translate(matrix, drawX, drawY, 0);
         matrix = m4.scale(matrix, signedW, signedH, 1);
 
@@ -289,10 +387,7 @@
         offsetY: layer.y,
         opacity: layer.o,
         hidden: false,
-        __coeTransformKey: `remote:${memberNumber}:${layer.m}:${layer.i}:${duplicateIndex}`,
       };
-      if (typeof layer.px === "number") remoteRef.pivotX = layer.px;
-      if (typeof layer.py === "number") remoteRef.pivotY = layer.py;
       if (typeof layer.r === "number" && layer.r !== 0) remoteRef.rotation = layer.r;
       if (typeof layer.s === "number" && Math.abs(layer.s - 1) > 0.001) remoteRef.scale = layer.s;
       refsByMaterial.get(layer.m).push(remoteRef);
@@ -303,8 +398,6 @@
       overallScale: snapshot.os,
       overallOffsetX: snapshot.ox,
       overallOffsetY: snapshot.oy,
-      overallPivotX: snapshot.px,
-      overallPivotY: snapshot.py,
       layers: [...refsByMaterial.values()].flat(),
     }, character);
     for (let materialOrder = 0; materialOrder < (snapshot.m || []).length; materialOrder++) {
@@ -380,7 +473,6 @@
               item: group.item, ref, sourceLayer: visualLayer,
               sourceLayerIndex: ref.sourceLayerIndex ?? group.item.Asset.Layer.indexOf(entry.sourceLayer),
               materialOrder: group.materialOrder, sourceOrder: entry.sourceOrder, overall: group.overall,
-              transformKey: ref.__coeTransformKey || `${group.material.id}:${ref.sourceLayerIndex ?? entry.sourceOrder}`,
             },
           });
         }
@@ -495,22 +587,18 @@
               if (!ref) return callback.apply(this, callbackArgs);
               const options = callbackArgs[3] || {};
               const transformed = { ...options };
-              transformed.__coeTransformKey = marker.transformKey;
-              recordRenderedTransformGeometry(marker.transformKey, callbackArgs[1], callbackArgs[2], transformed, callbackArgs[0], null, callbackArgs[5]);
               if (typeof ref.rotation === "number" && isFinite(ref.rotation) && ref.rotation !== 0)
                 transformed.Rotation = clamp(ref.rotation, -Math.PI, Math.PI);
               if (typeof ref.scale === "number" && isFinite(ref.scale) && Math.abs(ref.scale - 1) > 0.001)
                 transformed.Scale = clamp(ref.scale, 0.25, 3.0);
-              if (typeof ref.pivotX === "number") transformed.PivotX = clamp(ref.pivotX, -PIVOT_LIMIT, PIVOT_LIMIT);
-              if (typeof ref.pivotY === "number") transformed.PivotY = clamp(ref.pivotY, -PIVOT_LIMIT, PIVOT_LIMIT);
               const overall = marker.overall;
               if (overall) {
                 transformed.OverallRotation = clamp(overall.rotation, -Math.PI, Math.PI);
                 transformed.OverallScale = clamp(overall.scale, 0.25, 3.0);
                 transformed.OverallOffsetX = clamp(overall.offsetX, -1200, 1200);
                 transformed.OverallOffsetY = clamp(overall.offsetY, -1200, 1200);
-                transformed.OverallPivotX = clamp(overall.pivotX, -OVERALL_PIVOT_LIMIT, OVERALL_PIVOT_LIMIT);
-                transformed.OverallPivotY = clamp(overall.pivotY, -OVERALL_PIVOT_LIMIT, OVERALL_PIVOT_LIMIT);
+                transformed.OverallCenterX = overall.centerX;
+                transformed.OverallCenterY = overall.centerY;
               }
               callbackArgs[3] = transformed;
               return callback.apply(this, callbackArgs);

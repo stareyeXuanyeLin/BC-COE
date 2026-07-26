@@ -76,8 +76,6 @@
         var snapshotLayer = { m: index, n: ref.sourceLayer == null ? null : ref.sourceLayer, i: Number.isInteger(ref.sourceLayerIndex) ? ref.sourceLayerIndex : 0, p: ref.priority, x: ref.offsetX, y: ref.offsetY, o: ref.opacity };
         if (typeof ref.rotation === "number" && ref.rotation !== 0) snapshotLayer.r = ref.rotation;
         if (typeof ref.scale === "number" && Math.abs(ref.scale - 1) > 0.001) snapshotLayer.s = ref.scale;
-        if (typeof ref.pivotX === "number") snapshotLayer.px = ref.pivotX;
-        if (typeof ref.pivotY === "number") snapshotLayer.py = ref.pivotY;
         layers.push(snapshotLayer);
       }
     }
@@ -86,14 +84,6 @@
     if (typeof composition.overallScale === "number") snapshot.os = composition.overallScale;
     if (typeof composition.overallOffsetX === "number") snapshot.ox = composition.overallOffsetX;
     if (typeof composition.overallOffsetY === "number") snapshot.oy = composition.overallOffsetY;
-    // Always pin the sender's resolved overall center when there is drawable
-    // content. An omitted center remains reserved for legacy snapshots only;
-    // new snapshots must not depend on the receiver's pose/body geometry.
-    if (layers.length) {
-      const overall = resolveOverallTransform(composition, globalThis.Player);
-      snapshot.px = typeof composition.overallPivotX === "number" ? composition.overallPivotX : overall.pivotX;
-      snapshot.py = typeof composition.overallPivotY === "number" ? composition.overallPivotY : overall.pivotY;
-    }
     return validateRemoteSnapshot(snapshot);
   }
 

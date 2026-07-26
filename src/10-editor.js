@@ -170,10 +170,10 @@
   }
 
   function transformTargetLabel() {
-    if (!transformEditTarget) return "未进入中心编辑";
-    if (transformEditTarget.kind === "overall") return "整体服装变换中心";
+    if (!transformEditTarget) return "未选择变换对象";
+    if (transformEditTarget.kind === "overall") return "整体服装";
     const layer = transformEditTarget.layer;
-    return layer ? `${layer.sourceAsset || "素材"} · ${layer.layerLabel || layer.sourceLayer || "图层"} · 图层变换中心` : "当前图层变换中心";
+    return layer ? `${layer.sourceAsset || "素材"} · ${layer.layerLabel || layer.sourceLayer || "图层"}` : "当前图层";
   }
 
   function setTransformTarget(target) {
@@ -181,7 +181,6 @@
     if (!target) {
       transformEditTarget = null;
       transformPointer = null;
-      crosshairRemove();
     } else if (target.kind === "overall") {
       transformEditTarget = { kind: "overall" };
     } else {
@@ -197,54 +196,13 @@
     else object[key] = value;
   }
 
-  function setOptionalPivotValue(object, key, value, defaultValue = 0.5) {
-    if (!Number.isFinite(value) || Math.abs(value - defaultValue) < 0.000001) delete object[key];
-    else object[key] = value;
-  }
-
-  function resetTransformCenter() {
-    if (!transformEditTarget || !editing) return;
-    if (transformEditTarget.kind === "overall") {
-      delete editing.overallPivotX;
-      delete editing.overallPivotY;
-    } else {
-      const layer = editing.layers[transformEditTarget.index];
-      if (layer) { delete layer.pivotX; delete layer.pivotY; transformEditTarget.layer = layer; }
-    }
-    refreshPreviewLoop();
-    const host = document.querySelector(`#${ROOT_ID} .coe-editor-tools`);
-    if (host) renderEditorTools(host);
-  }
-
   function resetOverallTransform() {
     if (!editing) return;
-    for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY", "overallPivotX", "overallPivotY"]) delete editing[key];
+    for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY"]) delete editing[key];
     transformEditTarget = { kind: "overall" };
     refreshPreviewLoop();
     const host = document.querySelector(`#${ROOT_ID} .coe-editor-tools`);
     if (host) renderEditorTools(host);
-  }
-
-  function crosshairUpdate(clientX, clientY) {
-    var el = document.getElementById("coe-crosshair");
-    if (!el) {
-      el = document.createElement("div");
-      el.id = "coe-crosshair";
-      el.className = "coe-crosshair";
-      document.body.appendChild(el);
-    }
-    el.style.left = clientX + "px";
-    el.style.top = clientY + "px";
-  }
-
-  function crosshairRemove() {
-    var el = document.getElementById("coe-crosshair");
-    if (el) el.remove();
-  }
-
-  function transformCanvas() {
-    return getRenderedTransformCanvas()?.canvas || globalThis.GL?.canvas || globalThis.MainCanvas ||
-      (typeof document?.querySelector === "function" ? document.querySelector("canvas") : null);
   }
 
   function bindTransformHandle(button, kind) {
@@ -255,48 +213,14 @@
       event.stopPropagation();
       const layer = transformEditTarget.kind === "layer" ? editing.layers[transformEditTarget.index] : null;
       const overall = transformEditTarget.kind === "overall" ? resolveOverallTransform(editing, globalThis.Player) : null;
-      const layerPivot = layer ? getLayerPivot(layer) : null;
-      const overallDefaultPivot = overall ? computeDefaultOverallPivot(editing, globalThis.Player) : null;
-      const canvas = kind === "pivot" ? transformCanvas() : null;
-      transformPointer = { kind, startX: event.clientX, startY: event.clientY, layer, overall, layerPivot, overallDefaultPivot, canvas,
-        layerKey: layer ? `local:${transformEditTarget.index}` : null,
+      transformPointer = { kind, startX: event.clientX, startY: event.clientY, layer,
         rotation: layer?.rotation || 0, scale: layer?.scale || 1, overallRotation: overall?.rotation || 0, overallScale: overall?.scale || 1 };
-      // 拖拽 pivot 时显示十字光标
-      if (kind === "pivot") crosshairUpdate(event.clientX, event.clientY);
       const move = moveEvent => {
         if (!transformPointer) return;
         const dx = moveEvent.clientX - transformPointer.startX;
         const dy = moveEvent.clientY - transformPointer.startY;
         const state = transformPointer;
-        if (state.kind === "pivot") {
-          // 十字光标跟随 client 坐标；数据则写入其对应的 BC canvas 位置。
-          crosshairUpdate(moveEvent.clientX, moveEvent.clientY);
-          const canvasPoint = state.canvas ? canvasPointFromClient(moveEvent.clientX, moveEvent.clientY, state.canvas) : null;
-          if (state.layer && canvasPoint) {
-            const geometry = getRenderedTransformGeometry(state.layerKey);
-            if (!geometry) return;
-            const overallTransform = state.overall || resolveOverallTransform(editing, globalThis.Player);
-            const pivot = computeAbsoluteLayerPivot(canvasPoint, geometry, {
-              pivotX: state.layerPivot.x, pivotY: state.layerPivot.y,
-              rotation: state.rotation, scale: state.scale, overall: overallTransform,
-            });
-            setOptionalPivotValue(state.layer, "pivotX", pivot.x);
-            setOptionalPivotValue(state.layer, "pivotY", pivot.y);
-            // 同步更新 input 框，显示值就是 clamp 后实际写入的值。
-            var pi = document.querySelector('[data-layer-advanced="pivotX"]');
-            if (pi) pi.value = (typeof state.layer.pivotX === "number" ? state.layer.pivotX : 0.5).toFixed(2);
-            pi = document.querySelector('[data-layer-advanced="pivotY"]');
-            if (pi) pi.value = (typeof state.layer.pivotY === "number" ? state.layer.pivotY : 0.5).toFixed(2);
-          } else if (state.overall && canvasPoint) {
-            const pivot = computeAbsoluteOverallPivot(canvasPoint, state.overall);
-            setOptionalPivotValue(editing, "overallPivotX", pivot.x, state.overallDefaultPivot.x);
-            setOptionalPivotValue(editing, "overallPivotY", pivot.y, state.overallDefaultPivot.y);
-            var pi = document.querySelector('[data-overall-field="pivotX"]');
-            if (pi) pi.value = (typeof editing.overallPivotX === "number" ? editing.overallPivotX : state.overallDefaultPivot.x).toFixed(2);
-            pi = document.querySelector('[data-overall-field="pivotY"]');
-            if (pi) pi.value = (typeof editing.overallPivotY === "number" ? editing.overallPivotY : state.overallDefaultPivot.y).toFixed(2);
-          }
-        } else if (state.kind === "rotate") {
+        if (state.kind === "rotate") {
           const value = state.layer ? state.rotation + dx * Math.PI / 180 : state.overallRotation + dx * Math.PI / 180;
           if (state.layer) setOptionalTransformValue(state.layer, "rotation", clamp(value, -Math.PI, Math.PI), 0);
           else setOptionalTransformValue(editing, "overallRotation", clamp(value, -Math.PI, Math.PI), 0);
@@ -327,7 +251,7 @@
       const label = layer.layerLabel || layer.sourceLayer || `图层 #${index + 1}`;
       return `<option value="${index}">${escapeHTML(`${layer.sourceAsset || "素材"} · ${label}`)}</option>`;
     })).join("");
-    host.innerHTML = `<div class="coe-transform-head"><div><strong>变换中心编辑</strong><span class="coe-muted">${escapeHTML(transformTargetLabel())}</span></div><div class="coe-actions"><select data-transform-target>${options}</select>${transformEditTarget ? '<button type="button" class="coe-btn" data-transform-done>完成</button>' : ''}</div></div><p class="coe-hint">同一中心同时控制旋转和缩放；未激活的图层不会显示变换控件。</p>${transformEditTarget ? '<div class="coe-transform-pad"><button type="button" data-transform-handle="pivot">✚ 中心</button><button type="button" data-transform-handle="rotate">↻ 旋转</button><button type="button" data-transform-handle="scale">⤢ 缩放</button></div>' : ''}`;
+    host.innerHTML = `<div class="coe-transform-head"><div><strong>变换编辑</strong><span class="coe-muted">${escapeHTML(transformTargetLabel())}</span></div><div class="coe-actions"><select data-transform-target>${options}</select>${transformEditTarget ? '<button type="button" class="coe-btn" data-transform-done>完成</button>' : ''}</div></div><p class="coe-hint">旋转和缩放使用固定默认中心；未激活的图层不会显示变换控件。</p>${transformEditTarget ? '<div class="coe-transform-pad"><button type="button" data-transform-handle="rotate">↻ 旋转</button><button type="button" data-transform-handle="scale">⤢ 缩放</button></div>' : ''}`;
     const select = host.querySelector("[data-transform-target]");
     select.value = String(selectedIndex);
     select.addEventListener("change", () => {
@@ -335,13 +259,12 @@
       else setTransformTarget({ kind: "layer", index: Number(select.value) });
     });
     host.querySelector("[data-transform-done]")?.addEventListener("click", () => setTransformTarget(null));
-    bindTransformHandle(host.querySelector('[data-transform-handle="pivot"]'), "pivot");
     bindTransformHandle(host.querySelector('[data-transform-handle="rotate"]'), "rotate");
     bindTransformHandle(host.querySelector('[data-transform-handle="scale"]'), "scale");
     if (!transformEditTarget) return;
     if (transformEditTarget.kind === "overall") {
       const overall = resolveOverallTransform(editing, globalThis.Player);
-      host.insertAdjacentHTML("beforeend", `<div class="coe-transform-fields"><label>旋转<input type="number" step="1" data-overall-field="rotation" value="${Math.round(overall.rotation * 180 / Math.PI * 100) / 100}">°</label><label>缩放<input type="number" step="0.05" min="0.25" max="3" data-overall-field="scale" value="${overall.scale}"></label><label>偏移 X<input type="number" step="1" data-overall-field="offsetX" value="${overall.offsetX}"></label><label>偏移 Y<input type="number" step="1" data-overall-field="offsetY" value="${overall.offsetY}"></label><label>中心 X<input type="number" step="0.01" data-overall-field="pivotX" value="${overall.pivotX}"></label><label>中心 Y<input type="number" step="0.01" data-overall-field="pivotY" value="${overall.pivotY}"></label></div><div class="coe-actions"><button type="button" class="coe-btn" data-reset-center>恢复默认中心</button><button type="button" class="coe-btn" data-reset-overall>重置整体服装变换</button></div>`);
+      host.insertAdjacentHTML("beforeend", `<div class="coe-transform-fields"><label>旋转<input type="number" step="1" data-overall-field="rotation" value="${Math.round(overall.rotation * 180 / Math.PI * 100) / 100}">°</label><label>缩放<input type="number" step="0.05" min="0.25" max="3" data-overall-field="scale" value="${overall.scale}"></label><label>偏移 X<input type="number" step="1" data-overall-field="offsetX" value="${overall.offsetX}"></label><label>偏移 Y<input type="number" step="1" data-overall-field="offsetY" value="${overall.offsetY}"></label></div><div class="coe-actions"><button type="button" class="coe-btn" data-reset-overall>重置整体服装变换</button></div>`);
       host.querySelectorAll("[data-overall-field]").forEach(input => input.addEventListener("input", () => {
         const field = input.dataset.overallField;
         let value = Number(input.value);
@@ -349,33 +272,22 @@
         if (field === "rotation") { value = clamp(value, -180, 180) * Math.PI / 180; setOptionalTransformValue(editing, "overallRotation", value, 0); }
         else if (field === "scale") { value = clamp(value, 0.25, 3); setOptionalTransformValue(editing, "overallScale", value, 1); }
         else if (field === "offsetX" || field === "offsetY") { value = clamp(value, -1200, 1200); setOptionalTransformValue(editing, `overall${field[0].toUpperCase()}${field.slice(1)}`, value, 0); }
-        else {
-          value = clamp(value, -OVERALL_PIVOT_LIMIT, OVERALL_PIVOT_LIMIT);
-          const defaultPivot = computeDefaultOverallPivot(editing, globalThis.Player);
-          setOptionalPivotValue(editing, `overall${field[0].toUpperCase()}${field.slice(1)}`, value, defaultPivot[field === "pivotX" ? "x" : "y"]);
-          const actual = editing[`overall${field[0].toUpperCase()}${field.slice(1)}`];
-          input.value = (typeof actual === "number" ? actual : defaultPivot[field === "pivotX" ? "x" : "y"]).toFixed(2);
-        }
         refreshPreviewLoop();
       }));
-      host.querySelector("[data-reset-center]")?.addEventListener("click", resetTransformCenter);
       host.querySelector("[data-reset-overall]")?.addEventListener("click", resetOverallTransform);
     } else {
       const layer = editing.layers[transformEditTarget.index];
       transformEditTarget.layer = layer;
       if (!layer) return;
-      const pivot = getLayerPivot(layer);
-      host.insertAdjacentHTML("beforeend", `<div class="coe-transform-fields"><label>旋转<input type="number" step="1" data-layer-advanced="rotation" value="${Math.round((layer.rotation || 0) * 180 / Math.PI * 100) / 100}">°</label><label>缩放<input type="number" step="0.05" min="0.25" max="3" data-layer-advanced="scale" value="${layer.scale || 1}"></label><label>中心 X<input type="number" step="0.01" data-layer-advanced="pivotX" value="${pivot.x}"></label><label>中心 Y<input type="number" step="0.01" data-layer-advanced="pivotY" value="${pivot.y}"></label></div><div class="coe-actions"><button type="button" class="coe-btn" data-reset-center>恢复默认中心</button></div>`);
+      host.insertAdjacentHTML("beforeend", `<div class="coe-transform-fields"><label>旋转<input type="number" step="1" data-layer-advanced="rotation" value="${Math.round((layer.rotation || 0) * 180 / Math.PI * 100) / 100}">°</label><label>缩放<input type="number" step="0.05" min="0.25" max="3" data-layer-advanced="scale" value="${layer.scale || 1}"></label></div>`);
       host.querySelectorAll("[data-layer-advanced]").forEach(input => input.addEventListener("input", () => {
         const field = input.dataset.layerAdvanced;
         let value = Number(input.value);
         if (!Number.isFinite(value)) return;
         if (field === "rotation") { value = clamp(value, -180, 180) * Math.PI / 180; setOptionalTransformValue(layer, "rotation", value, 0); }
         else if (field === "scale") { value = clamp(value, 0.25, 3); setOptionalTransformValue(layer, "scale", value, 1); }
-        else { value = clamp(value, -PIVOT_LIMIT, PIVOT_LIMIT); setOptionalPivotValue(layer, field, value); input.value = (typeof layer[field] === "number" ? layer[field] : 0.5).toFixed(2); }
         refreshPreviewLoop();
       }));
-      host.querySelector("[data-reset-center]")?.addEventListener("click", resetTransformCenter);
     }
   }
 
@@ -439,7 +351,7 @@
     const group = document.createElement("section");
     group.className = `coe-material-editor${material.hidden ? " coe-hidden" : ""}${material.collapsed ? " coe-collapsed" : ""}`;
     const overallLabel = uniform ? colors[0] : "多种颜色";
-    group.innerHTML = `<div class="coe-material-editor-head"><button class="coe-collapse" type="button" data-collapse>${material.collapsed ? "▶" : "▼"}</button><div class="coe-material-identity"><strong>${escapeHTML(material.label || asset?.Description || material.sourceAsset)}</strong><span class="coe-muted">${escapeHTML(material.sourceGroup)} · ${layers.length} 层</span></div><label class="coe-overall-color">整体颜色<button type="button" class="coe-color-choice" data-overall-color title="使用游戏原版颜色选择器统一修改所有可着色颜色槽"><span class="coe-color-swatch"></span><code>${escapeHTML(overallLabel)}</code></button></label><button class="coe-btn" data-edit-overall>调整整体中心</button><button class="coe-btn" data-hide-material>${material.hidden ? "显示" : "隐藏"}</button><button class="coe-btn" data-reset-material>整件默认</button><button class="coe-btn coe-danger" data-remove-material>移除素材</button></div><div class="coe-material-editor-layers"></div>`;
+    group.innerHTML = `<div class="coe-material-editor-head"><button class="coe-collapse" type="button" data-collapse>${material.collapsed ? "▶" : "▼"}</button><div class="coe-material-identity"><strong>${escapeHTML(material.label || asset?.Description || material.sourceAsset)}</strong><span class="coe-muted">${escapeHTML(material.sourceGroup)} · ${layers.length} 层</span></div><label class="coe-overall-color">整体颜色<button type="button" class="coe-color-choice" data-overall-color title="使用游戏原版颜色选择器统一修改所有可着色颜色槽"><span class="coe-color-swatch"></span><code>${escapeHTML(overallLabel)}</code></button></label><button class="coe-btn" data-edit-overall>调整整体变换</button><button class="coe-btn" data-hide-material>${material.hidden ? "显示" : "隐藏"}</button><button class="coe-btn" data-reset-material>整件默认</button><button class="coe-btn coe-danger" data-remove-material>移除素材</button></div><div class="coe-material-editor-layers"></div>`;
     updateColorChoice(group.querySelector("[data-overall-color]"), overallColor, defaultHex, overallLabel);
     group.querySelector("[data-edit-overall]").addEventListener("click", () => setTransformTarget({ kind: "overall" }));
     group.querySelector("[data-collapse]").addEventListener("click", () => {
@@ -476,8 +388,6 @@
         layer.hidden = false;
         layer.rotation = layer.defaultRotation;
         layer.scale = layer.defaultScale;
-        delete layer.pivotX;
-        delete layer.pivotY;
       });
       refreshPreviewLoop();
       renderLayerList(list);
@@ -507,7 +417,7 @@
       card.className = `coe-layer${layer.hidden ? " coe-hidden" : ""}`;
       var layerRotDeg = Math.round(((layer.rotation || 0) * 180 / Math.PI) * 100) / 100;
       var layerScaleVal = typeof layer.scale === "number" ? layer.scale : 1;
-      card.innerHTML = `<div class="coe-layer-top"><span class="coe-layer-name" title="${escapeHTML(`${layer.sourceGroup}/${layer.sourceAsset}/${layerName}`)}">${escapeHTML(layerName)}</span>${sourceLayer?.ColorGroup ? `<span class="coe-badge">颜色组：${escapeHTML(sourceLayer.ColorGroup)}</span>` : ""}<button type="button" class="coe-btn" data-edit-transform>调整中心</button><button type="button" class="coe-btn" data-hide>${layer.hidden ? "显示" : "隐藏"}</button><button type="button" class="coe-btn" data-copy>复制</button><button type="button" class="coe-btn" data-reset>本层默认</button><button type="button" class="coe-btn coe-danger" data-remove>清除</button></div><div class="coe-controls"><label>图层位置<input type="number" min="-99" max="99" step="1" data-key="priority" value="${layer.priority}"></label><label>偏移 X<input type="number" min="-1200" max="1200" step="1" data-key="offsetX" value="${layer.offsetX}"></label><label>偏移 Y<input type="number" min="-1200" max="1200" step="1" data-key="offsetY" value="${layer.offsetY}"></label><label>透明度<input type="number" min="0" max="1" step="0.05" data-key="opacity" value="${layer.opacity}"></label><label>图层颜色<button type="button" class="coe-color-choice" data-layer-color="${layerIndex}" ${canColor ? "" : "disabled"} title="${canColor ? `使用游戏原版颜色选择器编辑颜色槽 ${colorIndex}` : "原版将此图层标记为不可着色"}"><span class="coe-color-swatch"></span><code>${escapeHTML(material.colors[colorIndex] || "Default")}</code></button></label></div><div class="coe-layer-transform"><label>旋转<input type="number" step="1" min="-180" max="180" data-layer-transform="rotation" value="${layerRotDeg}">°</label><label>缩放<input type="number" step="0.05" min="0.25" max="3" data-layer-transform="scale" value="${layerScaleVal}"></label></div>`;
+      card.innerHTML = `<div class="coe-layer-top"><span class="coe-layer-name" title="${escapeHTML(`${layer.sourceGroup}/${layer.sourceAsset}/${layerName}`)}">${escapeHTML(layerName)}</span>${sourceLayer?.ColorGroup ? `<span class="coe-badge">颜色组：${escapeHTML(sourceLayer.ColorGroup)}</span>` : ""}<button type="button" class="coe-btn" data-edit-transform>调整变换</button><button type="button" class="coe-btn" data-hide>${layer.hidden ? "显示" : "隐藏"}</button><button type="button" class="coe-btn" data-copy>复制</button><button type="button" class="coe-btn" data-reset>本层默认</button><button type="button" class="coe-btn coe-danger" data-remove>清除</button></div><div class="coe-controls"><label>图层位置<input type="number" min="-99" max="99" step="1" data-key="priority" value="${layer.priority}"></label><label>偏移 X<input type="number" min="-1200" max="1200" step="1" data-key="offsetX" value="${layer.offsetX}"></label><label>偏移 Y<input type="number" min="-1200" max="1200" step="1" data-key="offsetY" value="${layer.offsetY}"></label><label>透明度<input type="number" min="0" max="1" step="0.05" data-key="opacity" value="${layer.opacity}"></label><label>图层颜色<button type="button" class="coe-color-choice" data-layer-color="${layerIndex}" ${canColor ? "" : "disabled"} title="${canColor ? `使用游戏原版颜色选择器编辑颜色槽 ${colorIndex}` : "原版将此图层标记为不可着色"}"><span class="coe-color-swatch"></span><code>${escapeHTML(material.colors[colorIndex] || "Default")}</code></button></label></div><div class="coe-layer-transform"><label>旋转<input type="number" step="1" min="-180" max="180" data-layer-transform="rotation" value="${layerRotDeg}">°</label><label>缩放<input type="number" step="0.05" min="0.25" max="3" data-layer-transform="scale" value="${layerScaleVal}"></label></div>`;
       updateColorChoice(card.querySelector("[data-layer-color]"), material.colors[colorIndex] || "Default", colorValue);
       card.querySelector("[data-edit-transform]").addEventListener("click", () => setTransformTarget({ kind: "layer", index: editing.layers.indexOf(layer), layer }));
       card.querySelector("[data-hide]").addEventListener("click", () => {
@@ -524,8 +434,6 @@
         layer.color = null;
         layer.rotation = layer.defaultRotation;
         layer.scale = layer.defaultScale;
-        delete layer.pivotX;
-        delete layer.pivotY;
         if (canColor) material.colors[colorIndex] = material.defaultColors?.[colorIndex] || asset?.DefaultColor?.[colorIndex] || "Default";
         refreshPreviewLoop();
         renderLayerList(list);

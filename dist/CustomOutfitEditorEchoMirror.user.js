@@ -45,12 +45,6 @@
   let editing = null;
   let editingId = null;
   let syntheticByCharacter = new WeakMap();
-  // 最近一帧实际绘制几何，供编辑器把 client 坐标转换为 BC canvas 坐标。
-  // key 是非持久化的运行时图层 key，绝不进入方案或远程协议。
-  let renderedTransformGeometry = new Map();
-  let renderedTransformCanvas = null;
-  function getRenderedTransformGeometry(key) { return renderedTransformGeometry.get(key) || null; }
-  function getRenderedTransformCanvas() { return renderedTransformCanvas; }
   let wardrobe = { version: 5, schemes: [], equippedIds: [] };
   let wardrobeReadState = { status: "absent", source: null, server: null, local: null, conflict: false };
   let persistenceBlocked = false;
@@ -109,9 +103,6 @@
     return `${group}\u0000${asset}`;
   }
 
-  const PIVOT_LIMIT = 10;
-  const OVERALL_PIVOT_LIMIT = 5000;
-
   function optionalFiniteNumber(value, min, max) {
     return typeof value === "number" && Number.isFinite(value) ? clamp(value, min, max) : undefined;
   }
@@ -123,11 +114,7 @@
     const scale = typeof raw.scale === "number" && isFinite(raw.scale) && Math.abs(raw.scale - 1) > 0.001
       ? clamp(raw.scale, 0.25, 3.0)
       : undefined;
-    // A missing pivot deliberately means "use the current texture default".
-    // Keeping it undefined is what lets storage omit an untouched default center.
-    const pivotX = optionalFiniteNumber(raw.pivotX, -PIVOT_LIMIT, PIVOT_LIMIT);
-    const pivotY = optionalFiniteNumber(raw.pivotY, -PIVOT_LIMIT, PIVOT_LIMIT);
-    return { rotation, scale, pivotX, pivotY };
+    return { rotation, scale };
   }
 
   function normalizeOverallTransform(raw) {
@@ -139,8 +126,6 @@
         ? clamp(raw.overallScale, 0.25, 3.0) : undefined,
       overallOffsetX: optionalFiniteNumber(raw.overallOffsetX, -1200, 1200),
       overallOffsetY: optionalFiniteNumber(raw.overallOffsetY, -1200, 1200),
-      overallPivotX: optionalFiniteNumber(raw.overallPivotX, -OVERALL_PIVOT_LIMIT, OVERALL_PIVOT_LIMIT),
-      overallPivotY: optionalFiniteNumber(raw.overallPivotY, -OVERALL_PIVOT_LIMIT, OVERALL_PIVOT_LIMIT),
     };
   }
 
@@ -174,8 +159,6 @@
       defaultRotation: undefined,
       scale: transform.scale,
       defaultScale: undefined,
-      pivotX: transform.pivotX,
-      pivotY: transform.pivotY,
     };
   }
 
@@ -272,13 +255,6 @@
     return output;
   }
 
-  function getLayerPivot(layer) {
-    return {
-      x: typeof layer?.pivotX === "number" && Number.isFinite(layer.pivotX) ? layer.pivotX : 0.5,
-      y: typeof layer?.pivotY === "number" && Number.isFinite(layer.pivotY) ? layer.pivotY : 0.5,
-    };
-  }
-
   function firstFinite(value, fallback = 0) {
     if (typeof value === "number" && Number.isFinite(value)) return value;
     if (value && typeof value === "object") {
@@ -312,7 +288,7 @@
     return { left: firstFinite(sourceLayer?.DrawingLeft, 0), top: firstFinite(sourceLayer?.DrawingTop, 0), width: Math.max(1, width), height: Math.max(1, height) };
   }
 
-  function computeDefaultOverallPivot(composition, character = globalThis.Player) {
+  function computeDefaultOverallCenter(composition, character = globalThis.Player) {
     let largest = null;
     for (const layer of composition?.layers || []) {
       if (layer.hidden) continue;
@@ -332,86 +308,21 @@
       var area = Math.max(1, width) * Math.max(1, height);
       if (!largest || area > largest.area) largest = { left: left, top: top, width: width, height: height, area: area };
     }
-    // Overall pivots are expressed in composition/screen pixels. Use the
-    // character canvas center as a stable empty-composition fallback rather
-    // than the layer-local default (0.5, 0.5).
+    // Overall transform centers are expressed in composition/screen pixels. Use
+    // the character canvas center as a stable empty-composition fallback.
     if (!largest) return { x: 250, y: 275 };
     return { x: largest.left + largest.width / 2, y: largest.top + largest.height / 2 };
   }
 
   function resolveOverallTransform(composition, character = globalThis.Player) {
-    const fallback = computeDefaultOverallPivot(composition, character);
+    const center = computeDefaultOverallCenter(composition, character);
     return {
       rotation: typeof composition?.overallRotation === "number" ? composition.overallRotation : 0,
       scale: typeof composition?.overallScale === "number" ? composition.overallScale : 1,
       offsetX: typeof composition?.overallOffsetX === "number" ? composition.overallOffsetX : 0,
       offsetY: typeof composition?.overallOffsetY === "number" ? composition.overallOffsetY : 0,
-      pivotX: typeof composition?.overallPivotX === "number" ? composition.overallPivotX : fallback.x,
-      pivotY: typeof composition?.overallPivotY === "number" ? composition.overallPivotY : fallback.y,
-      customPivot: typeof composition?.overallPivotX === "number" || typeof composition?.overallPivotY === "number",
-    };
-  }
-
-  function canvasPointFromClient(clientX, clientY, canvas) {
-    const rect = typeof canvas?.getBoundingClientRect === "function" ? canvas.getBoundingClientRect() : null;
-    const width = Number(canvas?.width) > 0 ? Number(canvas.width) : Number(rect?.width) || 1;
-    const height = Number(canvas?.height) > 0 ? Number(canvas.height) : Number(rect?.height) || 1;
-    const cssWidth = Number(rect?.width) > 0 ? Number(rect.width) : width;
-    const cssHeight = Number(rect?.height) > 0 ? Number(rect.height) : height;
-    return {
-      x: (Number(clientX) - (Number(rect?.left) || 0)) * width / cssWidth,
-      y: (Number(clientY) - (Number(rect?.top) || 0)) * height / cssHeight,
-    };
-  }
-
-  function inverseTransformPoint(point, pivot, rotation = 0, scale = 1, offsetX = 0, offsetY = 0) {
-    const safeScale = Number.isFinite(scale) && Math.abs(scale) > 0.000001 ? scale : 1;
-    const angle = Number.isFinite(rotation) ? rotation : 0;
-    let x = point.x - pivot.x - (Number.isFinite(offsetX) ? offsetX : 0);
-    let y = point.y - pivot.y - (Number.isFinite(offsetY) ? offsetY : 0);
-    const cosine = Math.cos(angle);
-    const sine = Math.sin(angle);
-    const rotatedX = x * cosine + y * sine;
-    const rotatedY = -x * sine + y * cosine;
-    return { x: rotatedX / safeScale + pivot.x, y: rotatedY / safeScale + pivot.y };
-  }
-
-  function computeAbsoluteOverallPivot(pointerCanvas, transform) {
-    const point = pointerCanvas && Number.isFinite(pointerCanvas.x) && Number.isFinite(pointerCanvas.y)
-      ? pointerCanvas : { x: 0, y: 0 };
-    const current = transform || {};
-    return {
-      x: clamp(inverseTransformPoint(point, { x: Number(current.pivotX) || 0, y: Number(current.pivotY) || 0 }, current.rotation, current.scale, current.offsetX, current.offsetY).x, -OVERALL_PIVOT_LIMIT, OVERALL_PIVOT_LIMIT),
-      y: clamp(inverseTransformPoint(point, { x: Number(current.pivotX) || 0, y: Number(current.pivotY) || 0 }, current.rotation, current.scale, current.offsetX, current.offsetY).y, -OVERALL_PIVOT_LIMIT, OVERALL_PIVOT_LIMIT),
-    };
-  }
-
-  function computeAbsoluteLayerPivot(pointerCanvas, geometry, transform) {
-    const point = pointerCanvas && Number.isFinite(pointerCanvas.x) && Number.isFinite(pointerCanvas.y)
-      ? pointerCanvas : { x: 0, y: 0 };
-    const record = geometry || {};
-    const width = Number(record.textureWidth) > 0 ? Number(record.textureWidth) : 1;
-    const height = Number(record.textureHeight) > 0 ? Number(record.textureHeight) : 1;
-    const mirror = record.mirror === true;
-    const invert = record.invert === true;
-    const signedWidth = mirror ? -width : width;
-    const signedHeight = invert ? -height : height;
-    const drawX = Number.isFinite(record.drawX) ? record.drawX : 0;
-    const drawY = Number.isFinite(record.drawY) ? record.drawY : 0;
-    const localPivot = {
-      x: Number.isFinite(transform?.pivotX) ? transform.pivotX : 0.5,
-      y: Number.isFinite(transform?.pivotY) ? transform.pivotY : 0.5,
-    };
-    const localPivotScreen = { x: drawX + localPivot.x * signedWidth, y: drawY + localPivot.y * signedHeight };
-    let base = point;
-    if (transform?.overall) {
-      const overall = transform.overall;
-      base = inverseTransformPoint(base, { x: Number(overall.pivotX) || 0, y: Number(overall.pivotY) || 0 }, overall.rotation, overall.scale, overall.offsetX, overall.offsetY);
-    }
-    base = inverseTransformPoint(base, localPivotScreen, transform?.rotation, transform?.scale);
-    return {
-      x: clamp((base.x - drawX) / signedWidth, -PIVOT_LIMIT, PIVOT_LIMIT),
-      y: clamp((base.y - drawY) / signedHeight, -PIVOT_LIMIT, PIVOT_LIMIT),
+      centerX: center.x,
+      centerY: center.y,
     };
   }
 
@@ -472,8 +383,6 @@
     if (layer.color) output.color = layer.color;
     if (typeof layer.rotation === "number" && layer.rotation !== 0) output.rotation = layer.rotation;
     if (typeof layer.scale === "number" && Math.abs(layer.scale - 1) > 0.001) output.scale = layer.scale;
-    if (typeof layer.pivotX === "number") output.pivotX = layer.pivotX;
-    if (typeof layer.pivotY === "number") output.pivotY = layer.pivotY;
     return output;
   }
 
@@ -499,7 +408,7 @@
       materials: normalized.materials.map(compactMaterialForStorage),
       layers: normalized.layers.map(compactLayerForStorage),
     };
-    for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY", "overallPivotX", "overallPivotY"]) {
+    for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY"]) {
       if (typeof normalized[key] === "number") compact[key] = normalized[key];
     }
     if (normalized.recycle.length) compact.recycle = normalized.recycle.map(compactLayerForStorage);
@@ -895,11 +804,6 @@
         perLayerProperty.Rotation = clamp(ref.rotation, -Math.PI, Math.PI);
       if (typeof ref.scale === "number" && isFinite(ref.scale) && Math.abs(ref.scale - 1) > 0.001)
         perLayerProperty.Scale = clamp(ref.scale, 0.25, 3.0);
-      // 图层级 pivot 注入（供 ExtendedItemGetDrawingOptions 和 GLDrawImage 双重路径消费）
-      if (typeof ref.pivotX === "number")
-        perLayerProperty.PivotX = clamp(ref.pivotX, -PIVOT_LIMIT, PIVOT_LIMIT);
-      if (typeof ref.pivotY === "number")
-        perLayerProperty.PivotY = clamp(ref.pivotY, -PIVOT_LIMIT, PIVOT_LIMIT);
       // 素材服装组整体变换参数注入
       if (overall) {
         if (typeof overall.rotation === "number" && overall.rotation !== 0)
@@ -910,10 +814,8 @@
           perLayerProperty.OverallOffsetX = clamp(overall.offsetX, -1200, 1200);
         if (typeof overall.offsetY === "number" && overall.offsetY !== 0)
           perLayerProperty.OverallOffsetY = clamp(overall.offsetY, -1200, 1200);
-        if (typeof overall.pivotX === "number")
-          perLayerProperty.OverallPivotX = clamp(overall.pivotX, -OVERALL_PIVOT_LIMIT, OVERALL_PIVOT_LIMIT);
-        if (typeof overall.pivotY === "number")
-          perLayerProperty.OverallPivotY = clamp(overall.pivotY, -OVERALL_PIVOT_LIMIT, OVERALL_PIVOT_LIMIT);
+        perLayerProperty.OverallCenterX = overall.centerX;
+        perLayerProperty.OverallCenterY = overall.centerY;
       }
       const item = {
         Asset: visualAsset,
@@ -965,9 +867,6 @@
     for (let layerIndex = 0; layerIndex < composition.layers.length; layerIndex++) {
       const ref = composition.layers[layerIndex];
       if (ref.hidden) continue;
-      // index-based key remains stable across render normalization and distinguishes
-      // copied layers that intentionally reference the same source image.
-      ref.__coeTransformKey = `local:${layerIndex}`;
       const material = materialMap.get(ref.materialId);
       if (!material || material.hidden) continue;
       if (!groupedRefs.has(material.id)) groupedRefs.set(material.id, []);
@@ -1003,6 +902,141 @@
     return groups;
   }
 
+  const CONTENT_ALPHA_THRESHOLD = 16;
+  const CONTENT_MIN_PIXELS = 4;
+  const CONTENT_SCAN_MAX_EDGE = 512;
+  const textureContentPivotCache = new Map();
+  let contentPivotRefreshScheduled = false;
+
+  // Alpha 边界只依赖纹理本身，与颜色、Mirror、Invert 和图层变换无关。
+  // 因此扫描结果按 URL 缓存，不能在每帧读取像素。
+  function scanAlphaBounds(data, width, height, threshold = CONTENT_ALPHA_THRESHOLD) {
+    if (!data || !Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) return null;
+    let minX = width;
+    let minY = height;
+    let maxX = -1;
+    let maxY = -1;
+    let count = 0;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const alpha = data[(y * width + x) * 4 + 3];
+        if (!(Number(alpha) >= threshold)) continue;
+        count++;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+    if (count < CONTENT_MIN_PIXELS || maxX < minX || maxY < minY) return null;
+    return { minX, minY, maxX, maxY, count };
+  }
+
+  function contentPivotFromBounds(bounds, width, height) {
+    if (!bounds || !(Number(width) > 0) || !(Number(height) > 0)) return { x: 0.5, y: 0.5 };
+    const x = (Number(bounds.minX) + Number(bounds.maxX) + 1) / 2 / Number(width);
+    const y = (Number(bounds.minY) + Number(bounds.maxY) + 1) / 2 / Number(height);
+    return {
+      x: Number.isFinite(x) ? clamp(x, 0, 1) : 0.5,
+      y: Number.isFinite(y) ? clamp(y, 0, 1) : 0.5,
+    };
+  }
+
+  function scheduleContentPivotRefresh() {
+    if (contentPivotRefreshScheduled) return;
+    contentPivotRefreshScheduled = true;
+    const refresh = () => {
+      contentPivotRefreshScheduled = false;
+      try {
+        if (typeof globalThis.CharacterRefresh === "function" && globalThis.Player) {
+          CharacterRefresh(globalThis.Player, false, false);
+          const characters = Array.isArray(globalThis.ChatRoomCharacter) ? globalThis.ChatRoomCharacter : [];
+          for (const character of characters) {
+            if (character && character !== globalThis.Player) CharacterRefresh(character, false, false);
+          }
+        }
+      } catch (_) { /* Alpha 中心仅是视觉增强，刷新失败时保留几何中心 fallback */ }
+    };
+    if (typeof globalThis.requestAnimationFrame === "function") globalThis.requestAnimationFrame(refresh);
+    else if (typeof globalThis.setTimeout === "function") globalThis.setTimeout(refresh, 0);
+  }
+
+  function finishTextureContentPivot(url, pivot) {
+    const current = textureContentPivotCache.get(url);
+    if (!current || current.status !== "pending") return;
+    textureContentPivotCache.set(url, { status: "ready", pivot });
+    scheduleContentPivotRefresh();
+  }
+
+  function scanTextureContentPivot(url) {
+    if (!url || typeof document === "undefined" || typeof document.createElement !== "function") return;
+    const current = textureContentPivotCache.get(url);
+    if (current) return;
+    textureContentPivotCache.set(url, { status: "pending" });
+    try {
+      const ImageCtor = globalThis.Image;
+      // GLDrawLoadImage 已经维护了一份同 URL 的图片缓存。优先复用它，
+      // 避免另起一个 Image 导致第二份图片尚未加载，而 WebGL 原图其实已经可用。
+      const cachedImage = typeof globalThis.GLDrawImageCache?.get === "function"
+        ? globalThis.GLDrawImageCache.get(url) : null;
+      if (!cachedImage && typeof ImageCtor !== "function") throw new Error("image-constructor-unavailable");
+      const image = cachedImage || new ImageCtor();
+      let settled = false;
+      const fail = () => {
+        if (settled) return;
+        settled = true;
+        const pending = textureContentPivotCache.get(url);
+        if (pending?.status === "pending") textureContentPivotCache.set(url, { status: "failed" });
+      };
+      const complete = () => {
+        if (settled) return;
+        settled = true;
+        try {
+          const naturalWidth = Number(image.naturalWidth || image.width);
+          const naturalHeight = Number(image.naturalHeight || image.height);
+          if (!(naturalWidth > 0) || !(naturalHeight > 0)) throw new Error("image-dimensions-unavailable");
+          const ratio = Math.min(1, CONTENT_SCAN_MAX_EDGE / Math.max(naturalWidth, naturalHeight));
+          const width = Math.max(1, Math.round(naturalWidth * ratio));
+          const height = Math.max(1, Math.round(naturalHeight * ratio));
+          const canvas = document.createElement("canvas");
+          canvas.width = width;
+          canvas.height = height;
+          const context = canvas.getContext?.("2d", { willReadFrequently: true });
+          if (!context || typeof context.drawImage !== "function" || typeof context.getImageData !== "function") throw new Error("canvas-pixel-reader-unavailable");
+          context.clearRect?.(0, 0, width, height);
+          context.drawImage(image, 0, 0, width, height);
+          const imageData = context.getImageData(0, 0, width, height);
+          const bounds = scanAlphaBounds(imageData?.data, width, height);
+          finishTextureContentPivot(url, bounds ? contentPivotFromBounds(bounds, width, height) : { x: 0.5, y: 0.5 });
+        } catch (_) {
+          const pending = textureContentPivotCache.get(url);
+          if (pending?.status === "pending") textureContentPivotCache.set(url, { status: "failed" });
+          scheduleContentPivotRefresh();
+        }
+      };
+      if (typeof image.addEventListener === "function") {
+        image.addEventListener("load", complete, { once: true });
+        image.addEventListener("error", fail, { once: true });
+      } else {
+        image.onload = complete;
+        image.onerror = fail;
+      }
+      if (!cachedImage) image.src = url;
+      if (image.complete && Number(image.naturalWidth || image.width) > 0) complete();
+    } catch (_) {
+      const pending = textureContentPivotCache.get(url);
+      if (pending?.status === "pending") textureContentPivotCache.set(url, { status: "failed" });
+    }
+  }
+
+  function resolveTextureContentPivot(url) {
+    if (!url) return null;
+    const cached = textureContentPivotCache.get(url);
+    if (cached?.status === "ready" && cached.pivot) return cached.pivot;
+    if (!cached) scanTextureContentPivot(url);
+    return null;
+  }
+
   // 从纹理 URL 解析出资产和图层，获取纹理原始宽高
   function resolveTextureDimensions(url) {
     try {
@@ -1029,36 +1063,6 @@
     } catch (_) { return null; }
   }
 
-  function resolveRenderCanvas(gl = null) {
-    const canvas = gl?.canvas || globalThis.GL?.canvas || globalThis.MainCanvas ||
-      (typeof document?.querySelector === "function" ? document.querySelector("canvas") : null);
-    if (!canvas) return null;
-    const rect = typeof canvas.getBoundingClientRect === "function" ? canvas.getBoundingClientRect() : null;
-    const width = Number(canvas.width) > 0 ? Number(canvas.width) : Number(rect?.width) || 1;
-    const height = Number(canvas.height) > 0 ? Number(canvas.height) : Number(rect?.height) || 1;
-    renderedTransformCanvas = { canvas, width, height, rect: rect ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height } : null };
-    return renderedTransformCanvas;
-  }
-
-  function recordRenderedTransformGeometry(key, x, y, options = {}, url = "", dimensions = null, offsetX = 0, gl = null) {
-    if (!key || !Number.isFinite(Number(x)) || !Number.isFinite(Number(y))) return;
-    const canvas = resolveRenderCanvas(gl);
-    const dim = dimensions || resolveTextureDimensions(url) || {};
-    const width = Number(dim.w) > 0 ? Number(dim.w) : 1;
-    const height = Number(dim.h) > 0 ? Number(dim.h) : 1;
-    const rawX = Number(x) + (Number.isFinite(Number(offsetX)) ? Number(offsetX) : 0);
-    const rawY = Number(y);
-    const mirror = options.Mirror === true;
-    const invert = options.Invert === true;
-    const drawX = mirror ? (canvas?.width || 500) - rawX : rawX;
-    const drawY = invert ? (canvas?.height || 0) - rawY + 550 : rawY;
-    renderedTransformGeometry.set(key, {
-      key, drawX, drawY, rawX, rawY, textureWidth: width, textureHeight: height,
-      canvasWidth: canvas?.width || null, canvasHeight: canvas?.height || null,
-      mirror, invert, timestamp: Date.now(),
-    });
-  }
-
   // 合成图层的变换参数渲染穿线
   function installTransformRenderHooks() {
     // --- ExtendedItemGetDrawingOptions hook ---
@@ -1075,16 +1079,13 @@
           // 只传递非缺省值，保持 drawOptions 精简
           if (typeof p.Rotation === "number" && p.Rotation !== 0) base.Rotation = p.Rotation;
           if (typeof p.Scale === "number" && Math.abs(p.Scale - 1) > 0.001) base.Scale = p.Scale;
-          // 图层级 pivot
-          if (typeof p.PivotX === "number") base.PivotX = p.PivotX;
-          if (typeof p.PivotY === "number") base.PivotY = p.PivotY;
           // 素材服装组整体变换参数
           if (typeof p.OverallRotation === "number" && p.OverallRotation !== 0) base.OverallRotation = p.OverallRotation;
           if (typeof p.OverallScale === "number" && Math.abs(p.OverallScale - 1) > 0.001) base.OverallScale = p.OverallScale;
           if (typeof p.OverallOffsetX === "number") base.OverallOffsetX = p.OverallOffsetX;
           if (typeof p.OverallOffsetY === "number") base.OverallOffsetY = p.OverallOffsetY;
-          if (typeof p.OverallPivotX === "number") base.OverallPivotX = p.OverallPivotX;
-          if (typeof p.OverallPivotY === "number") base.OverallPivotY = p.OverallPivotY;
+          if (typeof p.OverallCenterX === "number") base.OverallCenterX = p.OverallCenterX;
+          if (typeof p.OverallCenterY === "number") base.OverallCenterY = p.OverallCenterY;
           return base;
         });
       }
@@ -1097,16 +1098,13 @@
       GLDrawImage = function coeGLDrawImage(url, gl, dstX, dstY, options, offsetX) {
         try {
           var opts = options || {};
-        var geometryKey = opts.__coeTransformKey;
-        if (geometryKey) recordRenderedTransformGeometry(geometryKey, dstX, dstY, opts, url, null, offsetX, gl);
         var rotation = typeof opts.Rotation === "number" ? opts.Rotation : 0;
         var scale = typeof opts.Scale === "number" ? opts.Scale : 1;
         var overallRotation = typeof opts.OverallRotation === "number" ? opts.OverallRotation : 0;
         var overallScale = typeof opts.OverallScale === "number" ? opts.OverallScale : 1;
         var overallOffsetX = typeof opts.OverallOffsetX === "number" ? opts.OverallOffsetX : 0;
         var overallOffsetY = typeof opts.OverallOffsetY === "number" ? opts.OverallOffsetY : 0;
-        // 无变换时直接走原始函数，保持零开销。自定义 pivot 本身不改变
-        // 图像，只有和旋转/缩放组合时才需要进入 GL 矩阵路径。
+        // 无变换时直接走原始函数，保持零开销。
         if (!rotation && Math.abs(scale - 1) <= 0.001 && !overallRotation && Math.abs(overallScale - 1) <= 0.001 &&
           !overallOffsetX && !overallOffsetY) {
           return _gldrawOriginal.call(window, url, gl, dstX, dstY, options, offsetX);
@@ -1135,7 +1133,6 @@
           return _gldrawOriginal.call(window, url, gl, dstX, dstY, options, offsetX);
         }
         var texW = dim.w, texH = dim.h;
-        if (geometryKey) recordRenderedTransformGeometry(geometryKey, dstX, dstY, opts, url, dim, offsetX, gl);
         var uniformScale = clamp(scale, 0.25, 3.0);
         var groupScale = clamp(overallScale, 0.25, 3.0);
         var off = typeof offsetX === "number" ? offsetX : 0;
@@ -1147,12 +1144,15 @@
         if (invert) drawY = gl.canvas.height - drawY + 550;
         var signedW = (mirror ? -1 : 1) * texW;
         var signedH = (invert ? -1 : 1) * texH;
-        var localPivotX = typeof opts.PivotX === "number" ? opts.PivotX : 0.5;
-        var localPivotY = typeof opts.PivotY === "number" ? opts.PivotY : 0.5;
-        var localPivotScreenX = drawX + localPivotX * signedW;
-        var localPivotScreenY = drawY + localPivotY * signedH;
-        var overallPivotX = typeof opts.OverallPivotX === "number" ? opts.OverallPivotX : localPivotScreenX;
-        var overallPivotY = typeof opts.OverallPivotY === "number" ? opts.OverallPivotY : localPivotScreenY;
+        // Alpha 扫描异步完成前使用纹理中点；完成后使用有效内容包围盒中心。
+        // 使用归一化局部坐标乘以 signedW/signedH，Mirror / Invert 会自然反映到屏幕坐标。
+        var contentPivot = (rotation || Math.abs(scale - 1) > 0.001) ? resolveTextureContentPivot(url) : null;
+        var localPivotX = contentPivot?.x ?? 0.5;
+        var localPivotY = contentPivot?.y ?? 0.5;
+        var localCenterScreenX = drawX + localPivotX * signedW;
+        var localCenterScreenY = drawY + localPivotY * signedH;
+        var overallCenterX = typeof opts.OverallCenterX === "number" ? opts.OverallCenterX : localCenterScreenX;
+        var overallCenterY = typeof opts.OverallCenterY === "number" ? opts.OverallCenterY : localCenterScreenY;
 
         var program = gl.getParameter(gl.CURRENT_PROGRAM);
         if (!program) return _gldrawOriginal.call(window, url, gl, dstX, dstY, options, offsetX);
@@ -1163,24 +1163,24 @@
         if (!uMatrix) return _gldrawOriginal.call(window, url, gl, dstX, dstY, options, offsetX);
 
         var matrix = m4.orthographic(0, gl.canvas.width, gl.canvas.height, 0, -1, 1);
-        // 顶点仍是单位正方形，所有 pivot 先转换到像素合成空间，再把
-        // 纹理尺寸放在矩阵最右端。矩阵顺序表达：整体 × 局部 × 原图。
-        matrix = m4.translate(matrix, overallPivotX + overallOffsetX, overallPivotY + overallOffsetY, 0);
+        // 顶点仍是单位正方形，局部使用素材中点，整体使用自动计算位置，
+        // 再把纹理尺寸放在矩阵最右端。矩阵顺序表达：整体 × 局部 × 原图。
+        matrix = m4.translate(matrix, overallCenterX + overallOffsetX, overallCenterY + overallOffsetY, 0);
         if (overallRotation) {
           matrix = typeof m4.zRotate === "function"
             ? m4.zRotate(matrix, overallRotation)
             : m4.multiply(matrix, m4.zRotation(overallRotation));
         }
         matrix = m4.scale(matrix, groupScale, groupScale, 1);
-        matrix = m4.translate(matrix, -overallPivotX, -overallPivotY, 0);
-        matrix = m4.translate(matrix, localPivotScreenX, localPivotScreenY, 0);
+        matrix = m4.translate(matrix, -overallCenterX, -overallCenterY, 0);
+        matrix = m4.translate(matrix, localCenterScreenX, localCenterScreenY, 0);
         if (rotation) {
           matrix = typeof m4.zRotate === "function"
             ? m4.zRotate(matrix, rotation)
             : m4.multiply(matrix, m4.zRotation(rotation));
         }
         matrix = m4.scale(matrix, uniformScale, uniformScale, 1);
-        matrix = m4.translate(matrix, -localPivotScreenX, -localPivotScreenY, 0);
+        matrix = m4.translate(matrix, -localCenterScreenX, -localCenterScreenY, 0);
         matrix = m4.translate(matrix, drawX, drawY, 0);
         matrix = m4.scale(matrix, signedW, signedH, 1);
 
@@ -1219,10 +1219,7 @@
         offsetY: layer.y,
         opacity: layer.o,
         hidden: false,
-        __coeTransformKey: `remote:${memberNumber}:${layer.m}:${layer.i}:${duplicateIndex}`,
       };
-      if (typeof layer.px === "number") remoteRef.pivotX = layer.px;
-      if (typeof layer.py === "number") remoteRef.pivotY = layer.py;
       if (typeof layer.r === "number" && layer.r !== 0) remoteRef.rotation = layer.r;
       if (typeof layer.s === "number" && Math.abs(layer.s - 1) > 0.001) remoteRef.scale = layer.s;
       refsByMaterial.get(layer.m).push(remoteRef);
@@ -1233,8 +1230,6 @@
       overallScale: snapshot.os,
       overallOffsetX: snapshot.ox,
       overallOffsetY: snapshot.oy,
-      overallPivotX: snapshot.px,
-      overallPivotY: snapshot.py,
       layers: [...refsByMaterial.values()].flat(),
     }, character);
     for (let materialOrder = 0; materialOrder < (snapshot.m || []).length; materialOrder++) {
@@ -1310,7 +1305,6 @@
               item: group.item, ref, sourceLayer: visualLayer,
               sourceLayerIndex: ref.sourceLayerIndex ?? group.item.Asset.Layer.indexOf(entry.sourceLayer),
               materialOrder: group.materialOrder, sourceOrder: entry.sourceOrder, overall: group.overall,
-              transformKey: ref.__coeTransformKey || `${group.material.id}:${ref.sourceLayerIndex ?? entry.sourceOrder}`,
             },
           });
         }
@@ -1425,22 +1419,18 @@
               if (!ref) return callback.apply(this, callbackArgs);
               const options = callbackArgs[3] || {};
               const transformed = { ...options };
-              transformed.__coeTransformKey = marker.transformKey;
-              recordRenderedTransformGeometry(marker.transformKey, callbackArgs[1], callbackArgs[2], transformed, callbackArgs[0], null, callbackArgs[5]);
               if (typeof ref.rotation === "number" && isFinite(ref.rotation) && ref.rotation !== 0)
                 transformed.Rotation = clamp(ref.rotation, -Math.PI, Math.PI);
               if (typeof ref.scale === "number" && isFinite(ref.scale) && Math.abs(ref.scale - 1) > 0.001)
                 transformed.Scale = clamp(ref.scale, 0.25, 3.0);
-              if (typeof ref.pivotX === "number") transformed.PivotX = clamp(ref.pivotX, -PIVOT_LIMIT, PIVOT_LIMIT);
-              if (typeof ref.pivotY === "number") transformed.PivotY = clamp(ref.pivotY, -PIVOT_LIMIT, PIVOT_LIMIT);
               const overall = marker.overall;
               if (overall) {
                 transformed.OverallRotation = clamp(overall.rotation, -Math.PI, Math.PI);
                 transformed.OverallScale = clamp(overall.scale, 0.25, 3.0);
                 transformed.OverallOffsetX = clamp(overall.offsetX, -1200, 1200);
                 transformed.OverallOffsetY = clamp(overall.offsetY, -1200, 1200);
-                transformed.OverallPivotX = clamp(overall.pivotX, -OVERALL_PIVOT_LIMIT, OVERALL_PIVOT_LIMIT);
-                transformed.OverallPivotY = clamp(overall.pivotY, -OVERALL_PIVOT_LIMIT, OVERALL_PIVOT_LIMIT);
+                transformed.OverallCenterX = overall.centerX;
+                transformed.OverallCenterY = overall.centerY;
               }
               callbackArgs[3] = transformed;
               return callback.apply(this, callbackArgs);
@@ -1472,7 +1462,6 @@
 .coe-editor{height:100%;min-height:0}.coe-editor-tools{height:100%;min-height:0;display:grid;grid-template-rows:auto auto minmax(0,1fr);border:2px solid #555;border-radius:6px;background:#ededed;overflow:hidden}.coe-scheme-bar{padding:9px 11px;border-bottom:1px solid #777;background:#f7f7f7}.coe-field{display:flex;align-items:center;gap:8px}.coe-field label{font-weight:700;white-space:nowrap}.coe-field input,.coe-field select,.coe-search{min-width:0;border:1px solid #667c8c;border-radius:5px;background:#fff;color:#111;padding:7px 9px;outline:none}.coe-field input:focus,.coe-search:focus{border-color:#2699dc;box-shadow:0 0 0 2px #4bb9f044}.coe-title-input{width:100%;font-size:16px!important}.coe-tool-tabs{display:flex;gap:6px;padding:7px;border-bottom:1px solid #777;background:#c9c9c9}.coe-tool-tabs .coe-btn{flex:1;padding:6px 9px}.coe-tool-content{min-height:0;overflow:auto;padding:9px}.coe-editor-section{margin-bottom:11px}.coe-section-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 7px}.coe-section-head h3{margin:0;font-size:14px}.coe-badge{display:inline-flex;align-items:center;min-height:21px;padding:2px 7px;border:1px solid #688296;border-radius:999px;background:#e4f2fb;color:#24516c;font-size:11px}.coe-pose-groups{display:grid;gap:7px}.coe-pose-group{border:1px solid #777;border-radius:6px;padding:7px;background:#fafafa}.coe-pose-group h4{margin:0 0 6px;color:#222;font-size:12px}.coe-pose-buttons{display:flex;flex-wrap:wrap;gap:5px}.coe-pose-buttons .coe-btn{padding:4px 7px;font-size:12px}.coe-pose-buttons button.coe-active{background:linear-gradient(#b8e9ff,#54b6eb);border-color:#116c9d}.coe-hint{padding:7px 9px;border:1px solid #708798;border-radius:6px;background:#e4edf4;color:#233b4b;font-size:11px}.coe-transform-editor{margin:9px 0;padding:9px;border:2px solid #d28b28;border-radius:7px;background:#fff6df;color:#2b2112}.coe-transform-head{display:flex;align-items:center;justify-content:space-between;gap:8px}.coe-transform-head strong,.coe-transform-head .coe-muted{display:block}.coe-transform-fields{display:grid;grid-template-columns:repeat(4,minmax(70px,1fr));gap:6px;margin-top:7px}.coe-transform-fields label{display:flex;flex-direction:column;color:#333;font-size:10px}.coe-transform-fields input{margin-top:3px;width:100%;min-width:0;border:1px solid #967a45;border-radius:4px;background:#fff;color:#111;padding:5px}.coe-transform-head select{max-width:190px;border:1px solid #967a45;border-radius:4px;padding:5px;background:#fff;color:#111}.coe-transform-pad{display:flex;gap:6px;margin-top:7px}.coe-transform-pad button{border:2px solid #9a6a16;border-radius:5px;background:#ffe39a;color:#382400;padding:5px 8px;font-weight:700;cursor:grab;touch-action:none}.coe-transform-pad button:active{cursor:grabbing;background:#ffc95c}.coe-divider{height:1px;background:#888;margin:10px 0}.coe-layer-list{display:flex;flex-direction:column;gap:7px}.coe-layer{border:1px solid #777;border-radius:6px;padding:8px;background:#fafafa}.coe-layer.coe-hidden{opacity:.55}.coe-layer.coe-recycled{opacity:.7;border-style:dashed}.coe-layer-top{display:flex;gap:6px;align-items:center;margin-bottom:7px}.coe-drag-handle{color:#667;cursor:grab}.coe-layer-name{font-weight:700;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.coe-layer-top .coe-btn{padding:4px 6px;font-size:11px}.coe-controls{display:grid;grid-template-columns:repeat(5,minmax(62px,1fr));gap:6px}.coe-controls label{display:flex;flex-direction:column;color:#333;font-size:10px}.coe-controls input{margin-top:3px;width:100%;min-width:0;border:1px solid #777;border-radius:4px;background:#fff;color:#111;padding:5px}.coe-layer-transform{display:grid;grid-template-columns:repeat(2,minmax(100px,1fr));gap:6px;margin-top:6px;padding-top:6px;border-top:1px solid #bbb}.coe-layer-transform label{display:flex;flex-direction:column;color:#333;font-size:10px}.coe-layer-transform input{margin-top:3px;width:100%;min-width:0;border:1px solid #777;border-radius:4px;background:#fff;color:#111;padding:5px}.coe-color-choice{display:flex;align-items:center;gap:5px;margin-top:3px;width:100%;min-width:0;height:29px;padding:3px 5px;border:1px solid #667;border-radius:4px;background:#fff;color:#111;cursor:pointer}.coe-color-choice:hover{border-color:#168cca;background:#eaf7ff}.coe-color-choice:disabled{cursor:not-allowed;opacity:.55}.coe-color-swatch{width:18px;height:18px;flex:none;border:1px solid #555;border-radius:3px;background-color:#fff;background-image:linear-gradient(45deg,#ccc 25%,transparent 25%),linear-gradient(-45deg,#ccc 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#ccc 75%),linear-gradient(-45deg,transparent 75%,#ccc 75%);background-size:8px 8px;background-position:0 0,0 4px,4px -4px,-4px 0}.coe-color-swatch::after{display:block;width:100%;height:100%;border-radius:2px;background:var(--coe-color,#fff);content:""}.coe-color-choice code{min-width:0;overflow:hidden;color:inherit;font:700 10px/1.2 ui-monospace,Consolas,monospace;text-overflow:ellipsis;white-space:nowrap}.coe-material-editor{border:2px solid #666;border-radius:7px;background:#e4e4e4;overflow:hidden}.coe-material-editor+.coe-material-editor{margin-top:9px}.coe-material-editor.coe-hidden{opacity:.58}.coe-material-editor.coe-recycled{border-style:dashed}.coe-material-editor-head{display:flex;align-items:center;gap:7px;padding:8px;background:#d0d0d0;border-bottom:1px solid #777}.coe-material-identity{display:flex;flex:1;min-width:0;flex-direction:column}.coe-material-identity strong{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.coe-material-identity .coe-muted{font-size:10px}.coe-collapse{width:25px;height:25px;border:0;background:transparent;cursor:pointer}.coe-overall-color{display:flex;align-items:center;gap:5px;font-size:11px;font-weight:700}.coe-overall-color .coe-color-choice{width:auto;max-width:104px;margin-top:0}.coe-material-editor-layers{display:flex;flex-direction:column;gap:7px;padding:7px}.coe-material-editor.coe-collapsed .coe-material-editor-head{border-bottom:0}.coe-recycle-row{display:flex;align-items:center;gap:8px;padding:5px 7px;border:1px solid #888;border-radius:5px;background:#fafafa}.coe-recycle-row span{flex:1}
 .coe-material-picker{display:grid;grid-template-rows:auto minmax(0,1fr);height:100%;min-height:0}.coe-material-toolbar{position:sticky;top:-9px;z-index:2;padding:0 0 9px;background:#ededed}.coe-search{width:100%}.coe-materials{display:flex;flex-direction:column;gap:11px;min-height:0}.coe-material-group-title{position:sticky;top:38px;z-index:1;margin:0 0 6px;padding:5px 7px;border-radius:4px;background:#c9c9c9;color:#111;font-size:13px}.coe-material-group{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}.coe-material{display:flex;flex-direction:column;align-items:stretch;gap:4px;min-width:0;min-height:136px;border:1px solid #777;border-radius:5px;background:#fafafa;padding:6px;text-align:center;color:#111;cursor:pointer}.coe-material:hover{border-color:#168cca;background:#e2f4ff}.coe-material:disabled{cursor:not-allowed;filter:grayscale(.7);opacity:.58}.coe-material.coe-cap-safe{border-color:#268a52}.coe-material.coe-cap-limited{border-color:#c38b13}.coe-material.coe-cap-unverified,.coe-material.coe-cap-unsupported{border-color:#a34b56}.coe-material img{width:100%;height:96px;object-fit:contain;border-radius:4px;background:#eee}.coe-material strong{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:11px}.coe-material .coe-muted{font-size:10px}.coe-toast{position:fixed;left:50%;bottom:26px;transform:translate(-50%,14px);opacity:0;z-index:100010;background:#e8f4fc;color:#142331;border:2px solid #182735;border-radius:8px;padding:9px 15px;box-shadow:0 7px 22px #0009;transition:.2s;pointer-events:none}.coe-toast.coe-show{transform:translate(-50%,0);opacity:1}.coe-toast.coe-error{background:#ffd3dc}.coe-toast.coe-warn{background:#ffe4a8}
 .coe-owned-color-picker{background:linear-gradient(180deg,#f7fbfe 0,#d5e1e8 100%)!important;border:2px solid #172631!important;border-radius:8px;box-shadow:0 8px 28px #000a!important}
-.coe-crosshair{position:fixed;z-index:100030;pointer-events:none;width:22px;height:22px;transform:translate(-50%,-50%)}.coe-crosshair::before,.coe-crosshair::after{content:'';position:absolute;background:#ff3333;border-radius:1px}.coe-crosshair::before{width:2px;height:100%;left:50%;top:0}.coe-crosshair::after{width:100%;height:2px;left:0;top:50%}.coe-crosshair{filter:drop-shadow(0 0 3px #fff8)}
 @media(max-width:1250px){.coe-body{width:50%;min-width:500px}.coe-grid{grid-template-columns:1fr}.coe-material-group{grid-template-columns:repeat(3,minmax(0,1fr))}.coe-controls{grid-template-columns:repeat(3,minmax(70px,1fr))}.coe-layer-transform{grid-template-columns:repeat(2,minmax(100px,1fr))}}
 @media(max-width:800px){.coe-body{width:58%;min-width:0}.coe-head{height:80px;align-items:flex-start}.coe-body{top:80px}.coe-build{display:none}.coe-material-group{grid-template-columns:repeat(2,minmax(0,1fr))}}
 `;
@@ -1546,7 +1535,6 @@
     closeOwnedColorPicker();
     restoreEditorAppearance();
     document.getElementById(ROOT_ID)?.remove();
-    document.getElementById("coe-crosshair")?.remove();
     if (previewTimer) cancelAnimationFrame(previewTimer);
     previewTimer = 0;
     uiMode = null;
@@ -1633,10 +1621,10 @@
     // The editor currently exposes one composition-level overall target. Preserve
     // it when one scheme is equipped; with several schemes the active composition
     // deliberately starts from the neutral overall transform instead of silently
-    // choosing one scheme's center.
+    // choosing one scheme's transform.
     if (selected.length === 1) {
       const source = normalizeComposition(selected[0].composition);
-      for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY", "overallPivotX", "overallPivotY"]) {
+      for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY"]) {
         if (typeof source[key] === "number") combined[key] = source[key];
       }
     }
@@ -1926,10 +1914,10 @@
   }
 
   function transformTargetLabel() {
-    if (!transformEditTarget) return "未进入中心编辑";
-    if (transformEditTarget.kind === "overall") return "整体服装变换中心";
+    if (!transformEditTarget) return "未选择变换对象";
+    if (transformEditTarget.kind === "overall") return "整体服装";
     const layer = transformEditTarget.layer;
-    return layer ? `${layer.sourceAsset || "素材"} · ${layer.layerLabel || layer.sourceLayer || "图层"} · 图层变换中心` : "当前图层变换中心";
+    return layer ? `${layer.sourceAsset || "素材"} · ${layer.layerLabel || layer.sourceLayer || "图层"}` : "当前图层";
   }
 
   function setTransformTarget(target) {
@@ -1937,7 +1925,6 @@
     if (!target) {
       transformEditTarget = null;
       transformPointer = null;
-      crosshairRemove();
     } else if (target.kind === "overall") {
       transformEditTarget = { kind: "overall" };
     } else {
@@ -1953,54 +1940,13 @@
     else object[key] = value;
   }
 
-  function setOptionalPivotValue(object, key, value, defaultValue = 0.5) {
-    if (!Number.isFinite(value) || Math.abs(value - defaultValue) < 0.000001) delete object[key];
-    else object[key] = value;
-  }
-
-  function resetTransformCenter() {
-    if (!transformEditTarget || !editing) return;
-    if (transformEditTarget.kind === "overall") {
-      delete editing.overallPivotX;
-      delete editing.overallPivotY;
-    } else {
-      const layer = editing.layers[transformEditTarget.index];
-      if (layer) { delete layer.pivotX; delete layer.pivotY; transformEditTarget.layer = layer; }
-    }
-    refreshPreviewLoop();
-    const host = document.querySelector(`#${ROOT_ID} .coe-editor-tools`);
-    if (host) renderEditorTools(host);
-  }
-
   function resetOverallTransform() {
     if (!editing) return;
-    for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY", "overallPivotX", "overallPivotY"]) delete editing[key];
+    for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY"]) delete editing[key];
     transformEditTarget = { kind: "overall" };
     refreshPreviewLoop();
     const host = document.querySelector(`#${ROOT_ID} .coe-editor-tools`);
     if (host) renderEditorTools(host);
-  }
-
-  function crosshairUpdate(clientX, clientY) {
-    var el = document.getElementById("coe-crosshair");
-    if (!el) {
-      el = document.createElement("div");
-      el.id = "coe-crosshair";
-      el.className = "coe-crosshair";
-      document.body.appendChild(el);
-    }
-    el.style.left = clientX + "px";
-    el.style.top = clientY + "px";
-  }
-
-  function crosshairRemove() {
-    var el = document.getElementById("coe-crosshair");
-    if (el) el.remove();
-  }
-
-  function transformCanvas() {
-    return getRenderedTransformCanvas()?.canvas || globalThis.GL?.canvas || globalThis.MainCanvas ||
-      (typeof document?.querySelector === "function" ? document.querySelector("canvas") : null);
   }
 
   function bindTransformHandle(button, kind) {
@@ -2011,48 +1957,14 @@
       event.stopPropagation();
       const layer = transformEditTarget.kind === "layer" ? editing.layers[transformEditTarget.index] : null;
       const overall = transformEditTarget.kind === "overall" ? resolveOverallTransform(editing, globalThis.Player) : null;
-      const layerPivot = layer ? getLayerPivot(layer) : null;
-      const overallDefaultPivot = overall ? computeDefaultOverallPivot(editing, globalThis.Player) : null;
-      const canvas = kind === "pivot" ? transformCanvas() : null;
-      transformPointer = { kind, startX: event.clientX, startY: event.clientY, layer, overall, layerPivot, overallDefaultPivot, canvas,
-        layerKey: layer ? `local:${transformEditTarget.index}` : null,
+      transformPointer = { kind, startX: event.clientX, startY: event.clientY, layer,
         rotation: layer?.rotation || 0, scale: layer?.scale || 1, overallRotation: overall?.rotation || 0, overallScale: overall?.scale || 1 };
-      // 拖拽 pivot 时显示十字光标
-      if (kind === "pivot") crosshairUpdate(event.clientX, event.clientY);
       const move = moveEvent => {
         if (!transformPointer) return;
         const dx = moveEvent.clientX - transformPointer.startX;
         const dy = moveEvent.clientY - transformPointer.startY;
         const state = transformPointer;
-        if (state.kind === "pivot") {
-          // 十字光标跟随 client 坐标；数据则写入其对应的 BC canvas 位置。
-          crosshairUpdate(moveEvent.clientX, moveEvent.clientY);
-          const canvasPoint = state.canvas ? canvasPointFromClient(moveEvent.clientX, moveEvent.clientY, state.canvas) : null;
-          if (state.layer && canvasPoint) {
-            const geometry = getRenderedTransformGeometry(state.layerKey);
-            if (!geometry) return;
-            const overallTransform = state.overall || resolveOverallTransform(editing, globalThis.Player);
-            const pivot = computeAbsoluteLayerPivot(canvasPoint, geometry, {
-              pivotX: state.layerPivot.x, pivotY: state.layerPivot.y,
-              rotation: state.rotation, scale: state.scale, overall: overallTransform,
-            });
-            setOptionalPivotValue(state.layer, "pivotX", pivot.x);
-            setOptionalPivotValue(state.layer, "pivotY", pivot.y);
-            // 同步更新 input 框，显示值就是 clamp 后实际写入的值。
-            var pi = document.querySelector('[data-layer-advanced="pivotX"]');
-            if (pi) pi.value = (typeof state.layer.pivotX === "number" ? state.layer.pivotX : 0.5).toFixed(2);
-            pi = document.querySelector('[data-layer-advanced="pivotY"]');
-            if (pi) pi.value = (typeof state.layer.pivotY === "number" ? state.layer.pivotY : 0.5).toFixed(2);
-          } else if (state.overall && canvasPoint) {
-            const pivot = computeAbsoluteOverallPivot(canvasPoint, state.overall);
-            setOptionalPivotValue(editing, "overallPivotX", pivot.x, state.overallDefaultPivot.x);
-            setOptionalPivotValue(editing, "overallPivotY", pivot.y, state.overallDefaultPivot.y);
-            var pi = document.querySelector('[data-overall-field="pivotX"]');
-            if (pi) pi.value = (typeof editing.overallPivotX === "number" ? editing.overallPivotX : state.overallDefaultPivot.x).toFixed(2);
-            pi = document.querySelector('[data-overall-field="pivotY"]');
-            if (pi) pi.value = (typeof editing.overallPivotY === "number" ? editing.overallPivotY : state.overallDefaultPivot.y).toFixed(2);
-          }
-        } else if (state.kind === "rotate") {
+        if (state.kind === "rotate") {
           const value = state.layer ? state.rotation + dx * Math.PI / 180 : state.overallRotation + dx * Math.PI / 180;
           if (state.layer) setOptionalTransformValue(state.layer, "rotation", clamp(value, -Math.PI, Math.PI), 0);
           else setOptionalTransformValue(editing, "overallRotation", clamp(value, -Math.PI, Math.PI), 0);
@@ -2083,7 +1995,7 @@
       const label = layer.layerLabel || layer.sourceLayer || `图层 #${index + 1}`;
       return `<option value="${index}">${escapeHTML(`${layer.sourceAsset || "素材"} · ${label}`)}</option>`;
     })).join("");
-    host.innerHTML = `<div class="coe-transform-head"><div><strong>变换中心编辑</strong><span class="coe-muted">${escapeHTML(transformTargetLabel())}</span></div><div class="coe-actions"><select data-transform-target>${options}</select>${transformEditTarget ? '<button type="button" class="coe-btn" data-transform-done>完成</button>' : ''}</div></div><p class="coe-hint">同一中心同时控制旋转和缩放；未激活的图层不会显示变换控件。</p>${transformEditTarget ? '<div class="coe-transform-pad"><button type="button" data-transform-handle="pivot">✚ 中心</button><button type="button" data-transform-handle="rotate">↻ 旋转</button><button type="button" data-transform-handle="scale">⤢ 缩放</button></div>' : ''}`;
+    host.innerHTML = `<div class="coe-transform-head"><div><strong>变换编辑</strong><span class="coe-muted">${escapeHTML(transformTargetLabel())}</span></div><div class="coe-actions"><select data-transform-target>${options}</select>${transformEditTarget ? '<button type="button" class="coe-btn" data-transform-done>完成</button>' : ''}</div></div><p class="coe-hint">旋转和缩放使用固定默认中心；未激活的图层不会显示变换控件。</p>${transformEditTarget ? '<div class="coe-transform-pad"><button type="button" data-transform-handle="rotate">↻ 旋转</button><button type="button" data-transform-handle="scale">⤢ 缩放</button></div>' : ''}`;
     const select = host.querySelector("[data-transform-target]");
     select.value = String(selectedIndex);
     select.addEventListener("change", () => {
@@ -2091,13 +2003,12 @@
       else setTransformTarget({ kind: "layer", index: Number(select.value) });
     });
     host.querySelector("[data-transform-done]")?.addEventListener("click", () => setTransformTarget(null));
-    bindTransformHandle(host.querySelector('[data-transform-handle="pivot"]'), "pivot");
     bindTransformHandle(host.querySelector('[data-transform-handle="rotate"]'), "rotate");
     bindTransformHandle(host.querySelector('[data-transform-handle="scale"]'), "scale");
     if (!transformEditTarget) return;
     if (transformEditTarget.kind === "overall") {
       const overall = resolveOverallTransform(editing, globalThis.Player);
-      host.insertAdjacentHTML("beforeend", `<div class="coe-transform-fields"><label>旋转<input type="number" step="1" data-overall-field="rotation" value="${Math.round(overall.rotation * 180 / Math.PI * 100) / 100}">°</label><label>缩放<input type="number" step="0.05" min="0.25" max="3" data-overall-field="scale" value="${overall.scale}"></label><label>偏移 X<input type="number" step="1" data-overall-field="offsetX" value="${overall.offsetX}"></label><label>偏移 Y<input type="number" step="1" data-overall-field="offsetY" value="${overall.offsetY}"></label><label>中心 X<input type="number" step="0.01" data-overall-field="pivotX" value="${overall.pivotX}"></label><label>中心 Y<input type="number" step="0.01" data-overall-field="pivotY" value="${overall.pivotY}"></label></div><div class="coe-actions"><button type="button" class="coe-btn" data-reset-center>恢复默认中心</button><button type="button" class="coe-btn" data-reset-overall>重置整体服装变换</button></div>`);
+      host.insertAdjacentHTML("beforeend", `<div class="coe-transform-fields"><label>旋转<input type="number" step="1" data-overall-field="rotation" value="${Math.round(overall.rotation * 180 / Math.PI * 100) / 100}">°</label><label>缩放<input type="number" step="0.05" min="0.25" max="3" data-overall-field="scale" value="${overall.scale}"></label><label>偏移 X<input type="number" step="1" data-overall-field="offsetX" value="${overall.offsetX}"></label><label>偏移 Y<input type="number" step="1" data-overall-field="offsetY" value="${overall.offsetY}"></label></div><div class="coe-actions"><button type="button" class="coe-btn" data-reset-overall>重置整体服装变换</button></div>`);
       host.querySelectorAll("[data-overall-field]").forEach(input => input.addEventListener("input", () => {
         const field = input.dataset.overallField;
         let value = Number(input.value);
@@ -2105,33 +2016,22 @@
         if (field === "rotation") { value = clamp(value, -180, 180) * Math.PI / 180; setOptionalTransformValue(editing, "overallRotation", value, 0); }
         else if (field === "scale") { value = clamp(value, 0.25, 3); setOptionalTransformValue(editing, "overallScale", value, 1); }
         else if (field === "offsetX" || field === "offsetY") { value = clamp(value, -1200, 1200); setOptionalTransformValue(editing, `overall${field[0].toUpperCase()}${field.slice(1)}`, value, 0); }
-        else {
-          value = clamp(value, -OVERALL_PIVOT_LIMIT, OVERALL_PIVOT_LIMIT);
-          const defaultPivot = computeDefaultOverallPivot(editing, globalThis.Player);
-          setOptionalPivotValue(editing, `overall${field[0].toUpperCase()}${field.slice(1)}`, value, defaultPivot[field === "pivotX" ? "x" : "y"]);
-          const actual = editing[`overall${field[0].toUpperCase()}${field.slice(1)}`];
-          input.value = (typeof actual === "number" ? actual : defaultPivot[field === "pivotX" ? "x" : "y"]).toFixed(2);
-        }
         refreshPreviewLoop();
       }));
-      host.querySelector("[data-reset-center]")?.addEventListener("click", resetTransformCenter);
       host.querySelector("[data-reset-overall]")?.addEventListener("click", resetOverallTransform);
     } else {
       const layer = editing.layers[transformEditTarget.index];
       transformEditTarget.layer = layer;
       if (!layer) return;
-      const pivot = getLayerPivot(layer);
-      host.insertAdjacentHTML("beforeend", `<div class="coe-transform-fields"><label>旋转<input type="number" step="1" data-layer-advanced="rotation" value="${Math.round((layer.rotation || 0) * 180 / Math.PI * 100) / 100}">°</label><label>缩放<input type="number" step="0.05" min="0.25" max="3" data-layer-advanced="scale" value="${layer.scale || 1}"></label><label>中心 X<input type="number" step="0.01" data-layer-advanced="pivotX" value="${pivot.x}"></label><label>中心 Y<input type="number" step="0.01" data-layer-advanced="pivotY" value="${pivot.y}"></label></div><div class="coe-actions"><button type="button" class="coe-btn" data-reset-center>恢复默认中心</button></div>`);
+      host.insertAdjacentHTML("beforeend", `<div class="coe-transform-fields"><label>旋转<input type="number" step="1" data-layer-advanced="rotation" value="${Math.round((layer.rotation || 0) * 180 / Math.PI * 100) / 100}">°</label><label>缩放<input type="number" step="0.05" min="0.25" max="3" data-layer-advanced="scale" value="${layer.scale || 1}"></label></div>`);
       host.querySelectorAll("[data-layer-advanced]").forEach(input => input.addEventListener("input", () => {
         const field = input.dataset.layerAdvanced;
         let value = Number(input.value);
         if (!Number.isFinite(value)) return;
         if (field === "rotation") { value = clamp(value, -180, 180) * Math.PI / 180; setOptionalTransformValue(layer, "rotation", value, 0); }
         else if (field === "scale") { value = clamp(value, 0.25, 3); setOptionalTransformValue(layer, "scale", value, 1); }
-        else { value = clamp(value, -PIVOT_LIMIT, PIVOT_LIMIT); setOptionalPivotValue(layer, field, value); input.value = (typeof layer[field] === "number" ? layer[field] : 0.5).toFixed(2); }
         refreshPreviewLoop();
       }));
-      host.querySelector("[data-reset-center]")?.addEventListener("click", resetTransformCenter);
     }
   }
 
@@ -2195,7 +2095,7 @@
     const group = document.createElement("section");
     group.className = `coe-material-editor${material.hidden ? " coe-hidden" : ""}${material.collapsed ? " coe-collapsed" : ""}`;
     const overallLabel = uniform ? colors[0] : "多种颜色";
-    group.innerHTML = `<div class="coe-material-editor-head"><button class="coe-collapse" type="button" data-collapse>${material.collapsed ? "▶" : "▼"}</button><div class="coe-material-identity"><strong>${escapeHTML(material.label || asset?.Description || material.sourceAsset)}</strong><span class="coe-muted">${escapeHTML(material.sourceGroup)} · ${layers.length} 层</span></div><label class="coe-overall-color">整体颜色<button type="button" class="coe-color-choice" data-overall-color title="使用游戏原版颜色选择器统一修改所有可着色颜色槽"><span class="coe-color-swatch"></span><code>${escapeHTML(overallLabel)}</code></button></label><button class="coe-btn" data-edit-overall>调整整体中心</button><button class="coe-btn" data-hide-material>${material.hidden ? "显示" : "隐藏"}</button><button class="coe-btn" data-reset-material>整件默认</button><button class="coe-btn coe-danger" data-remove-material>移除素材</button></div><div class="coe-material-editor-layers"></div>`;
+    group.innerHTML = `<div class="coe-material-editor-head"><button class="coe-collapse" type="button" data-collapse>${material.collapsed ? "▶" : "▼"}</button><div class="coe-material-identity"><strong>${escapeHTML(material.label || asset?.Description || material.sourceAsset)}</strong><span class="coe-muted">${escapeHTML(material.sourceGroup)} · ${layers.length} 层</span></div><label class="coe-overall-color">整体颜色<button type="button" class="coe-color-choice" data-overall-color title="使用游戏原版颜色选择器统一修改所有可着色颜色槽"><span class="coe-color-swatch"></span><code>${escapeHTML(overallLabel)}</code></button></label><button class="coe-btn" data-edit-overall>调整整体变换</button><button class="coe-btn" data-hide-material>${material.hidden ? "显示" : "隐藏"}</button><button class="coe-btn" data-reset-material>整件默认</button><button class="coe-btn coe-danger" data-remove-material>移除素材</button></div><div class="coe-material-editor-layers"></div>`;
     updateColorChoice(group.querySelector("[data-overall-color]"), overallColor, defaultHex, overallLabel);
     group.querySelector("[data-edit-overall]").addEventListener("click", () => setTransformTarget({ kind: "overall" }));
     group.querySelector("[data-collapse]").addEventListener("click", () => {
@@ -2232,8 +2132,6 @@
         layer.hidden = false;
         layer.rotation = layer.defaultRotation;
         layer.scale = layer.defaultScale;
-        delete layer.pivotX;
-        delete layer.pivotY;
       });
       refreshPreviewLoop();
       renderLayerList(list);
@@ -2263,7 +2161,7 @@
       card.className = `coe-layer${layer.hidden ? " coe-hidden" : ""}`;
       var layerRotDeg = Math.round(((layer.rotation || 0) * 180 / Math.PI) * 100) / 100;
       var layerScaleVal = typeof layer.scale === "number" ? layer.scale : 1;
-      card.innerHTML = `<div class="coe-layer-top"><span class="coe-layer-name" title="${escapeHTML(`${layer.sourceGroup}/${layer.sourceAsset}/${layerName}`)}">${escapeHTML(layerName)}</span>${sourceLayer?.ColorGroup ? `<span class="coe-badge">颜色组：${escapeHTML(sourceLayer.ColorGroup)}</span>` : ""}<button type="button" class="coe-btn" data-edit-transform>调整中心</button><button type="button" class="coe-btn" data-hide>${layer.hidden ? "显示" : "隐藏"}</button><button type="button" class="coe-btn" data-copy>复制</button><button type="button" class="coe-btn" data-reset>本层默认</button><button type="button" class="coe-btn coe-danger" data-remove>清除</button></div><div class="coe-controls"><label>图层位置<input type="number" min="-99" max="99" step="1" data-key="priority" value="${layer.priority}"></label><label>偏移 X<input type="number" min="-1200" max="1200" step="1" data-key="offsetX" value="${layer.offsetX}"></label><label>偏移 Y<input type="number" min="-1200" max="1200" step="1" data-key="offsetY" value="${layer.offsetY}"></label><label>透明度<input type="number" min="0" max="1" step="0.05" data-key="opacity" value="${layer.opacity}"></label><label>图层颜色<button type="button" class="coe-color-choice" data-layer-color="${layerIndex}" ${canColor ? "" : "disabled"} title="${canColor ? `使用游戏原版颜色选择器编辑颜色槽 ${colorIndex}` : "原版将此图层标记为不可着色"}"><span class="coe-color-swatch"></span><code>${escapeHTML(material.colors[colorIndex] || "Default")}</code></button></label></div><div class="coe-layer-transform"><label>旋转<input type="number" step="1" min="-180" max="180" data-layer-transform="rotation" value="${layerRotDeg}">°</label><label>缩放<input type="number" step="0.05" min="0.25" max="3" data-layer-transform="scale" value="${layerScaleVal}"></label></div>`;
+      card.innerHTML = `<div class="coe-layer-top"><span class="coe-layer-name" title="${escapeHTML(`${layer.sourceGroup}/${layer.sourceAsset}/${layerName}`)}">${escapeHTML(layerName)}</span>${sourceLayer?.ColorGroup ? `<span class="coe-badge">颜色组：${escapeHTML(sourceLayer.ColorGroup)}</span>` : ""}<button type="button" class="coe-btn" data-edit-transform>调整变换</button><button type="button" class="coe-btn" data-hide>${layer.hidden ? "显示" : "隐藏"}</button><button type="button" class="coe-btn" data-copy>复制</button><button type="button" class="coe-btn" data-reset>本层默认</button><button type="button" class="coe-btn coe-danger" data-remove>清除</button></div><div class="coe-controls"><label>图层位置<input type="number" min="-99" max="99" step="1" data-key="priority" value="${layer.priority}"></label><label>偏移 X<input type="number" min="-1200" max="1200" step="1" data-key="offsetX" value="${layer.offsetX}"></label><label>偏移 Y<input type="number" min="-1200" max="1200" step="1" data-key="offsetY" value="${layer.offsetY}"></label><label>透明度<input type="number" min="0" max="1" step="0.05" data-key="opacity" value="${layer.opacity}"></label><label>图层颜色<button type="button" class="coe-color-choice" data-layer-color="${layerIndex}" ${canColor ? "" : "disabled"} title="${canColor ? `使用游戏原版颜色选择器编辑颜色槽 ${colorIndex}` : "原版将此图层标记为不可着色"}"><span class="coe-color-swatch"></span><code>${escapeHTML(material.colors[colorIndex] || "Default")}</code></button></label></div><div class="coe-layer-transform"><label>旋转<input type="number" step="1" min="-180" max="180" data-layer-transform="rotation" value="${layerRotDeg}">°</label><label>缩放<input type="number" step="0.05" min="0.25" max="3" data-layer-transform="scale" value="${layerScaleVal}"></label></div>`;
       updateColorChoice(card.querySelector("[data-layer-color]"), material.colors[colorIndex] || "Default", colorValue);
       card.querySelector("[data-edit-transform]").addEventListener("click", () => setTransformTarget({ kind: "layer", index: editing.layers.indexOf(layer), layer }));
       card.querySelector("[data-hide]").addEventListener("click", () => {
@@ -2280,8 +2178,6 @@
         layer.color = null;
         layer.rotation = layer.defaultRotation;
         layer.scale = layer.defaultScale;
-        delete layer.pivotX;
-        delete layer.pivotY;
         if (canColor) material.colors[colorIndex] = material.defaultColors?.[colorIndex] || asset?.DefaultColor?.[colorIndex] || "Default";
         refreshPreviewLoop();
         renderLayerList(list);
@@ -2597,7 +2493,7 @@
     remoteAssertTree(value);
     if (!remotePlainObject(value) || value.v !== 1 || !Array.isArray(value.m) || !Array.isArray(value.l)) throw new Error("snapshot-root");
     if (value.m.length > REMOTE_LIMITS.materials || value.l.length > REMOTE_LIMITS.layers) throw new Error("snapshot-count");
-    for (const key of Object.keys(value)) if (!new Set(["v", "m", "l", "or", "os", "ox", "oy", "px", "py"]).has(key)) throw new Error("snapshot-root-key");
+    for (const key of Object.keys(value)) if (!new Set(["v", "m", "l", "or", "os", "ox", "oy"]).has(key)) throw new Error("snapshot-root-key");
     const materials = value.m.map(material => {
       if (!remotePlainObject(material)) throw new Error("snapshot-material");
       for (const key of Object.keys(material)) if (!new Set(["g", "a", "c", "p"]).has(key)) throw new Error("snapshot-material-key");
@@ -2610,7 +2506,7 @@
     });
     const layers = value.l.map(layer => {
       if (!remotePlainObject(layer)) throw new Error("snapshot-layer");
-      for (const key of Object.keys(layer)) if (!new Set(["m", "n", "i", "p", "x", "y", "o", "r", "s", "px", "py"]).has(key)) throw new Error("snapshot-layer-key");
+      for (const key of Object.keys(layer)) if (!new Set(["m", "n", "i", "p", "x", "y", "o", "r", "s"]).has(key)) throw new Error("snapshot-layer-key");
       const output = {
         m: remoteInteger(layer.m, "material-index", 0, Math.max(0, materials.length - 1)),
         n: layer.n == null ? null : remoteString(layer.n, "layer-name"),
@@ -2628,18 +2524,10 @@
         if (typeof layer.s !== "number" || !Number.isFinite(layer.s)) throw new Error("snapshot-layer-scale");
         output.s = normalizeRemoteNumber(layer.s, 0.25, 3.0);
       }
-      if (layer.px != null) {
-        if (typeof layer.px !== "number" || !Number.isFinite(layer.px)) throw new Error("snapshot-layer-pivot-x");
-        output.px = normalizeRemoteNumber(layer.px, -PIVOT_LIMIT, PIVOT_LIMIT);
-      }
-      if (layer.py != null) {
-        if (typeof layer.py !== "number" || !Number.isFinite(layer.py)) throw new Error("snapshot-layer-pivot-y");
-        output.py = normalizeRemoteNumber(layer.py, -PIVOT_LIMIT, PIVOT_LIMIT);
-      }
       return output;
     });
     const snapshot = { v: 1 };
-    const overallFields = [["or", -Math.PI, Math.PI], ["os", 0.25, 3.0], ["ox", -1200, 1200], ["oy", -1200, 1200], ["px", -OVERALL_PIVOT_LIMIT, OVERALL_PIVOT_LIMIT], ["py", -OVERALL_PIVOT_LIMIT, OVERALL_PIVOT_LIMIT]];
+    const overallFields = [["or", -Math.PI, Math.PI], ["os", 0.25, 3.0], ["ox", -1200, 1200], ["oy", -1200, 1200]];
     for (const [key, min, max] of overallFields) {
       if (value[key] == null) continue;
       if (typeof value[key] !== "number" || !Number.isFinite(value[key])) throw new Error(`snapshot-overall-${key}`);
@@ -3102,8 +2990,6 @@
         var snapshotLayer = { m: index, n: ref.sourceLayer == null ? null : ref.sourceLayer, i: Number.isInteger(ref.sourceLayerIndex) ? ref.sourceLayerIndex : 0, p: ref.priority, x: ref.offsetX, y: ref.offsetY, o: ref.opacity };
         if (typeof ref.rotation === "number" && ref.rotation !== 0) snapshotLayer.r = ref.rotation;
         if (typeof ref.scale === "number" && Math.abs(ref.scale - 1) > 0.001) snapshotLayer.s = ref.scale;
-        if (typeof ref.pivotX === "number") snapshotLayer.px = ref.pivotX;
-        if (typeof ref.pivotY === "number") snapshotLayer.py = ref.pivotY;
         layers.push(snapshotLayer);
       }
     }
@@ -3112,14 +2998,6 @@
     if (typeof composition.overallScale === "number") snapshot.os = composition.overallScale;
     if (typeof composition.overallOffsetX === "number") snapshot.ox = composition.overallOffsetX;
     if (typeof composition.overallOffsetY === "number") snapshot.oy = composition.overallOffsetY;
-    // Always pin the sender's resolved overall center when there is drawable
-    // content. An omitted center remains reserved for legacy snapshots only;
-    // new snapshots must not depend on the receiver's pose/body geometry.
-    if (layers.length) {
-      const overall = resolveOverallTransform(composition, globalThis.Player);
-      snapshot.px = typeof composition.overallPivotX === "number" ? composition.overallPivotX : overall.pivotX;
-      snapshot.py = typeof composition.overallPivotY === "number" ? composition.overallPivotY : overall.pivotY;
-    }
     return validateRemoteSnapshot(snapshot);
   }
 
@@ -3478,11 +3356,9 @@
   if (globalThis.__COE_TEST_MODE__) {
     globalThis.__COE_TEST_API__ = {
       normalizeWardrobe, normalizeComposition, normalizeLayerTransform, compactWardrobeForStorage, compactCompositionForStorage, compactLayerForStorage, packWardrobe, unpackWardrobeDetailed,
-      getLayerPivot, computeDefaultOverallPivot, resolveOverallTransform, resolveNumericOrigin,
-      canvasPointFromClient, computeAbsoluteLayerPivot, computeAbsoluteOverallPivot,
-      getRenderedTransformGeometry, getRenderedTransformCanvas,
+      computeDefaultOverallCenter, resolveOverallTransform, resolveNumericOrigin,
       stableInsertSyntheticLayers, coeAssetLayerSort: stableInsertSyntheticLayers, analyzeSourceAsset, sanitizePlainRecord,
-      buildSyntheticItems, buildLocalSyntheticItems, buildRemoteSyntheticItems, makeSyntheticLayers, statusSnapshot,
+      scanAlphaBounds, contentPivotFromBounds, resolveTextureContentPivot, buildSyntheticItems, buildLocalSyntheticItems, buildRemoteSyntheticItems, makeSyntheticLayers, statusSnapshot,
       isDrawableLayer, normalizedMaterialColors, normalizePickerColor, validateRemoteSnapshot, canonicalRemoteSnapshot, sha256Base64Url,
       parseRemoteContent, serializeRemoteEnvelope, encodeRemoteText, decodeRemoteText, splitRemoteData,
       createRemoteStore, setRemotePeer, setPendingRequest, pendingRequestFor, addRemoteChunk, expireRemoteAssemblies,

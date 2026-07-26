@@ -5,9 +5,6 @@
     return `${group}\u0000${asset}`;
   }
 
-  const PIVOT_LIMIT = 10;
-  const OVERALL_PIVOT_LIMIT = 5000;
-
   function optionalFiniteNumber(value, min, max) {
     return typeof value === "number" && Number.isFinite(value) ? clamp(value, min, max) : undefined;
   }
@@ -19,11 +16,7 @@
     const scale = typeof raw.scale === "number" && isFinite(raw.scale) && Math.abs(raw.scale - 1) > 0.001
       ? clamp(raw.scale, 0.25, 3.0)
       : undefined;
-    // A missing pivot deliberately means "use the current texture default".
-    // Keeping it undefined is what lets storage omit an untouched default center.
-    const pivotX = optionalFiniteNumber(raw.pivotX, -PIVOT_LIMIT, PIVOT_LIMIT);
-    const pivotY = optionalFiniteNumber(raw.pivotY, -PIVOT_LIMIT, PIVOT_LIMIT);
-    return { rotation, scale, pivotX, pivotY };
+    return { rotation, scale };
   }
 
   function normalizeOverallTransform(raw) {
@@ -35,8 +28,6 @@
         ? clamp(raw.overallScale, 0.25, 3.0) : undefined,
       overallOffsetX: optionalFiniteNumber(raw.overallOffsetX, -1200, 1200),
       overallOffsetY: optionalFiniteNumber(raw.overallOffsetY, -1200, 1200),
-      overallPivotX: optionalFiniteNumber(raw.overallPivotX, -OVERALL_PIVOT_LIMIT, OVERALL_PIVOT_LIMIT),
-      overallPivotY: optionalFiniteNumber(raw.overallPivotY, -OVERALL_PIVOT_LIMIT, OVERALL_PIVOT_LIMIT),
     };
   }
 
@@ -70,8 +61,6 @@
       defaultRotation: undefined,
       scale: transform.scale,
       defaultScale: undefined,
-      pivotX: transform.pivotX,
-      pivotY: transform.pivotY,
     };
   }
 
@@ -168,13 +157,6 @@
     return output;
   }
 
-  function getLayerPivot(layer) {
-    return {
-      x: typeof layer?.pivotX === "number" && Number.isFinite(layer.pivotX) ? layer.pivotX : 0.5,
-      y: typeof layer?.pivotY === "number" && Number.isFinite(layer.pivotY) ? layer.pivotY : 0.5,
-    };
-  }
-
   function firstFinite(value, fallback = 0) {
     if (typeof value === "number" && Number.isFinite(value)) return value;
     if (value && typeof value === "object") {
@@ -208,7 +190,7 @@
     return { left: firstFinite(sourceLayer?.DrawingLeft, 0), top: firstFinite(sourceLayer?.DrawingTop, 0), width: Math.max(1, width), height: Math.max(1, height) };
   }
 
-  function computeDefaultOverallPivot(composition, character = globalThis.Player) {
+  function computeDefaultOverallCenter(composition, character = globalThis.Player) {
     let largest = null;
     for (const layer of composition?.layers || []) {
       if (layer.hidden) continue;
@@ -228,86 +210,21 @@
       var area = Math.max(1, width) * Math.max(1, height);
       if (!largest || area > largest.area) largest = { left: left, top: top, width: width, height: height, area: area };
     }
-    // Overall pivots are expressed in composition/screen pixels. Use the
-    // character canvas center as a stable empty-composition fallback rather
-    // than the layer-local default (0.5, 0.5).
+    // Overall transform centers are expressed in composition/screen pixels. Use
+    // the character canvas center as a stable empty-composition fallback.
     if (!largest) return { x: 250, y: 275 };
     return { x: largest.left + largest.width / 2, y: largest.top + largest.height / 2 };
   }
 
   function resolveOverallTransform(composition, character = globalThis.Player) {
-    const fallback = computeDefaultOverallPivot(composition, character);
+    const center = computeDefaultOverallCenter(composition, character);
     return {
       rotation: typeof composition?.overallRotation === "number" ? composition.overallRotation : 0,
       scale: typeof composition?.overallScale === "number" ? composition.overallScale : 1,
       offsetX: typeof composition?.overallOffsetX === "number" ? composition.overallOffsetX : 0,
       offsetY: typeof composition?.overallOffsetY === "number" ? composition.overallOffsetY : 0,
-      pivotX: typeof composition?.overallPivotX === "number" ? composition.overallPivotX : fallback.x,
-      pivotY: typeof composition?.overallPivotY === "number" ? composition.overallPivotY : fallback.y,
-      customPivot: typeof composition?.overallPivotX === "number" || typeof composition?.overallPivotY === "number",
-    };
-  }
-
-  function canvasPointFromClient(clientX, clientY, canvas) {
-    const rect = typeof canvas?.getBoundingClientRect === "function" ? canvas.getBoundingClientRect() : null;
-    const width = Number(canvas?.width) > 0 ? Number(canvas.width) : Number(rect?.width) || 1;
-    const height = Number(canvas?.height) > 0 ? Number(canvas.height) : Number(rect?.height) || 1;
-    const cssWidth = Number(rect?.width) > 0 ? Number(rect.width) : width;
-    const cssHeight = Number(rect?.height) > 0 ? Number(rect.height) : height;
-    return {
-      x: (Number(clientX) - (Number(rect?.left) || 0)) * width / cssWidth,
-      y: (Number(clientY) - (Number(rect?.top) || 0)) * height / cssHeight,
-    };
-  }
-
-  function inverseTransformPoint(point, pivot, rotation = 0, scale = 1, offsetX = 0, offsetY = 0) {
-    const safeScale = Number.isFinite(scale) && Math.abs(scale) > 0.000001 ? scale : 1;
-    const angle = Number.isFinite(rotation) ? rotation : 0;
-    let x = point.x - pivot.x - (Number.isFinite(offsetX) ? offsetX : 0);
-    let y = point.y - pivot.y - (Number.isFinite(offsetY) ? offsetY : 0);
-    const cosine = Math.cos(angle);
-    const sine = Math.sin(angle);
-    const rotatedX = x * cosine + y * sine;
-    const rotatedY = -x * sine + y * cosine;
-    return { x: rotatedX / safeScale + pivot.x, y: rotatedY / safeScale + pivot.y };
-  }
-
-  function computeAbsoluteOverallPivot(pointerCanvas, transform) {
-    const point = pointerCanvas && Number.isFinite(pointerCanvas.x) && Number.isFinite(pointerCanvas.y)
-      ? pointerCanvas : { x: 0, y: 0 };
-    const current = transform || {};
-    return {
-      x: clamp(inverseTransformPoint(point, { x: Number(current.pivotX) || 0, y: Number(current.pivotY) || 0 }, current.rotation, current.scale, current.offsetX, current.offsetY).x, -OVERALL_PIVOT_LIMIT, OVERALL_PIVOT_LIMIT),
-      y: clamp(inverseTransformPoint(point, { x: Number(current.pivotX) || 0, y: Number(current.pivotY) || 0 }, current.rotation, current.scale, current.offsetX, current.offsetY).y, -OVERALL_PIVOT_LIMIT, OVERALL_PIVOT_LIMIT),
-    };
-  }
-
-  function computeAbsoluteLayerPivot(pointerCanvas, geometry, transform) {
-    const point = pointerCanvas && Number.isFinite(pointerCanvas.x) && Number.isFinite(pointerCanvas.y)
-      ? pointerCanvas : { x: 0, y: 0 };
-    const record = geometry || {};
-    const width = Number(record.textureWidth) > 0 ? Number(record.textureWidth) : 1;
-    const height = Number(record.textureHeight) > 0 ? Number(record.textureHeight) : 1;
-    const mirror = record.mirror === true;
-    const invert = record.invert === true;
-    const signedWidth = mirror ? -width : width;
-    const signedHeight = invert ? -height : height;
-    const drawX = Number.isFinite(record.drawX) ? record.drawX : 0;
-    const drawY = Number.isFinite(record.drawY) ? record.drawY : 0;
-    const localPivot = {
-      x: Number.isFinite(transform?.pivotX) ? transform.pivotX : 0.5,
-      y: Number.isFinite(transform?.pivotY) ? transform.pivotY : 0.5,
-    };
-    const localPivotScreen = { x: drawX + localPivot.x * signedWidth, y: drawY + localPivot.y * signedHeight };
-    let base = point;
-    if (transform?.overall) {
-      const overall = transform.overall;
-      base = inverseTransformPoint(base, { x: Number(overall.pivotX) || 0, y: Number(overall.pivotY) || 0 }, overall.rotation, overall.scale, overall.offsetX, overall.offsetY);
-    }
-    base = inverseTransformPoint(base, localPivotScreen, transform?.rotation, transform?.scale);
-    return {
-      x: clamp((base.x - drawX) / signedWidth, -PIVOT_LIMIT, PIVOT_LIMIT),
-      y: clamp((base.y - drawY) / signedHeight, -PIVOT_LIMIT, PIVOT_LIMIT),
+      centerX: center.x,
+      centerY: center.y,
     };
   }
 
@@ -368,8 +285,6 @@
     if (layer.color) output.color = layer.color;
     if (typeof layer.rotation === "number" && layer.rotation !== 0) output.rotation = layer.rotation;
     if (typeof layer.scale === "number" && Math.abs(layer.scale - 1) > 0.001) output.scale = layer.scale;
-    if (typeof layer.pivotX === "number") output.pivotX = layer.pivotX;
-    if (typeof layer.pivotY === "number") output.pivotY = layer.pivotY;
     return output;
   }
 
@@ -395,7 +310,7 @@
       materials: normalized.materials.map(compactMaterialForStorage),
       layers: normalized.layers.map(compactLayerForStorage),
     };
-    for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY", "overallPivotX", "overallPivotY"]) {
+    for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY"]) {
       if (typeof normalized[key] === "number") compact[key] = normalized[key];
     }
     if (normalized.recycle.length) compact.recycle = normalized.recycle.map(compactLayerForStorage);

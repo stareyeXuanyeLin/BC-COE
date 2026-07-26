@@ -35,7 +35,7 @@ Hidden Content
   → Store<MemberNumber, validated snapshot>
   → CharacterRefresh(character, false, false)
 
-变换数据分为两个层级：图层保存 `rotation/scale/offsetX/offsetY/pivotX/pivotY`，方案保存 `overallRotation/overallScale/overallOffsetX/overallOffsetY/overallPivotX/overallPivotY`。GL 绘制按 `整体 × 单图层 × 原始图片` 组合，旋转与缩放共享各自层级的 pivot；编辑器只为当前目标创建中心、旋转和缩放控件。
+变换数据分为两个层级：图层保存 `rotation/scale/offsetX/offsetY`，方案保存 `overallRotation/overallScale/overallOffsetX/overallOffsetY`。GL 绘制按 `整体 × 单图层 × 原始图片` 组合，图层变换优先围绕纹理 Alpha 有效内容包围盒中心，扫描未完成或失败时回退到纹理中点，整体变换使用最大可见图层的自动中心；编辑器只提供旋转和缩放控件。
 ```
 
 网络对象不会进入 `normalizeComposition()`；AssetGet 只发生在 validated snapshot 已进入 Store 后的绘制解析阶段。编辑器重绘使用非破坏性的字段规范化，素材/图层身份过滤只在衣柜加载、导入和持久化边界执行，避免临时解析失败时从正在编辑的对象中静默删层。

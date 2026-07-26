@@ -37,10 +37,10 @@
     // The editor currently exposes one composition-level overall target. Preserve
     // it when one scheme is equipped; with several schemes the active composition
     // deliberately starts from the neutral overall transform instead of silently
-    // choosing one scheme's center.
+    // choosing one scheme's transform.
     if (selected.length === 1) {
       const source = normalizeComposition(selected[0].composition);
-      for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY", "overallPivotX", "overallPivotY"]) {
+      for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY"]) {
         if (typeof source[key] === "number") combined[key] = source[key];
       }
     }

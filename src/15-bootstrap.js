@@ -147,11 +147,9 @@
   if (globalThis.__COE_TEST_MODE__) {
     globalThis.__COE_TEST_API__ = {
       normalizeWardrobe, normalizeComposition, normalizeLayerTransform, compactWardrobeForStorage, compactCompositionForStorage, compactLayerForStorage, packWardrobe, unpackWardrobeDetailed,
-      getLayerPivot, computeDefaultOverallPivot, resolveOverallTransform, resolveNumericOrigin,
-      canvasPointFromClient, computeAbsoluteLayerPivot, computeAbsoluteOverallPivot,
-      getRenderedTransformGeometry, getRenderedTransformCanvas,
+      computeDefaultOverallCenter, resolveOverallTransform, resolveNumericOrigin,
       stableInsertSyntheticLayers, coeAssetLayerSort: stableInsertSyntheticLayers, analyzeSourceAsset, sanitizePlainRecord,
-      buildSyntheticItems, buildLocalSyntheticItems, buildRemoteSyntheticItems, makeSyntheticLayers, statusSnapshot,
+      scanAlphaBounds, contentPivotFromBounds, resolveTextureContentPivot, buildSyntheticItems, buildLocalSyntheticItems, buildRemoteSyntheticItems, makeSyntheticLayers, statusSnapshot,
       isDrawableLayer, normalizedMaterialColors, normalizePickerColor, validateRemoteSnapshot, canonicalRemoteSnapshot, sha256Base64Url,
       parseRemoteContent, serializeRemoteEnvelope, encodeRemoteText, decodeRemoteText, splitRemoteData,
       createRemoteStore, setRemotePeer, setPendingRequest, pendingRequestFor, addRemoteChunk, expireRemoteAssemblies,

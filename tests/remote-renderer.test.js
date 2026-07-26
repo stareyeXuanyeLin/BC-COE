@@ -78,24 +78,6 @@ test('CommonDraw image callbacks receive per-layer transform options', () => {
   assert.equal(seen[0].Scale, 1.5);
 });
 
-test('CommonDraw records real draw coordinates and texture dimensions by copied-layer key', () => {
-  const asset = makeAsset('Cloth', 'Dress', { Width: 320, Height: 180, Layer: [{ Name: 'Base', Priority: 10, HasImage: true, LockLayer: false, DrawingWidth: 320, DrawingHeight: 180, DrawingLeft: { Default: 25 }, DrawingTop: { Default: 35 } }] });
-  const remote = { MemberNumber: 7, Appearance: [], AppearanceLayers: [], AssetFamily: 'Female3DCG' };
-  const { api } = load({ assets: [asset], characters: [remote] });
-  activate(api, 7);
-  const hooks = hooksFor(api);
-  remote.AppearanceLayers = hooks.CharacterAppearanceSortLayers([remote], () => []);
-  const callbacks = { drawImage() {}, drawImageBlink() {}, drawImageColorize() {}, drawImageColorizeBlink() {} };
-  hooks.CommonDrawAppearanceBuild([remote, callbacks], args => {
-    for (const layer of remote.AppearanceLayers) args[1].drawImage('Assets/Female3DCG/Cloth/Dress/Dress_Base.png', 25, 35, {});
-  });
-  const geometry = api.getRenderedTransformGeometry('remote:7:0:0:0');
-  assert.equal(geometry.drawX, 25);
-  assert.equal(geometry.drawY, 35);
-  assert.equal(geometry.textureWidth, 320);
-  assert.equal(geometry.textureHeight, 180);
-});
-
 test('missing or mismatched material is skipped locally while other material survives', () => {
   const good = makeAsset('Cloth', 'Dress');
   const remote = { MemberNumber: 7, Appearance: [], AppearanceLayers: [], AssetFamily: 'Female3DCG' };

@@ -28,12 +28,23 @@
         layers.push({ ...cloneJSON(layer), materialId: idMap.get(layer.materialId) || layer.materialId });
       }
     }
-    return normalizeComposition({
+    const combined = {
       name: selected.map(scheme => scheme.composition.name).join(" + ") || "已装备方案",
       materials,
       layers,
       recycle: [],
-    });
+    };
+    // The editor currently exposes one composition-level overall target. Preserve
+    // it when one scheme is equipped; with several schemes the active composition
+    // deliberately starts from the neutral overall transform instead of silently
+    // choosing one scheme's center.
+    if (selected.length === 1) {
+      const source = normalizeComposition(selected[0].composition);
+      for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY", "overallPivotX", "overallPivotY"]) {
+        if (typeof source[key] === "number") combined[key] = source[key];
+      }
+    }
+    return normalizeComposition(combined);
   }
 
   function refreshLocalComposition() {

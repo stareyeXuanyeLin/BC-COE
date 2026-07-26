@@ -22,6 +22,7 @@ COE Mirror 的当前架构只有三部分：本地衣柜、`COE_RVS/1` Remote Sn
 
 ```text
 activeComposition
+  → resolveOverallTransform（整体中心与整体变换，默认取最大可见内容图层）
   → buildLocalRemoteSnapshot（只取可见静态视觉）
   → strict canonical → async SHA-256
   → STATE → REQUEST → 定向 CHUNK
@@ -33,9 +34,11 @@ Hidden Content
   → snapshot parse + strict validate + canonical/hash
   → Store<MemberNumber, validated snapshot>
   → CharacterRefresh(character, false, false)
+
+变换数据分为两个层级：图层保存 `rotation/scale/offsetX/offsetY/pivotX/pivotY`，方案保存 `overallRotation/overallScale/overallOffsetX/overallOffsetY/overallPivotX/overallPivotY`。GL 绘制按 `整体 × 单图层 × 原始图片` 组合，旋转与缩放共享各自层级的 pivot；编辑器只为当前目标创建中心、旋转和缩放控件。
 ```
 
-网络对象不会进入 `normalizeComposition()`；AssetGet 只发生在 validated snapshot 已进入 Store 后的绘制解析阶段。
+网络对象不会进入 `normalizeComposition()`；AssetGet 只发生在 validated snapshot 已进入 Store 后的绘制解析阶段。编辑器重绘使用非破坏性的字段规范化，素材/图层身份过滤只在衣柜加载、导入和持久化边界执行，避免临时解析失败时从正在编辑的对象中静默删层。
 
 ## 绘制路径
 

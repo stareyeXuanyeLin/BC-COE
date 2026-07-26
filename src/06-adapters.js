@@ -74,7 +74,7 @@
     return proxy;
   }
 
-  function buildStaticSynthetic({ character, material, refs, asset, analysis }) {
+  function buildStaticSynthetic({ character, material, refs, asset, analysis, overall = null }) {
     const drawable = refs.map(ref => ({ ref, sourceLayer: resolveSourceLayer(asset, ref) }))
       .filter(entry => isDrawableLayer(entry.sourceLayer))
       .sort((a, b) => (a.ref.sourceLayerIndex ?? asset.Layer.indexOf(a.sourceLayer)) - (b.ref.sourceLayerIndex ?? asset.Layer.indexOf(b.sourceLayer)));
@@ -93,13 +93,33 @@
         perLayerProperty.Rotation = clamp(ref.rotation, -Math.PI, Math.PI);
       if (typeof ref.scale === "number" && isFinite(ref.scale) && Math.abs(ref.scale - 1) > 0.001)
         perLayerProperty.Scale = clamp(ref.scale, 0.25, 3.0);
+      // 图层级 pivot 注入（供 ExtendedItemGetDrawingOptions 和 GLDrawImage 双重路径消费）
+      if (typeof ref.pivotX === "number")
+        perLayerProperty.PivotX = clamp(ref.pivotX, -PIVOT_LIMIT, PIVOT_LIMIT);
+      if (typeof ref.pivotY === "number")
+        perLayerProperty.PivotY = clamp(ref.pivotY, -PIVOT_LIMIT, PIVOT_LIMIT);
+      // 素材服装组整体变换参数注入
+      if (overall) {
+        if (typeof overall.rotation === "number" && overall.rotation !== 0)
+          perLayerProperty.OverallRotation = clamp(overall.rotation, -Math.PI, Math.PI);
+        if (typeof overall.scale === "number" && Math.abs(overall.scale - 1) > 0.001)
+          perLayerProperty.OverallScale = clamp(overall.scale, 0.25, 3.0);
+        if (typeof overall.offsetX === "number" && overall.offsetX !== 0)
+          perLayerProperty.OverallOffsetX = clamp(overall.offsetX, -1200, 1200);
+        if (typeof overall.offsetY === "number" && overall.offsetY !== 0)
+          perLayerProperty.OverallOffsetY = clamp(overall.offsetY, -1200, 1200);
+        if (typeof overall.pivotX === "number")
+          perLayerProperty.OverallPivotX = clamp(overall.pivotX, -OVERALL_PIVOT_LIMIT, OVERALL_PIVOT_LIMIT);
+        if (typeof overall.pivotY === "number")
+          perLayerProperty.OverallPivotY = clamp(overall.pivotY, -OVERALL_PIVOT_LIMIT, OVERALL_PIVOT_LIMIT);
+      }
       const item = {
         Asset: visualAsset,
         Color: colors,
         Property: perLayerProperty,
         __coeMaterialId: `${material.id}:${ref.sourceLayerIndex ?? index}`,
       };
-      return { material, item, drawable: [{ ref, sourceLayer }], analysis };
+      return { material, item, drawable: [{ ref, sourceLayer }], analysis, overall };
     });
     return results;
   }

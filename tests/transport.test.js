@@ -11,7 +11,7 @@ test('Hidden handler validates the real sender and internally consumes damaged p
   const { api } = load({ characters: [sender] });
   assert.equal(api.onRemoteMessage({ Type: 'Hidden', Sender: 9, Content: state(api) }), true);
   assert.equal(api.getRemoteStoreForTest().peers.size, 0);
-  assert.equal(api.onRemoteMessage({ Type: 'Hidden', Sender: 7, Content: 'COE_RVS/1|{' }), true);
+  assert.equal(api.onRemoteMessage({ Type: 'Hidden', Sender: 7, Content: 'COE_RVS/3|{' }), true);
   assert.equal(api.getRemoteStoreForTest().stats.messagesRejected, 2);
   assert.equal(api.onRemoteMessage({ Type: 'Chat', Sender: 7, Content: 'hello' }), false);
 });

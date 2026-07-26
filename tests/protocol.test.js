@@ -14,7 +14,7 @@ test('content length and namespace are rejected before JSON parsing', () => {
   const { api } = load();
   assert.throws(() => api.parseRemoteContent('x'.repeat(1801)), /remote-content/);
   assert.throws(() => api.parseRemoteContent('OTHER|{'), /remote-content/);
-  assert.throws(() => api.parseRemoteContent('COE_RVS\/1|{'), /remote-json/);
+  assert.throws(() => api.parseRemoteContent('COE_RVS/3|{'), /remote-json/);
 });
 
 test('snapshot validator rejects pollution keys, non-finite values and illegal Property', () => {
@@ -41,9 +41,11 @@ test('local remote snapshot contains only compact visual fields', () => {
   };
   api.setActiveCompositionForTest(composition);
   const value = api.buildLocalRemoteSnapshot();
-  assert.deepEqual(Object.keys(value), ['v', 'm', 'l']);
+  assert.deepEqual(Object.keys(value), ['v', 'px', 'py', 'm', 'l']);
   assert.deepEqual(Object.keys(value.m[0]), ['g', 'a', 'c']);
   assert.deepEqual(Object.keys(value.l[0]), ['m', 'n', 'i', 'p', 'x', 'y', 'o']);
+  assert.equal(value.px, 50);
+  assert.equal(value.py, 50);
   const text = JSON.stringify(value);
   for (const forbidden of ['CustomOutfit', 'CustomComposition', '__coeMaterialId', 'Appearance']) {
     assert.equal(text.includes(forbidden), false, forbidden);

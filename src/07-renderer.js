@@ -29,10 +29,15 @@
     const rawComposition = getComposition(character);
     if (!rawComposition || !isLocalPlayer(character)) return [];
     const composition = normalizeComposition(rawComposition);
+    const overall = resolveOverallTransform(composition, character);
     const materialMap = new Map(composition.materials.map(material => [material.id, material]));
     const groupedRefs = new Map();
-    for (const ref of composition.layers) {
+    for (let layerIndex = 0; layerIndex < composition.layers.length; layerIndex++) {
+      const ref = composition.layers[layerIndex];
       if (ref.hidden) continue;
+      // index-based key remains stable across render normalization and distinguishes
+      // copied layers that intentionally reference the same source image.
+      ref.__coeTransformKey = `local:${layerIndex}`;
       const material = materialMap.get(ref.materialId);
       if (!material || material.hidden) continue;
       if (!groupedRefs.has(material.id)) groupedRefs.set(material.id, []);
@@ -53,7 +58,7 @@
         // Capability analysis is diagnostic only. Every loaded asset is projected to
         // inert static image layers; unsupported dynamic behavior is not invoked.
         analysis = analyzeAssetCached(sourceAsset);
-        const layerGroups = buildStaticSynthetic({ character, material, refs, asset: sourceAsset, analysis });
+        const layerGroups = buildStaticSynthetic({ character, material, refs, asset: sourceAsset, analysis, overall });
         for (let sourceOrder = 0; sourceOrder < layerGroups.length; sourceOrder++) {
           const group = layerGroups[sourceOrder];
           group.materialOrder = materialOrder;
@@ -94,6 +99,36 @@
     } catch (_) { return null; }
   }
 
+  function resolveRenderCanvas(gl = null) {
+    const canvas = gl?.canvas || globalThis.GL?.canvas || globalThis.MainCanvas ||
+      (typeof document?.querySelector === "function" ? document.querySelector("canvas") : null);
+    if (!canvas) return null;
+    const rect = typeof canvas.getBoundingClientRect === "function" ? canvas.getBoundingClientRect() : null;
+    const width = Number(canvas.width) > 0 ? Number(canvas.width) : Number(rect?.width) || 1;
+    const height = Number(canvas.height) > 0 ? Number(canvas.height) : Number(rect?.height) || 1;
+    renderedTransformCanvas = { canvas, width, height, rect: rect ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height } : null };
+    return renderedTransformCanvas;
+  }
+
+  function recordRenderedTransformGeometry(key, x, y, options = {}, url = "", dimensions = null, offsetX = 0, gl = null) {
+    if (!key || !Number.isFinite(Number(x)) || !Number.isFinite(Number(y))) return;
+    const canvas = resolveRenderCanvas(gl);
+    const dim = dimensions || resolveTextureDimensions(url) || {};
+    const width = Number(dim.w) > 0 ? Number(dim.w) : 1;
+    const height = Number(dim.h) > 0 ? Number(dim.h) : 1;
+    const rawX = Number(x) + (Number.isFinite(Number(offsetX)) ? Number(offsetX) : 0);
+    const rawY = Number(y);
+    const mirror = options.Mirror === true;
+    const invert = options.Invert === true;
+    const drawX = mirror ? (canvas?.width || 500) - rawX : rawX;
+    const drawY = invert ? (canvas?.height || 0) - rawY + 550 : rawY;
+    renderedTransformGeometry.set(key, {
+      key, drawX, drawY, rawX, rawY, textureWidth: width, textureHeight: height,
+      canvasWidth: canvas?.width || null, canvasHeight: canvas?.height || null,
+      mirror, invert, timestamp: Date.now(),
+    });
+  }
+
   // 合成图层的变换参数渲染穿线
   function installTransformRenderHooks() {
     // --- ExtendedItemGetDrawingOptions hook ---
@@ -110,6 +145,16 @@
           // 只传递非缺省值，保持 drawOptions 精简
           if (typeof p.Rotation === "number" && p.Rotation !== 0) base.Rotation = p.Rotation;
           if (typeof p.Scale === "number" && Math.abs(p.Scale - 1) > 0.001) base.Scale = p.Scale;
+          // 图层级 pivot
+          if (typeof p.PivotX === "number") base.PivotX = p.PivotX;
+          if (typeof p.PivotY === "number") base.PivotY = p.PivotY;
+          // 素材服装组整体变换参数
+          if (typeof p.OverallRotation === "number" && p.OverallRotation !== 0) base.OverallRotation = p.OverallRotation;
+          if (typeof p.OverallScale === "number" && Math.abs(p.OverallScale - 1) > 0.001) base.OverallScale = p.OverallScale;
+          if (typeof p.OverallOffsetX === "number") base.OverallOffsetX = p.OverallOffsetX;
+          if (typeof p.OverallOffsetY === "number") base.OverallOffsetY = p.OverallOffsetY;
+          if (typeof p.OverallPivotX === "number") base.OverallPivotX = p.OverallPivotX;
+          if (typeof p.OverallPivotY === "number") base.OverallPivotY = p.OverallPivotY;
           return base;
         });
       }
@@ -122,12 +167,18 @@
       GLDrawImage = function coeGLDrawImage(url, gl, dstX, dstY, options, offsetX) {
         try {
           var opts = options || {};
-        var rotation = opts.Rotation;
-        var scale = opts.Scale;
-
-        // 无变换时直接走原始函数，保持零开销
-        // 条件：rotation 为 falsy（0/undefined），且 Scale 为 undefined
-        if (!rotation && scale == null) {
+        var geometryKey = opts.__coeTransformKey;
+        if (geometryKey) recordRenderedTransformGeometry(geometryKey, dstX, dstY, opts, url, null, offsetX, gl);
+        var rotation = typeof opts.Rotation === "number" ? opts.Rotation : 0;
+        var scale = typeof opts.Scale === "number" ? opts.Scale : 1;
+        var overallRotation = typeof opts.OverallRotation === "number" ? opts.OverallRotation : 0;
+        var overallScale = typeof opts.OverallScale === "number" ? opts.OverallScale : 1;
+        var overallOffsetX = typeof opts.OverallOffsetX === "number" ? opts.OverallOffsetX : 0;
+        var overallOffsetY = typeof opts.OverallOffsetY === "number" ? opts.OverallOffsetY : 0;
+        // 无变换时直接走原始函数，保持零开销。自定义 pivot 本身不改变
+        // 图像，只有和旋转/缩放组合时才需要进入 GL 矩阵路径。
+        if (!rotation && Math.abs(scale - 1) <= 0.001 && !overallRotation && Math.abs(overallScale - 1) <= 0.001 &&
+          !overallOffsetX && !overallOffsetY) {
           return _gldrawOriginal.call(window, url, gl, dstX, dstY, options, offsetX);
         }
 
@@ -154,8 +205,9 @@
           return _gldrawOriginal.call(window, url, gl, dstX, dstY, options, offsetX);
         }
         var texW = dim.w, texH = dim.h;
-        var cx = texW / 2, cy = texH / 2;
-        var uniformScale = typeof scale === "number" ? clamp(scale, 0.25, 3.0) : 1;
+        if (geometryKey) recordRenderedTransformGeometry(geometryKey, dstX, dstY, opts, url, dim, offsetX, gl);
+        var uniformScale = clamp(scale, 0.25, 3.0);
+        var groupScale = clamp(overallScale, 0.25, 3.0);
         var off = typeof offsetX === "number" ? offsetX : 0;
         var mirror = opts.Mirror === true;
         var invert = opts.Invert === true;
@@ -163,8 +215,14 @@
         var drawY = dstY;
         if (mirror) drawX = 500 - drawX;
         if (invert) drawY = gl.canvas.height - drawY + 550;
-        var centerX = drawX + (mirror ? -cx : cx);
-        var centerY = drawY + (invert ? -cy : cy);
+        var signedW = (mirror ? -1 : 1) * texW;
+        var signedH = (invert ? -1 : 1) * texH;
+        var localPivotX = typeof opts.PivotX === "number" ? opts.PivotX : 0.5;
+        var localPivotY = typeof opts.PivotY === "number" ? opts.PivotY : 0.5;
+        var localPivotScreenX = drawX + localPivotX * signedW;
+        var localPivotScreenY = drawY + localPivotY * signedH;
+        var overallPivotX = typeof opts.OverallPivotX === "number" ? opts.OverallPivotX : localPivotScreenX;
+        var overallPivotY = typeof opts.OverallPivotY === "number" ? opts.OverallPivotY : localPivotScreenY;
 
         var program = gl.getParameter(gl.CURRENT_PROGRAM);
         if (!program) return _gldrawOriginal.call(window, url, gl, dstX, dstY, options, offsetX);
@@ -175,20 +233,26 @@
         if (!uMatrix) return _gldrawOriginal.call(window, url, gl, dstX, dstY, options, offsetX);
 
         var matrix = m4.orthographic(0, gl.canvas.width, gl.canvas.height, 0, -1, 1);
-        matrix = m4.translate(matrix, centerX, centerY, 0);
+        // 顶点仍是单位正方形，所有 pivot 先转换到像素合成空间，再把
+        // 纹理尺寸放在矩阵最右端。矩阵顺序表达：整体 × 局部 × 原图。
+        matrix = m4.translate(matrix, overallPivotX + overallOffsetX, overallPivotY + overallOffsetY, 0);
+        if (overallRotation) {
+          matrix = typeof m4.zRotate === "function"
+            ? m4.zRotate(matrix, overallRotation)
+            : m4.multiply(matrix, m4.zRotation(overallRotation));
+        }
+        matrix = m4.scale(matrix, groupScale, groupScale, 1);
+        matrix = m4.translate(matrix, -overallPivotX, -overallPivotY, 0);
+        matrix = m4.translate(matrix, localPivotScreenX, localPivotScreenY, 0);
         if (rotation) {
           matrix = typeof m4.zRotate === "function"
             ? m4.zRotate(matrix, rotation)
             : m4.multiply(matrix, m4.zRotation(rotation));
         }
         matrix = m4.scale(matrix, uniformScale, uniformScale, 1);
-        // m4 的顶点是单位正方形 [0, 1]²，纹理尺寸只在最后一步
-        // 才被映射到像素。因此这里必须把旋转中心写成单位坐标
-        // (0.5, 0.5)，不能使用 texW / 2、texH / 2。
-        // 原实现把像素坐标的中心放进了单位顶点空间，尺寸越大的
-        // 图层偏移越明显，表现出来就像围绕图层底部或其它随机位置旋转。
-        matrix = m4.translate(matrix, -0.5, -0.5, 0);
-        matrix = m4.scale(matrix, (mirror ? -1 : 1) * texW, (invert ? -1 : 1) * texH, 1);
+        matrix = m4.translate(matrix, -localPivotScreenX, -localPivotScreenY, 0);
+        matrix = m4.translate(matrix, drawX, drawY, 0);
+        matrix = m4.scale(matrix, signedW, signedH, 1);
 
         gl.uniformMatrix4fv(uMatrix, false, matrix);
         gl.drawArrays(gl.TRIANGLES, 0, 6);
@@ -208,8 +272,12 @@
     if (!character || isLocalPlayer(character) || !snapshot) return [];
     const memberNumber = Number(character.MemberNumber);
     const refsByMaterial = new Map();
+    const duplicateCounters = new Map();
     for (const layer of snapshot.l || []) {
       if (!refsByMaterial.has(layer.m)) refsByMaterial.set(layer.m, []);
+      const duplicateKey = `${layer.m}:${layer.i}:${layer.n || ""}`;
+      const duplicateIndex = duplicateCounters.get(duplicateKey) || 0;
+      duplicateCounters.set(duplicateKey, duplicateIndex + 1);
       var remoteRef = {
         materialId: `remote:${memberNumber}:${layer.m}`,
         sourceGroup: snapshot.m[layer.m]?.g,
@@ -221,12 +289,24 @@
         offsetY: layer.y,
         opacity: layer.o,
         hidden: false,
+        __coeTransformKey: `remote:${memberNumber}:${layer.m}:${layer.i}:${duplicateIndex}`,
       };
+      if (typeof layer.px === "number") remoteRef.pivotX = layer.px;
+      if (typeof layer.py === "number") remoteRef.pivotY = layer.py;
       if (typeof layer.r === "number" && layer.r !== 0) remoteRef.rotation = layer.r;
       if (typeof layer.s === "number" && Math.abs(layer.s - 1) > 0.001) remoteRef.scale = layer.s;
       refsByMaterial.get(layer.m).push(remoteRef);
     }
     const groups = [];
+    const overall = resolveOverallTransform({
+      overallRotation: snapshot.or,
+      overallScale: snapshot.os,
+      overallOffsetX: snapshot.ox,
+      overallOffsetY: snapshot.oy,
+      overallPivotX: snapshot.px,
+      overallPivotY: snapshot.py,
+      layers: [...refsByMaterial.values()].flat(),
+    }, character);
     for (let materialOrder = 0; materialOrder < (snapshot.m || []).length; materialOrder++) {
       const compact = snapshot.m[materialOrder];
       const refs = refsByMaterial.get(materialOrder) || [];
@@ -245,7 +325,7 @@
           if (!isDrawableLayer(sourceLayer)) throw new Error("source-layer-not-drawable");
         }
         analysis = analyzeAssetCached(sourceAsset);
-        const layerGroups = buildStaticSynthetic({ character, material, refs, asset: sourceAsset, analysis });
+        const layerGroups = buildStaticSynthetic({ character, material, refs, asset: sourceAsset, analysis, overall });
         for (let sourceOrder = 0; sourceOrder < layerGroups.length; sourceOrder++) {
           const group = layerGroups[sourceOrder];
           group.materialOrder = materialOrder;
@@ -299,7 +379,8 @@
             __coeSyntheticLayer: {
               item: group.item, ref, sourceLayer: visualLayer,
               sourceLayerIndex: ref.sourceLayerIndex ?? group.item.Asset.Layer.indexOf(entry.sourceLayer),
-              materialOrder: group.materialOrder, sourceOrder: entry.sourceOrder,
+              materialOrder: group.materialOrder, sourceOrder: entry.sourceOrder, overall: group.overall,
+              transformKey: ref.__coeTransformKey || `${group.material.id}:${ref.sourceLayerIndex ?? entry.sourceOrder}`,
             },
           });
         }
@@ -391,17 +472,17 @@
         // CommonDrawAppearanceBuild 只把 Mirror/Invert 从 drawOptions 转发给 GLDrawImage，
         // 因此通过迭代器记录当前图层，再在四个图像回调上补回图层级变换字段。
         const trackedLayers = drawLayers.slice();
-        trackedLayers[Symbol.iterator] = function* () {
-          try {
-            for (let index = 0; index < this.length; index++) {
-              currentDrawLayer = this[index];
-              yield currentDrawLayer;
+        // Proxy 拦截下标访问，确保 BC 用普通 for 循环时也能追踪当前绘制图层
+        character.AppearanceLayers = new Proxy(trackedLayers, {
+          get(target, prop) {
+            if (prop === "length" || typeof prop === "symbol") return target[prop];
+            var idx = Number(prop);
+            if (Number.isInteger(idx) && idx >= 0 && idx < target.length) {
+              currentDrawLayer = target[idx];
             }
-          } finally {
-            currentDrawLayer = null;
-          }
-        };
-        character.AppearanceLayers = trackedLayers;
+            return Reflect.get(target, prop);
+          },
+        });
         if (originalCallbacks && typeof originalCallbacks === "object") {
           const callbacks = { ...originalCallbacks };
           const imageCallbacks = ["drawImage", "drawImageBlink", "drawImageColorize", "drawImageColorizeBlink"];
@@ -409,14 +490,28 @@
             const callback = originalCallbacks[name];
             if (typeof callback !== "function") continue;
             callbacks[name] = function (...callbackArgs) {
-              const ref = currentDrawLayer?.__coeSyntheticLayer?.ref;
+              const marker = currentDrawLayer?.__coeSyntheticLayer;
+              const ref = marker?.ref;
               if (!ref) return callback.apply(this, callbackArgs);
               const options = callbackArgs[3] || {};
               const transformed = { ...options };
+              transformed.__coeTransformKey = marker.transformKey;
+              recordRenderedTransformGeometry(marker.transformKey, callbackArgs[1], callbackArgs[2], transformed, callbackArgs[0], null, callbackArgs[5]);
               if (typeof ref.rotation === "number" && isFinite(ref.rotation) && ref.rotation !== 0)
                 transformed.Rotation = clamp(ref.rotation, -Math.PI, Math.PI);
               if (typeof ref.scale === "number" && isFinite(ref.scale) && Math.abs(ref.scale - 1) > 0.001)
                 transformed.Scale = clamp(ref.scale, 0.25, 3.0);
+              if (typeof ref.pivotX === "number") transformed.PivotX = clamp(ref.pivotX, -PIVOT_LIMIT, PIVOT_LIMIT);
+              if (typeof ref.pivotY === "number") transformed.PivotY = clamp(ref.pivotY, -PIVOT_LIMIT, PIVOT_LIMIT);
+              const overall = marker.overall;
+              if (overall) {
+                transformed.OverallRotation = clamp(overall.rotation, -Math.PI, Math.PI);
+                transformed.OverallScale = clamp(overall.scale, 0.25, 3.0);
+                transformed.OverallOffsetX = clamp(overall.offsetX, -1200, 1200);
+                transformed.OverallOffsetY = clamp(overall.offsetY, -1200, 1200);
+                transformed.OverallPivotX = clamp(overall.pivotX, -OVERALL_PIVOT_LIMIT, OVERALL_PIVOT_LIMIT);
+                transformed.OverallPivotY = clamp(overall.pivotY, -OVERALL_PIVOT_LIMIT, OVERALL_PIVOT_LIMIT);
+              }
               callbackArgs[3] = transformed;
               return callback.apply(this, callbackArgs);
             };

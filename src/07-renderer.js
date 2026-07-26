@@ -182,7 +182,12 @@
             : m4.multiply(matrix, m4.zRotation(rotation));
         }
         matrix = m4.scale(matrix, uniformScale, uniformScale, 1);
-        matrix = m4.translate(matrix, -cx, -cy, 0);
+        // m4 的顶点是单位正方形 [0, 1]²，纹理尺寸只在最后一步
+        // 才被映射到像素。因此这里必须把旋转中心写成单位坐标
+        // (0.5, 0.5)，不能使用 texW / 2、texH / 2。
+        // 原实现把像素坐标的中心放进了单位顶点空间，尺寸越大的
+        // 图层偏移越明显，表现出来就像围绕图层底部或其它随机位置旋转。
+        matrix = m4.translate(matrix, -0.5, -0.5, 0);
         matrix = m4.scale(matrix, (mirror ? -1 : 1) * texW, (invert ? -1 : 1) * texH, 1);
 
         gl.uniformMatrix4fv(uMatrix, false, matrix);

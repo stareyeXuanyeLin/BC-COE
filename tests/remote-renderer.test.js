@@ -42,6 +42,30 @@ test('loaded static BC/Echo/other assets project through an inert visual proxy',
   }
 });
 
+test('CommonDraw image callbacks receive per-layer transform options', () => {
+  const asset = makeAsset('Cloth', 'Dress');
+  const remote = { MemberNumber: 7, Appearance: [], AppearanceLayers: [], AssetFamily: 'Female3DCG' };
+  const value = { v: 1, m: [{ g: 'Cloth', a: 'Dress', c: ['#fff'] }], l: [{ m: 0, n: 'Base', i: 0, p: 10, x: 0, y: 0, o: 1, r: Math.PI / 2, sx: 1.5, sy: 0.75 }] };
+  const { api } = load({ assets: [asset], characters: [remote] });
+  activate(api, 7, value);
+  const hooks = hooksFor(api);
+  const sorted = hooks.CharacterAppearanceSortLayers([remote], () => []);
+  remote.AppearanceLayers = sorted;
+  const seen = [];
+  const callbacks = {
+    clearRect() {}, clearRectBlink() {}, drawCanvas() {}, drawCanvasBlink() {},
+    drawImage(_src, _x, _y, options) { seen.push(options); },
+    drawImageBlink() {}, drawImageColorize() {}, drawImageColorizeBlink() {},
+  };
+  hooks.CommonDrawAppearanceBuild([remote, callbacks], args => {
+    for (const layer of remote.AppearanceLayers) args[1].drawImage('Assets/Female3DCG/Cloth/Dress/Dress_Base.png', 0, 0, {});
+  });
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].Rotation, Math.PI / 2);
+  assert.equal(seen[0].ScaleX, 1.5);
+  assert.equal(seen[0].ScaleY, 0.75);
+});
+
 test('missing or mismatched material is skipped locally while other material survives', () => {
   const good = makeAsset('Cloth', 'Dress');
   const remote = { MemberNumber: 7, Appearance: [], AppearanceLayers: [], AssetFamily: 'Female3DCG' };

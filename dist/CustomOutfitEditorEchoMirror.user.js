@@ -792,10 +792,16 @@
       var rest = parts[3];
       var slashIdx = rest.lastIndexOf("/");
       var assetName = slashIdx >= 0 ? rest.slice(0, slashIdx) : rest;
-      var layerName = slashIdx >= 0 ? rest.slice(slashIdx + 1) : rest;
+      var layerToken = slashIdx >= 0 ? rest.slice(slashIdx + 1) : rest;
       var asset = AssetGet(family, groupName, assetName);
       if (!asset) return null;
-      var layer = asset.Layer ? asset.Layer.find(function(l) { return l.Name === layerName || l.Image === layerName; }) : null;
+      var layer = asset.Layer ? asset.Layer.find(function(l) {
+        if (l.Name === layerToken || l.Image === layerToken) return true;
+        if (l.Name && (layerToken === `${assetName}_${l.Name}` || layerToken.endsWith(`_${l.Name}`))) return true;
+        if (l.Image && (layerToken === `${assetName}_${l.Image}` || layerToken.endsWith(`_${l.Image}`))) return true;
+        return false;
+      }) : null;
+      if (!layer && asset.Layer?.length === 1) layer = asset.Layer[0];
       if (!layer) return null;
       return { w: layer.DrawingWidth || asset.Width || 100, h: layer.DrawingHeight || asset.Height || 100 };
     } catch (_) { return null; }
@@ -841,14 +847,8 @@
         }
 
         // --- 变换绘制 ---
-        // 策略：先用原始函数完成纹理绑定/着色器选择/透明度等 uniform 设置，
-        // 然后在同一 program 下用自定义矩阵覆盖 u_matrix 并再次绘制。
-        //
-        // ⚠️ 已知限制：当图层 opacity < 1 时，二次绘制会在原始位置留下透明度残影
-        // （原始绘制 + 变换绘制各渲染一次，低透明度叠加后两个位置都可见）。
-        // 优化方案：在调用原始函数前通过 gl.colorMask 禁止颜色输出，
-        // 让原始绘制只产生副作用（纹理绑定、uniform 设置）但不输出颜色。
-        // 然后恢复 colorMask 后用自定义矩阵绘制。
+        // 先让 BC 原始函数完成纹理、遮罩、着色器和 uniform 设置，但禁止它输出颜色；
+        // 随后在同一个 program 上只用变换后的矩阵绘制一次。
         var colorMaskSaved;
         try {
           colorMaskSaved = gl.getParameter(gl.COLOR_WRITEMASK);
@@ -858,9 +858,16 @@
           if (colorMaskSaved) gl.colorMask(colorMaskSaved[0], colorMaskSaved[1], colorMaskSaved[2], colorMaskSaved[3]);
         }
 
-        // 解析纹理尺寸
-        var dim = resolveTextureDimensions(url);
-        if (!dim) return;
+        // GLDrawLoadImage 返回的缓存尺寸才是可靠来源；URL 中通常是 Dress_Base.png，
+        // 不能直接把完整文件名当作 AssetLayer.Name。
+        var textureInfo = typeof GLDrawLoadImage === "function" ? GLDrawLoadImage(gl, url) : null;
+        var dim = textureInfo && Number(textureInfo.width) > 0 && Number(textureInfo.height) > 0
+          ? { w: textureInfo.width, h: textureInfo.height }
+          : resolveTextureDimensions(url);
+        if (!dim || !(dim.w > 0) || !(dim.h > 0)) {
+          // 不能取得尺寸时必须恢复一次正常绘制，避免 colorMask 路径吞掉图层。
+          return _gldrawOriginal.call(window, url, gl, dstX, dstY, options, offsetX);
+        }
         var texW = dim.w, texH = dim.h;
         var cx = texW / 2, cy = texH / 2;
         var sx = typeof scaleX === "number" ? scaleX : 1;
@@ -868,20 +875,24 @@
         var off = typeof offsetX === "number" ? offsetX : 0;
         var mirror = opts.Mirror === true;
         var invert = opts.Invert === true;
+        var drawX = dstX + off;
+        var drawY = dstY;
+        if (mirror) drawX = 500 - drawX;
+        if (invert) drawY = gl.canvas.height - drawY + 550;
+        var centerX = drawX + (mirror ? -cx : cx);
+        var centerY = drawY + (invert ? -cy : cy);
 
         var program = gl.getParameter(gl.CURRENT_PROGRAM);
-        if (!program) return;
+        if (!program) return _gldrawOriginal.call(window, url, gl, dstX, dstY, options, offsetX);
 
         // 获取 u_matrix 位置。BC 的 GLDraw 在 program 上缓存了此位置，
         // 但用 gl.getUniformLocation 更健壮，不依赖内部实现。
         var uMatrix = program.u_matrix || gl.getUniformLocation(program, "u_matrix");
-        if (!uMatrix) return;
+        if (!uMatrix) return _gldrawOriginal.call(window, url, gl, dstX, dstY, options, offsetX);
 
         var matrix = m4.orthographic(0, gl.canvas.width, gl.canvas.height, 0, -1, 1);
-        matrix = m4.translate(matrix, dstX + off + cx, dstY + cy, 0);
+        matrix = m4.translate(matrix, centerX, centerY, 0);
         if (rotation) {
-          // BC 的 m4 库可能用 zRotate 命名，标准 gl-matrix 用 rotateZ。
-          // 优先用 zRotate（BC 原生），否则 fallback 到标准路径。
           matrix = typeof m4.zRotate === "function"
             ? m4.zRotate(matrix, rotation)
             : m4.multiply(matrix, m4.zRotation(rotation));
@@ -1072,9 +1083,11 @@
       if (!groups.length) return next(args);
       const originalAppearance = character.Appearance;
       const originalLayers = character.AppearanceLayers;
+      const originalCallbacks = args[1];
+      let currentDrawLayer = null;
       try {
         character.Appearance = groups.map(group => group.item).concat(originalAppearance || []);
-        character.AppearanceLayers = (originalLayers || []).map(layer => {
+        const drawLayers = (originalLayers || []).map(layer => {
           const marker = layer.__coeSyntheticLayer;
           if (!marker) return layer;
           const ref = marker.ref;
@@ -1087,8 +1100,46 @@
             __coeSyntheticLayer: marker,
           };
         });
+        // CommonDrawAppearanceBuild 只把 Mirror/Invert 从 drawOptions 转发给 GLDrawImage，
+        // 因此通过迭代器记录当前图层，再在四个图像回调上补回图层级变换字段。
+        const trackedLayers = drawLayers.slice();
+        trackedLayers[Symbol.iterator] = function* () {
+          try {
+            for (let index = 0; index < this.length; index++) {
+              currentDrawLayer = this[index];
+              yield currentDrawLayer;
+            }
+          } finally {
+            currentDrawLayer = null;
+          }
+        };
+        character.AppearanceLayers = trackedLayers;
+        if (originalCallbacks && typeof originalCallbacks === "object") {
+          const callbacks = { ...originalCallbacks };
+          const imageCallbacks = ["drawImage", "drawImageBlink", "drawImageColorize", "drawImageColorizeBlink"];
+          for (const name of imageCallbacks) {
+            const callback = originalCallbacks[name];
+            if (typeof callback !== "function") continue;
+            callbacks[name] = function (...callbackArgs) {
+              const ref = currentDrawLayer?.__coeSyntheticLayer?.ref;
+              if (!ref) return callback.apply(this, callbackArgs);
+              const options = callbackArgs[3] || {};
+              const transformed = { ...options };
+              if (typeof ref.rotation === "number" && isFinite(ref.rotation) && ref.rotation !== 0)
+                transformed.Rotation = clamp(ref.rotation, -Math.PI, Math.PI);
+              if (typeof ref.scaleX === "number" && isFinite(ref.scaleX) && Math.abs(ref.scaleX - 1) > 0.001)
+                transformed.ScaleX = clamp(ref.scaleX, 0.25, 3.0);
+              if (typeof ref.scaleY === "number" && isFinite(ref.scaleY) && Math.abs(ref.scaleY - 1) > 0.001)
+                transformed.ScaleY = clamp(ref.scaleY, 0.25, 3.0);
+              callbackArgs[3] = transformed;
+              return callback.apply(this, callbackArgs);
+            };
+          }
+          args[1] = callbacks;
+        }
         return next(args);
       } finally {
+        args[1] = originalCallbacks;
         character.Appearance = originalAppearance;
         character.AppearanceLayers = originalLayers;
       }

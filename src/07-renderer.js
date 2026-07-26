@@ -97,7 +97,7 @@
   // 合成图层的变换参数渲染穿线
   function installTransformRenderHooks() {
     // --- ExtendedItemGetDrawingOptions hook ---
-    // 为 COE 合成 item 注入 Mirror/Invert（BC 原生消费）以及 Rotation/ScaleX/ScaleY（供 GLDrawImage 包装消费）
+    // 为 COE 合成 item 注入 Mirror/Invert（BC 原生消费）以及 Rotation/Scale（供 GLDrawImage 包装消费）
     try {
       if (typeof modApi.hookFunction === "function") {
         modApi.hookFunction("ExtendedItemGetDrawingOptions", 5, function(args, next) {
@@ -109,8 +109,7 @@
           base.Invert = p.Invert === true;
           // 只传递非缺省值，保持 drawOptions 精简
           if (typeof p.Rotation === "number" && p.Rotation !== 0) base.Rotation = p.Rotation;
-          if (typeof p.ScaleX === "number" && Math.abs(p.ScaleX - 1) > 0.001) base.ScaleX = p.ScaleX;
-          if (typeof p.ScaleY === "number" && Math.abs(p.ScaleY - 1) > 0.001) base.ScaleY = p.ScaleY;
+          if (typeof p.Scale === "number" && Math.abs(p.Scale - 1) > 0.001) base.Scale = p.Scale;
           return base;
         });
       }
@@ -124,12 +123,11 @@
         try {
           var opts = options || {};
         var rotation = opts.Rotation;
-        var scaleX = opts.ScaleX;
-        var scaleY = opts.ScaleY;
+        var scale = opts.Scale;
 
         // 无变换时直接走原始函数，保持零开销
-        // 条件：rotation 为 falsy（0/undefined），且 ScaleX/ScaleY 为 undefined
-        if (!rotation && scaleX == null && scaleY == null) {
+        // 条件：rotation 为 falsy（0/undefined），且 Scale 为 undefined
+        if (!rotation && scale == null) {
           return _gldrawOriginal.call(window, url, gl, dstX, dstY, options, offsetX);
         }
 
@@ -157,8 +155,7 @@
         }
         var texW = dim.w, texH = dim.h;
         var cx = texW / 2, cy = texH / 2;
-        var sx = typeof scaleX === "number" ? scaleX : 1;
-        var sy = typeof scaleY === "number" ? scaleY : 1;
+        var uniformScale = typeof scale === "number" ? clamp(scale, 0.25, 3.0) : 1;
         var off = typeof offsetX === "number" ? offsetX : 0;
         var mirror = opts.Mirror === true;
         var invert = opts.Invert === true;
@@ -184,7 +181,7 @@
             ? m4.zRotate(matrix, rotation)
             : m4.multiply(matrix, m4.zRotation(rotation));
         }
-        matrix = m4.scale(matrix, sx, sy, 1);
+        matrix = m4.scale(matrix, uniformScale, uniformScale, 1);
         matrix = m4.translate(matrix, -cx, -cy, 0);
         matrix = m4.scale(matrix, (mirror ? -1 : 1) * texW, (invert ? -1 : 1) * texH, 1);
 
@@ -221,8 +218,7 @@
         hidden: false,
       };
       if (typeof layer.r === "number" && layer.r !== 0) remoteRef.rotation = layer.r;
-      if (typeof layer.sx === "number" && Math.abs(layer.sx - 1) > 0.001) remoteRef.scaleX = layer.sx;
-      if (typeof layer.sy === "number" && Math.abs(layer.sy - 1) > 0.001) remoteRef.scaleY = layer.sy;
+      if (typeof layer.s === "number" && Math.abs(layer.s - 1) > 0.001) remoteRef.scale = layer.s;
       refsByMaterial.get(layer.m).push(remoteRef);
     }
     const groups = [];
@@ -414,10 +410,8 @@
               const transformed = { ...options };
               if (typeof ref.rotation === "number" && isFinite(ref.rotation) && ref.rotation !== 0)
                 transformed.Rotation = clamp(ref.rotation, -Math.PI, Math.PI);
-              if (typeof ref.scaleX === "number" && isFinite(ref.scaleX) && Math.abs(ref.scaleX - 1) > 0.001)
-                transformed.ScaleX = clamp(ref.scaleX, 0.25, 3.0);
-              if (typeof ref.scaleY === "number" && isFinite(ref.scaleY) && Math.abs(ref.scaleY - 1) > 0.001)
-                transformed.ScaleY = clamp(ref.scaleY, 0.25, 3.0);
+              if (typeof ref.scale === "number" && isFinite(ref.scale) && Math.abs(ref.scale - 1) > 0.001)
+                transformed.Scale = clamp(ref.scale, 0.25, 3.0);
               callbackArgs[3] = transformed;
               return callback.apply(this, callbackArgs);
             };

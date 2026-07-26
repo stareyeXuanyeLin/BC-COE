@@ -91,10 +91,8 @@
       const perLayerProperty = { ...baseProperty };
       if (typeof ref.rotation === "number" && isFinite(ref.rotation) && ref.rotation !== 0)
         perLayerProperty.Rotation = clamp(ref.rotation, -Math.PI, Math.PI);
-      if (typeof ref.scaleX === "number" && isFinite(ref.scaleX) && Math.abs(ref.scaleX - 1) > 0.001)
-        perLayerProperty.ScaleX = clamp(ref.scaleX, 0.25, 3.0);
-      if (typeof ref.scaleY === "number" && isFinite(ref.scaleY) && Math.abs(ref.scaleY - 1) > 0.001)
-        perLayerProperty.ScaleY = clamp(ref.scaleY, 0.25, 3.0);
+      if (typeof ref.scale === "number" && isFinite(ref.scale) && Math.abs(ref.scale - 1) > 0.001)
+        perLayerProperty.Scale = clamp(ref.scale, 0.25, 3.0);
       const item = {
         Asset: visualAsset,
         Color: colors,

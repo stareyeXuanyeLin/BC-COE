@@ -261,8 +261,7 @@
         layer.color = null;
         layer.hidden = false;
         layer.rotation = layer.defaultRotation;
-        layer.scaleX = layer.defaultScaleX;
-        layer.scaleY = layer.defaultScaleY;
+        layer.scale = layer.defaultScale;
       });
       refreshPreviewLoop();
       renderLayerList(list);
@@ -291,9 +290,8 @@
       const card = document.createElement("article");
       card.className = `coe-layer${layer.hidden ? " coe-hidden" : ""}`;
       var layerRotDeg = Math.round(((layer.rotation || 0) * 180 / Math.PI) * 100) / 100;
-      var layerScaleXVal = typeof layer.scaleX === "number" ? layer.scaleX : 1;
-      var layerScaleYVal = typeof layer.scaleY === "number" ? layer.scaleY : 1;
-      card.innerHTML = `<div class="coe-layer-top"><span class="coe-layer-name" title="${escapeHTML(`${layer.sourceGroup}/${layer.sourceAsset}/${layerName}`)}">${escapeHTML(layerName)}</span>${sourceLayer?.ColorGroup ? `<span class="coe-badge">颜色组：${escapeHTML(sourceLayer.ColorGroup)}</span>` : ""}<button type="button" class="coe-btn" data-hide>${layer.hidden ? "显示" : "隐藏"}</button><button type="button" class="coe-btn" data-copy>复制</button><button type="button" class="coe-btn" data-reset>本层默认</button><button type="button" class="coe-btn coe-danger" data-remove>清除</button></div><div class="coe-controls"><label>图层位置<input type="number" min="-99" max="99" step="1" data-key="priority" value="${layer.priority}"></label><label>偏移 X<input type="number" min="-1200" max="1200" step="1" data-key="offsetX" value="${layer.offsetX}"></label><label>偏移 Y<input type="number" min="-1200" max="1200" step="1" data-key="offsetY" value="${layer.offsetY}"></label><label>透明度<input type="number" min="0" max="1" step="0.05" data-key="opacity" value="${layer.opacity}"></label><label>图层颜色<button type="button" class="coe-color-choice" data-layer-color="${layerIndex}" ${canColor ? "" : "disabled"} title="${canColor ? `使用游戏原版颜色选择器编辑颜色槽 ${colorIndex}` : "原版将此图层标记为不可着色"}"><span class="coe-color-swatch"></span><code>${escapeHTML(material.colors[colorIndex] || "Default")}</code></button></label></div><div class="coe-layer-transform"><label>旋转<input type="number" step="1" min="-180" max="180" data-layer-transform="rotation" value="${layerRotDeg}">°</label><label>缩放 X<input type="number" step="0.05" min="0.25" max="3" data-layer-transform="scalex" value="${layerScaleXVal}"></label><label>缩放 Y<input type="number" step="0.05" min="0.25" max="3" data-layer-transform="scaley" value="${layerScaleYVal}"></label></div>`;
+      var layerScaleVal = typeof layer.scale === "number" ? layer.scale : 1;
+      card.innerHTML = `<div class="coe-layer-top"><span class="coe-layer-name" title="${escapeHTML(`${layer.sourceGroup}/${layer.sourceAsset}/${layerName}`)}">${escapeHTML(layerName)}</span>${sourceLayer?.ColorGroup ? `<span class="coe-badge">颜色组：${escapeHTML(sourceLayer.ColorGroup)}</span>` : ""}<button type="button" class="coe-btn" data-hide>${layer.hidden ? "显示" : "隐藏"}</button><button type="button" class="coe-btn" data-copy>复制</button><button type="button" class="coe-btn" data-reset>本层默认</button><button type="button" class="coe-btn coe-danger" data-remove>清除</button></div><div class="coe-controls"><label>图层位置<input type="number" min="-99" max="99" step="1" data-key="priority" value="${layer.priority}"></label><label>偏移 X<input type="number" min="-1200" max="1200" step="1" data-key="offsetX" value="${layer.offsetX}"></label><label>偏移 Y<input type="number" min="-1200" max="1200" step="1" data-key="offsetY" value="${layer.offsetY}"></label><label>透明度<input type="number" min="0" max="1" step="0.05" data-key="opacity" value="${layer.opacity}"></label><label>图层颜色<button type="button" class="coe-color-choice" data-layer-color="${layerIndex}" ${canColor ? "" : "disabled"} title="${canColor ? `使用游戏原版颜色选择器编辑颜色槽 ${colorIndex}` : "原版将此图层标记为不可着色"}"><span class="coe-color-swatch"></span><code>${escapeHTML(material.colors[colorIndex] || "Default")}</code></button></label></div><div class="coe-layer-transform"><label>旋转<input type="number" step="1" min="-180" max="180" data-layer-transform="rotation" value="${layerRotDeg}">°</label><label>缩放<input type="number" step="0.05" min="0.25" max="3" data-layer-transform="scale" value="${layerScaleVal}"></label></div>`;
       updateColorChoice(card.querySelector("[data-layer-color]"), material.colors[colorIndex] || "Default", colorValue);
       card.querySelector("[data-hide]").addEventListener("click", () => {
         layer.hidden = !layer.hidden;
@@ -308,8 +306,7 @@
         layer.hidden = false;
         layer.color = null;
         layer.rotation = layer.defaultRotation;
-        layer.scaleX = layer.defaultScaleX;
-        layer.scaleY = layer.defaultScaleY;
+        layer.scale = layer.defaultScale;
         if (canColor) material.colors[colorIndex] = material.defaultColors?.[colorIndex] || asset?.DefaultColor?.[colorIndex] || "Default";
         refreshPreviewLoop();
         renderLayerList(list);
@@ -347,13 +344,9 @@
             raw = Math.round(raw);
             layer.rotation = raw * Math.PI / 180;
             this.value = raw;
-          } else if (key === "scalex") {
+          } else if (key === "scale") {
             raw = clamp(raw, 0.25, 3.0);
-            layer.scaleX = raw;
-            this.value = raw;
-          } else if (key === "scaley") {
-            raw = clamp(raw, 0.25, 3.0);
-            layer.scaleY = raw;
+            layer.scale = raw;
             this.value = raw;
           }
           refreshPreviewLoop();

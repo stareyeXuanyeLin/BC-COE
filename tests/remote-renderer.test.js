@@ -15,6 +15,19 @@ function hooksFor(api) {
   return hooks;
 }
 
+test('legacy non-uniform scale is collapsed to one uniform scale', () => {
+  const asset = makeAsset();
+  const { api } = load({ assets: [asset] });
+  api.setActiveCompositionForTest({
+    materials: [{ id: 'm1', sourceGroup: 'Cloth', sourceAsset: 'Dress', colors: ['#fff'] }],
+    layers: [{ materialId: 'm1', sourceGroup: 'Cloth', sourceAsset: 'Dress', sourceLayer: 'Base', sourceLayerIndex: 0, priority: 1, offsetX: 0, offsetY: 0, opacity: 1, scaleX: 1.5, scaleY: 0.75 }],
+  });
+  const snapshot = api.buildLocalRemoteSnapshot();
+  assert.equal(snapshot.l[0].s, Math.round(Math.sqrt(1.5 * 0.75) * 10000) / 10000);
+  assert.equal(Object.hasOwn(snapshot.l[0], 'sx'), false);
+  assert.equal(Object.hasOwn(snapshot.l[0], 'sy'), false);
+});
+
 test('character without remote snapshot returns original base layer reference', () => {
   const asset = makeAsset();
   const remote = { MemberNumber: 7, Appearance: [], AppearanceLayers: [], AssetFamily: 'Female3DCG' };
@@ -45,7 +58,7 @@ test('loaded static BC/Echo/other assets project through an inert visual proxy',
 test('CommonDraw image callbacks receive per-layer transform options', () => {
   const asset = makeAsset('Cloth', 'Dress');
   const remote = { MemberNumber: 7, Appearance: [], AppearanceLayers: [], AssetFamily: 'Female3DCG' };
-  const value = { v: 1, m: [{ g: 'Cloth', a: 'Dress', c: ['#fff'] }], l: [{ m: 0, n: 'Base', i: 0, p: 10, x: 0, y: 0, o: 1, r: Math.PI / 2, sx: 1.5, sy: 0.75 }] };
+  const value = { v: 1, m: [{ g: 'Cloth', a: 'Dress', c: ['#fff'] }], l: [{ m: 0, n: 'Base', i: 0, p: 10, x: 0, y: 0, o: 1, r: Math.PI / 2, s: 1.5 }] };
   const { api } = load({ assets: [asset], characters: [remote] });
   activate(api, 7, value);
   const hooks = hooksFor(api);
@@ -62,8 +75,7 @@ test('CommonDraw image callbacks receive per-layer transform options', () => {
   });
   assert.equal(seen.length, 1);
   assert.equal(seen[0].Rotation, Math.PI / 2);
-  assert.equal(seen[0].ScaleX, 1.5);
-  assert.equal(seen[0].ScaleY, 0.75);
+  assert.equal(seen[0].Scale, 1.5);
 });
 
 test('missing or mismatched material is skipped locally while other material survives', () => {

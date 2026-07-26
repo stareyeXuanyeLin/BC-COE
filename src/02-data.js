@@ -6,13 +6,18 @@
     const rotation = typeof raw.rotation === "number" && isFinite(raw.rotation) && raw.rotation !== 0
       ? clamp(raw.rotation, -Math.PI, Math.PI)
       : undefined;
-    const scaleX = typeof raw.scaleX === "number" && isFinite(raw.scaleX) && Math.abs(raw.scaleX - 1) > 0.001
-      ? clamp(raw.scaleX, 0.25, 3.0)
+    const directScale = typeof raw.scale === "number" && isFinite(raw.scale) && Math.abs(raw.scale - 1) > 0.001
+      ? raw.scale
       : undefined;
-    const scaleY = typeof raw.scaleY === "number" && isFinite(raw.scaleY) && Math.abs(raw.scaleY - 1) > 0.001
-      ? clamp(raw.scaleY, 0.25, 3.0)
+    // 兼容上一版的非等比字段，但统一压成一个等比缩放值，绝不再生成椭圆。
+    const legacyScales = [raw.scaleX, raw.scaleY].filter(value => typeof value === "number" && isFinite(value) && value > 0);
+    const legacyScale = legacyScales.length
+      ? legacyScales.reduce((product, value) => product * clamp(value, 0.25, 3.0), 1) ** (1 / legacyScales.length)
       : undefined;
-    return { rotation, scaleX, scaleY };
+    const scale = directScale != null ? clamp(directScale, 0.25, 3.0)
+      : legacyScale != null && Math.abs(legacyScale - 1) > 0.001 ? clamp(legacyScale, 0.25, 3.0)
+        : undefined;
+    return { rotation, scale };
   }
 
   function normalizeLayer(raw) {
@@ -43,10 +48,8 @@
       sourceProperty: sanitizeSourceProperty(raw.sourceProperty),
       rotation: transform.rotation,
       defaultRotation: undefined,
-      scaleX: transform.scaleX,
-      defaultScaleX: undefined,
-      scaleY: transform.scaleY,
-      defaultScaleY: undefined,
+      scale: transform.scale,
+      defaultScale: undefined,
     };
   }
 
@@ -181,8 +184,7 @@
     if (layer.hidden) output.hidden = true;
     if (layer.color) output.color = layer.color;
     if (typeof layer.rotation === "number" && layer.rotation !== 0) output.rotation = layer.rotation;
-    if (typeof layer.scaleX === "number" && Math.abs(layer.scaleX - 1) > 0.001) output.scaleX = layer.scaleX;
-    if (typeof layer.scaleY === "number" && Math.abs(layer.scaleY - 1) > 0.001) output.scaleY = layer.scaleY;
+    if (typeof layer.scale === "number" && Math.abs(layer.scale - 1) > 0.001) output.scale = layer.scale;
     return output;
   }
 

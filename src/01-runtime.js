@@ -19,7 +19,7 @@
   let editing = null;
   let editingId = null;
   let syntheticByCharacter = new WeakMap();
-  let wardrobe = { version: 4, schemes: [], equippedIds: [] };
+  let wardrobe = { version: 5, schemes: [], equippedIds: [] };
   let wardrobeReadState = { status: "absent", source: null, server: null, local: null, conflict: false };
   let persistenceBlocked = false;
   let duplicateInstance = false;

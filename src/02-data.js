@@ -1,3 +1,6 @@
+  const COMPOSITION_VERSION = 4;
+  const WARDROBE_VERSION = 5;
+
   function materialKey(group, asset) {
     return `${group}\u0000${asset}`;
   }
@@ -6,17 +9,9 @@
     const rotation = typeof raw.rotation === "number" && isFinite(raw.rotation) && raw.rotation !== 0
       ? clamp(raw.rotation, -Math.PI, Math.PI)
       : undefined;
-    const directScale = typeof raw.scale === "number" && isFinite(raw.scale) && Math.abs(raw.scale - 1) > 0.001
-      ? raw.scale
+    const scale = typeof raw.scale === "number" && isFinite(raw.scale) && Math.abs(raw.scale - 1) > 0.001
+      ? clamp(raw.scale, 0.25, 3.0)
       : undefined;
-    // 兼容上一版的非等比字段，但统一压成一个等比缩放值，绝不再生成椭圆。
-    const legacyScales = [raw.scaleX, raw.scaleY].filter(value => typeof value === "number" && isFinite(value) && value > 0);
-    const legacyScale = legacyScales.length
-      ? legacyScales.reduce((product, value) => product * clamp(value, 0.25, 3.0), 1) ** (1 / legacyScales.length)
-      : undefined;
-    const scale = directScale != null ? clamp(directScale, 0.25, 3.0)
-      : legacyScale != null && Math.abs(legacyScale - 1) > 0.001 ? clamp(legacyScale, 0.25, 3.0)
-        : undefined;
     return { rotation, scale };
   }
 
@@ -120,7 +115,7 @@
     }
     const used = new Set([...layers, ...recycle].map(layer => layer.materialId));
     return {
-      version: 3,
+      version: COMPOSITION_VERSION,
       name: String(raw?.name || "未命名方案").slice(0, 60),
       materials: materials.filter(material => used.has(material.id)),
       layers,
@@ -139,7 +134,7 @@
       ? raw.equippedIds.filter(id => typeof id === "string" && validIds.has(id))
       : [];
     return {
-      version: 4,
+      version: WARDROBE_VERSION,
       schemes,
       equippedIds: [...new Set(equippedIds)],
     };
@@ -205,7 +200,7 @@
   function compactCompositionForStorage(composition) {
     const normalized = normalizeComposition(composition);
     const compact = {
-      version: 3,
+      version: COMPOSITION_VERSION,
       name: normalized.name,
       materials: normalized.materials.map(compactMaterialForStorage),
       layers: normalized.layers.map(compactLayerForStorage),
@@ -218,7 +213,7 @@
   function compactWardrobeForStorage(data) {
     const normalized = normalizeWardrobe(data);
     const compact = {
-      version: 4,
+      version: WARDROBE_VERSION,
       schemes: normalized.schemes.map(entry => ({ id: entry.id, composition: compactCompositionForStorage(entry.composition) })),
       equippedIds: normalized.equippedIds,
     };

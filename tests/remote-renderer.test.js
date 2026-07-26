@@ -15,7 +15,7 @@ function hooksFor(api) {
   return hooks;
 }
 
-test('legacy non-uniform scale is collapsed to one uniform scale', () => {
+test('legacy non-uniform scale fields are discarded by the new schema', () => {
   const asset = makeAsset();
   const { api } = load({ assets: [asset] });
   api.setActiveCompositionForTest({
@@ -23,7 +23,7 @@ test('legacy non-uniform scale is collapsed to one uniform scale', () => {
     layers: [{ materialId: 'm1', sourceGroup: 'Cloth', sourceAsset: 'Dress', sourceLayer: 'Base', sourceLayerIndex: 0, priority: 1, offsetX: 0, offsetY: 0, opacity: 1, scaleX: 1.5, scaleY: 0.75 }],
   });
   const snapshot = api.buildLocalRemoteSnapshot();
-  assert.equal(snapshot.l[0].s, Math.round(Math.sqrt(1.5 * 0.75) * 10000) / 10000);
+  assert.equal(Object.hasOwn(snapshot.l[0], 's'), false);
   assert.equal(Object.hasOwn(snapshot.l[0], 'sx'), false);
   assert.equal(Object.hasOwn(snapshot.l[0], 'sy'), false);
 });

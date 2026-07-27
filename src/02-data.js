@@ -78,6 +78,15 @@
       defaultColors: sanitizeColorArray(raw.defaultColors),
       sourceColor: sanitizeColor(raw.sourceColor),
       sourceProperty: sanitizeSourceProperty(raw.sourceProperty),
+      // These values belong to one source Asset and transform all of its image
+      // layers together. They intentionally live on the material, never on the
+      // composition, so two materials can be rotated independently.
+      overallRotation: typeof raw.overallRotation === "number" && isFinite(raw.overallRotation) && raw.overallRotation !== 0
+        ? clamp(raw.overallRotation, -Math.PI, Math.PI) : undefined,
+      overallScale: typeof raw.overallScale === "number" && isFinite(raw.overallScale) && Math.abs(raw.overallScale - 1) > 0.001
+        ? clamp(raw.overallScale, 0.25, 3.0) : undefined,
+      overallOffsetX: optionalFiniteNumber(raw.overallOffsetX, -1200, 1200),
+      overallOffsetY: optionalFiniteNumber(raw.overallOffsetY, -1200, 1200),
       hidden: raw.hidden === true,
       collapsed: raw.collapsed === true,
     };
@@ -145,16 +154,20 @@
       }
     }
     const used = new Set([...layers, ...recycle].map(layer => layer.materialId));
-    const overall = normalizeOverallTransform(raw);
-    const output = {
+    const usedMaterials = materials.filter(material => used.has(material.id));
+    // Older rebuild snapshots stored one composition-wide transform. Preserve it
+    // only when the old composition contains one material; with multiple materials
+    // applying it would recreate the very bug this schema removes.
+    const legacyOverall = normalizeOverallTransform(raw);
+    const hasLegacyOverall = Object.values(legacyOverall).some(value => typeof value === "number");
+    if (hasLegacyOverall && usedMaterials.length === 1) Object.assign(usedMaterials[0], legacyOverall);
+    return {
       version: COMPOSITION_VERSION,
       name: String(raw?.name || "未命名方案").slice(0, 60),
-      materials: materials.filter(material => used.has(material.id)),
+      materials: usedMaterials,
       layers,
       recycle,
     };
-    Object.assign(output, overall);
-    return output;
   }
 
   function firstFinite(value, fallback = 0) {
@@ -190,39 +203,201 @@
     return { left: firstFinite(sourceLayer?.DrawingLeft, 0), top: firstFinite(sourceLayer?.DrawingTop, 0), width: Math.max(1, width), height: Math.max(1, height) };
   }
 
-  function computeDefaultOverallCenter(composition, character = globalThis.Player) {
-    let largest = null;
+  function resolveCoordinateVector(value, character, fallback = { x: 0, y: 0 }) {
+    if (typeof value === "number" && Number.isFinite(value)) return { x: 0, y: value };
+    if (!value || typeof value !== "object") return fallback;
+    const poses = Array.isArray(character?.DrawPose) ? character.DrawPose : [];
+    const candidates = [...poses, "Default"];
+    for (const pose of candidates) {
+      const entry = value[pose];
+      if (typeof entry === "number" && Number.isFinite(entry)) return { x: 0, y: entry };
+      if (entry && typeof entry === "object") {
+        const x = firstFinite(entry.x ?? entry.X ?? entry.left ?? entry.Left, 0);
+        const y = firstFinite(entry.y ?? entry.Y ?? entry.top ?? entry.Top, 0);
+        if (Number.isFinite(x) || Number.isFinite(y)) return { x, y };
+      }
+    }
+    return {
+      x: firstFinite(value.x ?? value.X ?? value.left ?? value.Left, fallback.x),
+      y: firstFinite(value.y ?? value.Y ?? value.top ?? value.Top, fallback.y),
+    };
+  }
+
+  function resolveCoordinatePipelineOffset(asset, sourceLayer, character) {
+    let x = 0;
+    let y = 0;
+    // CommonDraw uses DynamicGroupName for pose moves and body offsets. The
+    // static Group name is only a fallback for older/custom assets without it.
+    const groupName = asset?.DynamicGroupName || asset?.Group?.Name || "";
+    const poseNames = Array.isArray(character?.DrawPose) ? character.DrawPose : [];
+    const poseRecord = globalThis.PoseRecord;
+    for (const poseName of poseNames) {
+      const pose = poseRecord && typeof poseRecord === "object" ? poseRecord[poseName] : null;
+      const move = Array.isArray(pose?.MovePosition)
+        ? pose.MovePosition.find(entry => entry?.Group === groupName)
+        : null;
+      if (move) {
+        x += firstFinite(move.X ?? move.x, 0);
+        y += firstFinite(move.Y ?? move.y, 0);
+      }
+    }
+
+    // This mirrors CommonDrawComputeDrawingCoordinates() in BC R130. Fixed
+    // position assets use the character's height correction before the global
+    // canvas overflow is added.
+    if (asset?.FixedPosition || sourceLayer?.FixedPosition) {
+      const inverted = typeof character?.IsInverted === "function"
+        ? character.IsInverted() === true : character?.IsInverted === true;
+      const currentY = resolveNumericOrigin(sourceLayer?.DrawingTop, character, 0) + y;
+      if (inverted) {
+        const heightRatio = firstFinite(character?.HeightRatio, 1) || 1;
+        const appearanceYOffset = typeof globalThis.CharacterAppearanceYOffset === "function"
+          ? firstFinite(globalThis.CharacterAppearanceYOffset(character, heightRatio, true), 0) : 0;
+        y += -currentY + 1000 - (currentY + appearanceYOffset / heightRatio);
+      } else {
+        const heightRatio = firstFinite(character?.HeightRatio, 1);
+        const heightModifier = firstFinite(character?.HeightModifier, 0);
+        const proportion = firstFinite(character?.HeightRatioProportion, 0);
+        y += heightModifier + (heightRatio ? (1000 * (1 - heightRatio) * (1 - proportion)) / heightRatio : 0);
+      }
+    }
+
+    const upperOverflow = firstFinite(globalThis.CanvasUpperOverflow ?? character?.CanvasUpperOverflow, 0);
+    y += upperOverflow;
+
+    const bodyStyleItem = typeof globalThis.InventoryGet === "function"
+      ? globalThis.InventoryGet(character, "BodyStyle") : null;
+    const bodyStyle = bodyStyleItem?.Asset || character?.BodyStyle || globalThis.BodyStyle;
+    const offsets = bodyStyle?.DrawOffset;
+    const drawOffset = Array.isArray(offsets)
+      ? offsets.find(offset => offset?.Group === groupName &&
+        (offset.Asset === undefined || offset.Asset === asset?.Name) &&
+        (offset.Layer === undefined || offset.Layer.includes?.(sourceLayer?.Name ?? "")))
+      : null;
+    if (drawOffset) {
+      x += firstFinite(drawOffset.X ?? drawOffset.x, 0);
+      y += firstFinite(drawOffset.Y ?? drawOffset.y, 0);
+    }
+    return { x, y };
+  }
+
+  function resolveOverallCanvasHeight(character) {
+    const candidates = [
+      globalThis.GLDrawCanvas?.height,
+      globalThis.CanvasDrawHeight,
+      character?.Canvas?.height,
+      550,
+    ];
+    return candidates.find(value => Number.isFinite(value) && value > 0) || 550;
+  }
+
+  function resolveOverallLayerRect(composition, layer, character, material) {
+    const asset = typeof globalThis.AssetGet === "function"
+      ? AssetGet(character?.AssetFamily || globalThis.Player?.AssetFamily || "Female3DCG", layer.sourceGroup, layer.sourceAsset) : null;
+    if (!asset) return null;
+    const sourceLayer = typeof resolveSourceLayer === "function"
+      ? resolveSourceLayer(asset, layer) : asset.Layer?.[layer.sourceLayerIndex] || asset.Layer?.[0];
+    if (!isDrawableLayer(sourceLayer)) return null;
+
+    const offsetX = Number.isFinite(layer.offsetX) ? layer.offsetX : 0;
+    const offsetY = Number.isFinite(layer.offsetY) ? layer.offsetY : 0;
+    const positionedLayer = {
+      ...sourceLayer,
+      DrawingLeft: typeof shiftOrigin === "function" ? shiftOrigin(sourceLayer.DrawingLeft, offsetX) : sourceLayer.DrawingLeft,
+      DrawingTop: typeof shiftOrigin === "function" ? shiftOrigin(sourceLayer.DrawingTop, offsetY) : sourceLayer.DrawingTop,
+    };
+    const properties = material?.sourceProperty && typeof material.sourceProperty === "object"
+      ? material.sourceProperty : {};
+    let left;
+    let top;
+    const coordinateResolver = globalThis.CommonDrawComputeDrawingCoordinates;
+    if (typeof coordinateResolver === "function" && character) {
+      try {
+        // Reuse BC's own coordinate pipeline whenever it is available. This keeps
+        // pose moves, fixed-position correction, CanvasUpperOverflow and
+        // BodyStyle.DrawOffset in the same coordinate space as GLDrawImage.
+        const coordinates = coordinateResolver(
+          character,
+          asset,
+          positionedLayer,
+          asset.DynamicGroupName || asset.Group?.Name || "",
+          properties,
+        );
+        left = Number(coordinates?.X);
+        top = Number(coordinates?.Y);
+      } catch (_) {
+        left = undefined;
+        top = undefined;
+      }
+    }
+    if (!Number.isFinite(left) || !Number.isFinite(top)) {
+      const pipeline = resolveCoordinatePipelineOffset(asset, sourceLayer, character);
+      left = resolveNumericOrigin(sourceLayer.DrawingLeft, character, 0) + pipeline.x + offsetX;
+      top = resolveNumericOrigin(sourceLayer.DrawingTop, character, 0) + pipeline.y + offsetY;
+    }
+
+    const width = Math.max(1, resolveNumericOrigin(
+      sourceLayer.DrawingWidth ?? sourceLayer.Width ?? asset.Width, character, 100,
+    ));
+    const height = Math.max(1, resolveNumericOrigin(
+      sourceLayer.DrawingHeight ?? sourceLayer.Height ?? asset.Height, character, 100,
+    ));
+    let right = left + width;
+    let bottom = top + height;
+
+    // GLDrawImage applies Mirror and Invert after CommonDraw has produced X/Y.
+    // Convert the rectangle into that same final canvas space before combining
+    // it with the other layers of the material.
+    if (properties.Mirror === true) {
+      const mirroredLeft = 500 - right;
+      const mirroredRight = 500 - left;
+      left = mirroredLeft;
+      right = mirroredRight;
+    }
+    if (properties.Invert === true) {
+      const canvasBottom = resolveOverallCanvasHeight(character) + 550;
+      const invertedTop = canvasBottom - bottom;
+      const invertedBottom = canvasBottom - top;
+      top = invertedTop;
+      bottom = invertedBottom;
+    }
+    return { left, top, right, bottom };
+  }
+
+  function computeDefaultOverallCenter(composition, character = globalThis.Player, materialId = null) {
+    const material = materialId == null
+      ? null : composition?.materials?.find(item => item.id === materialId) || null;
+    let bounds = null;
     for (const layer of composition?.layers || []) {
-      if (layer.hidden) continue;
-      const asset = typeof globalThis.AssetGet === "function"
-        ? AssetGet(character?.AssetFamily || globalThis.Player?.AssetFamily || "Female3DCG", layer.sourceGroup, layer.sourceAsset) : null;
-      if (!asset) continue;
-      const sourceLayer = typeof resolveSourceLayer === "function" ? resolveSourceLayer(asset, layer) : asset.Layer?.[layer.sourceLayerIndex] || asset.Layer?.[0];
-      if (!isDrawableLayer(sourceLayer)) continue;
-      // DrawingLeft/DrawingTop 按姿势存储为对象，必须先解析成当前角色姿势的数字。
-      // 这里仍只是没有渲染几何记录时的 fallback；真实绘制后由 renderer 提供最终坐标。
-      var baseLeft = resolveNumericOrigin(sourceLayer.DrawingLeft, character, 0);
-      var baseTop = resolveNumericOrigin(sourceLayer.DrawingTop, character, 0);
-      var left = baseLeft + (Number.isFinite(layer.offsetX) ? layer.offsetX : 0);
-      var top = baseTop + (Number.isFinite(layer.offsetY) ? layer.offsetY : 0);
-      var width = resolveNumericOrigin(sourceLayer.DrawingWidth ?? sourceLayer.Width ?? asset.Width, character, 100);
-      var height = resolveNumericOrigin(sourceLayer.DrawingHeight ?? sourceLayer.Height ?? asset.Height, character, 100);
-      var area = Math.max(1, width) * Math.max(1, height);
-      if (!largest || area > largest.area) largest = { left: left, top: top, width: width, height: height, area: area };
+      if (layer.hidden || (materialId != null && layer.materialId !== materialId)) continue;
+      const rect = resolveOverallLayerRect(composition, layer, character, material);
+      if (!rect) continue;
+      if (!bounds) bounds = { ...rect };
+      else {
+        bounds.left = Math.min(bounds.left, rect.left);
+        bounds.top = Math.min(bounds.top, rect.top);
+        bounds.right = Math.max(bounds.right, rect.right);
+        bounds.bottom = Math.max(bounds.bottom, rect.bottom);
+      }
     }
     // Overall transform centers are expressed in composition/screen pixels. Use
     // the character canvas center as a stable empty-composition fallback.
-    if (!largest) return { x: 250, y: 275 };
-    return { x: largest.left + largest.width / 2, y: largest.top + largest.height / 2 };
+    if (!bounds) return { x: 250, y: 275 };
+    return {
+      x: (bounds.left + bounds.right) / 2,
+      y: (bounds.top + bounds.bottom) / 2,
+    };
   }
 
-  function resolveOverallTransform(composition, character = globalThis.Player) {
-    const center = computeDefaultOverallCenter(composition, character);
+  function resolveOverallTransform(composition, character = globalThis.Player, material = null) {
+    const materialId = typeof material === "string" ? material : material?.id ?? null;
+    const source = material && typeof material === "object" ? material : composition;
+    const center = computeDefaultOverallCenter(composition, character, materialId);
     return {
-      rotation: typeof composition?.overallRotation === "number" ? composition.overallRotation : 0,
-      scale: typeof composition?.overallScale === "number" ? composition.overallScale : 1,
-      offsetX: typeof composition?.overallOffsetX === "number" ? composition.overallOffsetX : 0,
-      offsetY: typeof composition?.overallOffsetY === "number" ? composition.overallOffsetY : 0,
+      rotation: typeof source?.overallRotation === "number" ? source.overallRotation : 0,
+      scale: typeof source?.overallScale === "number" ? source.overallScale : 1,
+      offsetX: typeof source?.overallOffsetX === "number" ? source.overallOffsetX : 0,
+      offsetY: typeof source?.overallOffsetY === "number" ? source.overallOffsetY : 0,
       centerX: center.x,
       centerY: center.y,
     };
@@ -296,6 +471,9 @@
     };
     if (material.label) output.label = material.label;
     if (material.colors?.length) output.colors = material.colors;
+    for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY"]) {
+      if (typeof material[key] === "number") output[key] = material[key];
+    }
     if (material.hidden) output.hidden = true;
     const property = sanitizeSourceProperty(material.sourceProperty);
     if (Object.keys(property).length) output.sourceProperty = property;
@@ -310,9 +488,6 @@
       materials: normalized.materials.map(compactMaterialForStorage),
       layers: normalized.layers.map(compactLayerForStorage),
     };
-    for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY"]) {
-      if (typeof normalized[key] === "number") compact[key] = normalized[key];
-    }
     if (normalized.recycle.length) compact.recycle = normalized.recycle.map(compactLayerForStorage);
     if (utf8Bytes(compact) > MAX_SCHEME_BYTES) throw new Error("scheme-byte-budget");
     return compact;

@@ -8,7 +8,7 @@
 
 ### 可见消息与协议滥用
 
-只使用 `ChatRoomChat/Hidden` 和 `COE_RVS/1` namespace，不使用普通 Chat/Whisper/Emote、Dictionary 或 `ServerSocket.emit`。namespace 在 parse 前检查，非本协议返回 false，本协议即使损坏也返回 true。
+只使用 `ChatRoomChat/Hidden` 和 `COE_RVS/3` namespace，不使用普通 Chat/Whisper/Emote、Dictionary 或 `ServerSocket.emit`。namespace 在 parse 前检查，非本协议返回 false，本协议即使损坏也返回 true。
 
 ### Sender 伪造与跨房重放
 

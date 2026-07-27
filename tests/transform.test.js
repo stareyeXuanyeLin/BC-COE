@@ -22,6 +22,11 @@ test('alpha bounds derive a normalized content pivot and ignore low-alpha pixels
   assert.equal(bounds.maxX, 6);
   assert.equal(bounds.maxY, 4);
   assert.equal(bounds.count, 4);
+  const normalized = api.contentBoundsFromBounds(bounds, 10, 8);
+  assert.equal(normalized.left, 0.2);
+  assert.equal(normalized.top, 0.125);
+  assert.equal(normalized.right, 0.7);
+  assert.equal(normalized.bottom, 0.625);
   const pivot = api.contentPivotFromBounds(bounds, 10, 8);
   assert.equal(pivot.x, 0.45);
   assert.equal(pivot.y, 0.375);
@@ -49,6 +54,47 @@ test('texture pivot scan reuses the loaded GLDraw image and caches its result', 
   const pivot = api.resolveTextureContentPivot('texture.png');
   assert.equal(pivot.x, 0.45);
   assert.equal(pivot.y, 0.375);
+});
+
+test('overall geometry uses visible alpha bounds instead of the transparent full texture canvas', () => {
+  const width = 100;
+  const height = 100;
+  const data = alphaData(width, height, [[20, 10], [59, 10], [20, 39], [59, 39]]);
+  const data2 = alphaData(width, height, [[0, 70], [19, 70], [0, 89], [19, 89]]);
+  const image = { data, naturalWidth: width, naturalHeight: height, width, height, complete: true, addEventListener() {} };
+  const image2 = { data: data2, naturalWidth: width, naturalHeight: height, width, height, complete: true, addEventListener() {} };
+  let drawnImage = image;
+  const context = { clearRect() {}, drawImage(value) { drawnImage = value; }, getImageData() { return { data: drawnImage.data }; } };
+  const { api } = load({ globals: {
+    GLDrawImageCache: new Map([['garment.png', image], ['trim.png', image2]]),
+    document: { getElementById: () => null, createElement: tag => tag === 'canvas' ? { getContext: () => context } : {} },
+  } });
+  assert.equal(api.resolveTextureContentBounds('garment.png'), null);
+  const visibleBounds = api.resolveTextureContentBounds('garment.png');
+  assert.equal(visibleBounds.left, 0.2);
+  assert.equal(visibleBounds.top, 0.1);
+  assert.equal(visibleBounds.right, 0.6);
+  assert.equal(visibleBounds.bottom, 0.4);
+
+  const character = { MemberNumber: 1 };
+  const identity = { __coeGeometryCharacter: character, __coeGeometryLayerKey: '0:0' };
+  api.cacheOverallLayerGeometry({ ...identity, __coeGeometryMaterialId: 'normal' }, 10, 20, 0, width, height, 550, 'garment.png');
+  let center = api.cachedOverallCenter(character, 'normal');
+  assert.equal(center.x, 50);
+  assert.equal(center.y, 45);
+
+  assert.equal(api.resolveTextureContentBounds('trim.png'), null);
+  assert.ok(api.resolveTextureContentBounds('trim.png'));
+  api.cacheOverallLayerGeometry({ ...identity, __coeGeometryMaterialId: 'union', __coeGeometryLayerKey: 'base' }, 10, 20, 0, width, height, 550, 'garment.png');
+  api.cacheOverallLayerGeometry({ ...identity, __coeGeometryMaterialId: 'union', __coeGeometryLayerKey: 'trim' }, 100, 0, 0, width, height, 550, 'trim.png');
+  center = api.cachedOverallCenter(character, 'union');
+  assert.equal(center.x, 75);
+  assert.equal(center.y, 60);
+
+  api.cacheOverallLayerGeometry({ ...identity, __coeGeometryMaterialId: 'mirrored', Mirror: true, Invert: true }, 10, 20, 0, width, height, 550, 'garment.png');
+  center = api.cachedOverallCenter(character, 'mirrored');
+  assert.equal(center.x, 450);
+  assert.equal(center.y, 1055);
 });
 
 test('layer transforms preserve rotation and scale while ignoring unknown fields', () => {
@@ -85,20 +131,22 @@ test('DrawingLeft and DrawingTop resolve the current pose before Default fallbac
   assert.equal(api.resolveNumericOrigin({ Kneel: Infinity }, player, 7), 7);
 });
 
-test('overall transform uses the largest visible layer center and ignores stored center fields', () => {
+test('material overall transform uses that material center and does not rotate the composition', () => {
   const wide = makeAsset('Cloth', 'Wide', { Width: 400, Height: 100, Layer: [{ Name: 'Base', Priority: 1, HasImage: true, LockLayer: false, DrawingWidth: 400, DrawingHeight: 100, DrawingLeft: {}, DrawingTop: {} }] });
   const small = makeAsset('Cloth', 'Small', { Width: 50, Height: 50, Layer: [{ Name: 'Base', Priority: 2, HasImage: true, LockLayer: false, DrawingWidth: 50, DrawingHeight: 50, DrawingLeft: {}, DrawingTop: {} }] });
   const { api } = load({ assets: [wide, small] });
-  const composition = { materials: [{ id: 'w', sourceGroup: 'Cloth', sourceAsset: 'Wide' }, { id: 's', sourceGroup: 'Cloth', sourceAsset: 'Small' }], layers: [
+  const composition = { materials: [{ id: 'w', sourceGroup: 'Cloth', sourceAsset: 'Wide', overallRotation: 0.2 }, { id: 's', sourceGroup: 'Cloth', sourceAsset: 'Small' }], layers: [
     { materialId: 'w', sourceGroup: 'Cloth', sourceAsset: 'Wide', sourceLayer: 'Base', sourceLayerIndex: 0, priority: 1, offsetX: 0, offsetY: 0, opacity: 1 },
     { materialId: 's', sourceGroup: 'Cloth', sourceAsset: 'Small', sourceLayer: 'Base', sourceLayerIndex: 0, priority: 2, offsetX: 0, offsetY: 0, opacity: 1 },
-  ], overallRotation: 0.2, layersExtra: 'discarded' };
+  ], overallRotation: 0.9, layersExtra: 'discarded' };
   const normalized = api.normalizeComposition(composition);
-  const center = api.computeDefaultOverallCenter(normalized);
+  const wideMaterial = normalized.materials.find(material => material.id === 'w');
+  const center = api.computeDefaultOverallCenter(normalized, undefined, 'w');
   assert.equal(center.x, 200);
   assert.equal(center.y, 50);
   assert.equal(normalized.layersExtra, undefined);
-  const resolved = api.resolveOverallTransform(normalized);
+  assert.equal(normalized.overallRotation, undefined);
+  const resolved = api.resolveOverallTransform(normalized, undefined, wideMaterial);
   assert.equal(resolved.rotation, 0.2);
   assert.equal(resolved.scale, 1);
   assert.equal(resolved.offsetX, 0);
@@ -106,23 +154,92 @@ test('overall transform uses the largest visible layer center and ignores stored
   assert.equal(resolved.centerX, 200);
   assert.equal(resolved.centerY, 50);
   const compact = api.compactCompositionForStorage(composition);
+  assert.equal(compact.materials.find(material => material.id === 'w').overallRotation, 0.2);
 });
 
-test('remote snapshots carry rotation, scale, and offsets without center fields', () => {
+test('overall center reuses BC final drawing coordinates when available', () => {
+  const asset = makeAsset('Cloth', 'Resolved', { DynamicGroupName: 'DynamicCloth', Layer: [{
+    Name: 'Base', Priority: 1, HasImage: true, LockLayer: false,
+    DrawingWidth: 100, DrawingHeight: 80, DrawingLeft: 10, DrawingTop: 20,
+  }] });
+  const { api } = load({ assets: [asset], globals: {
+    CommonDrawComputeDrawingCoordinates: (_character, _asset, layer, groupName) => {
+      assert.equal(groupName, 'DynamicCloth');
+      assert.equal(layer.DrawingLeft, 10);
+      return { X: 300, Y: 400 };
+    },
+  } });
+  const raw = { materials: [{ id: 'm', sourceGroup: 'Cloth', sourceAsset: 'Resolved' }], layers: [{
+    materialId: 'm', sourceGroup: 'Cloth', sourceAsset: 'Resolved', sourceLayer: 'Base', sourceLayerIndex: 0,
+    priority: 1, offsetX: 0, offsetY: 0, opacity: 1,
+  }] };
+  const center = api.computeDefaultOverallCenter(api.normalizeComposition(raw));
+  assert.equal(center.x, 350);
+  assert.equal(center.y, 440);
+});
+
+test('overall center uses the union bounds of every layer in one material', () => {
+  const asset = makeAsset('Cloth', 'MultiLayer', { Layer: [
+    { Name: 'Base', Priority: 1, HasImage: true, LockLayer: false, DrawingWidth: 100, DrawingHeight: 80, DrawingLeft: 10, DrawingTop: 20 },
+    { Name: 'Trim', Priority: 2, HasImage: true, LockLayer: false, DrawingWidth: 20, DrawingHeight: 40, DrawingLeft: 200, DrawingTop: -10 },
+  ] });
+  const { api } = load({ assets: [asset] });
+  const raw = {
+    materials: [{ id: 'm', sourceGroup: 'Cloth', sourceAsset: 'MultiLayer' }],
+    layers: [
+      { materialId: 'm', sourceGroup: 'Cloth', sourceAsset: 'MultiLayer', sourceLayer: 'Base', sourceLayerIndex: 0, priority: 1, offsetX: 0, offsetY: 0, opacity: 1 },
+      { materialId: 'm', sourceGroup: 'Cloth', sourceAsset: 'MultiLayer', sourceLayer: 'Trim', sourceLayerIndex: 1, priority: 2, offsetX: 10, offsetY: 5, opacity: 1 },
+    ],
+  };
+  const center = api.computeDefaultOverallCenter(api.normalizeComposition(raw));
+  // Union: left=10, top=-5, right=230, bottom=100.
+  assert.equal(center.x, 120);
+  assert.equal(center.y, 47.5);
+});
+
+test('overall pivot remains fixed under combined rotation and scale', () => {
+  const { api } = load();
+  const pivot = api.transformPointAroundOverallPivot(100, 100, 100, 100, Math.PI / 2, 2, 10, -5);
+  assert.equal(pivot.x, 110);
+  assert.equal(pivot.y, 95);
+  const point = api.transformPointAroundOverallPivot(103, 104, 100, 100, Math.PI / 2, 2, 10, -5);
+  assert.equal(point.x, 102);
+  assert.equal(point.y, 101);
+});
+
+test('overall center follows the final Mirror and Invert canvas space', () => {
+  const asset = makeAsset('Cloth', 'Mirrored', { Layer: [{
+    Name: 'Base', Priority: 1, HasImage: true, LockLayer: false,
+    DrawingWidth: 100, DrawingHeight: 80, DrawingLeft: 10, DrawingTop: 20,
+  }] });
+  const { api } = load({ assets: [asset] });
+  const raw = {
+    materials: [{ id: 'm', sourceGroup: 'Cloth', sourceAsset: 'Mirrored', sourceProperty: { Mirror: true, Invert: true } }],
+    layers: [{ materialId: 'm', sourceGroup: 'Cloth', sourceAsset: 'Mirrored', sourceLayer: 'Base', sourceLayerIndex: 0, priority: 1, offsetX: 0, offsetY: 0, opacity: 1 }],
+  };
+  const normalized = api.normalizeComposition(raw);
+  const center = api.computeDefaultOverallCenter(normalized, undefined, 'm');
+  // Normal rect [10, 110] × [20, 100] becomes [390, 490] × [1000, 1080]
+  // with the R130 GLDrawImage mirror/invert formulas and a 550px canvas.
+  assert.equal(center.x, 440);
+  assert.equal(center.y, 1040);
+});
+
+test('remote snapshots carry per-material and per-layer transforms without center fields', () => {
   const asset = makeAsset();
   const { api } = load({ assets: [asset] });
-  api.setActiveCompositionForTest({ overallRotation: 0.2, overallScale: 1.25, overallOffsetX: 4, overallOffsetY: -3, materials: [{ id: 'm', sourceGroup: 'Cloth', sourceAsset: 'Dress', colors: [] }], layers: [{ materialId: 'm', sourceGroup: 'Cloth', sourceAsset: 'Dress', sourceLayer: 'Base', sourceLayerIndex: 0, priority: 1, offsetX: 0, offsetY: 0, opacity: 1, rotation: 0.4, scale: 1.5 }] });
+  api.setActiveCompositionForTest({ materials: [{ id: 'm', sourceGroup: 'Cloth', sourceAsset: 'Dress', colors: [], overallRotation: 0.2, overallScale: 1.25, overallOffsetX: 4, overallOffsetY: -3 }], layers: [{ materialId: 'm', sourceGroup: 'Cloth', sourceAsset: 'Dress', sourceLayer: 'Base', sourceLayerIndex: 0, priority: 1, offsetX: 0, offsetY: 0, opacity: 1, rotation: 0.4, scale: 1.5 }] });
   const snapshot = api.buildLocalRemoteSnapshot();
-  assert.equal(snapshot.or, 0.2);
-  assert.equal(snapshot.os, 1.25);
-  assert.equal(snapshot.ox, 4);
-  assert.equal(snapshot.oy, -3);
+  assert.equal(snapshot.m[0].r, 0.2);
+  assert.equal(snapshot.m[0].s, 1.25);
+  assert.equal(snapshot.m[0].x, 4);
+  assert.equal(snapshot.m[0].y, -3);
   assert.equal(snapshot.l[0].r, 0.4);
   assert.equal(snapshot.l[0].s, 1.5);
-  assert.equal(Object.hasOwn(snapshot, 'px'), false);
-  assert.equal(Object.hasOwn(snapshot, 'py'), false);
-  assert.equal(Object.hasOwn(snapshot.l[0], 'px'), false);
-  assert.equal(Object.hasOwn(snapshot.l[0], 'py'), false);
+  assert.equal(Object.hasOwn(snapshot, 'or'), false);
+  assert.equal(Object.hasOwn(snapshot, 'os'), false);
+  assert.equal(Object.hasOwn(snapshot, 'ox'), false);
+  assert.equal(Object.hasOwn(snapshot, 'oy'), false);
   assert.deepEqual(api.validateRemoteSnapshot(snapshot), snapshot);
 });
 
@@ -130,7 +247,7 @@ test('remote rendering resolves the automatic center on the receiving side', () 
   const asset = makeAsset('Cloth', 'Wide', { Width: 400, Height: 100, Layer: [{ Name: 'Base', Priority: 1, HasImage: true, LockLayer: false, DrawingWidth: 400, DrawingHeight: 100, DrawingLeft: {}, DrawingTop: {} }] });
   const remote = { MemberNumber: 7, Appearance: [], AppearanceLayers: [], AssetFamily: 'Female3DCG' };
   const { api } = load({ assets: [asset], characters: [remote] });
-  const snapshot = api.validateRemoteSnapshot({ v: 1, or: 0.2, m: [{ g: 'Cloth', a: 'Wide', c: [] }], l: [{ m: 0, n: 'Base', i: 0, p: 1, x: 0, y: 0, o: 1 }] });
+  const snapshot = api.validateRemoteSnapshot({ v: 1, m: [{ g: 'Cloth', a: 'Wide', c: [], r: 0.2 }], l: [{ m: 0, n: 'Base', i: 0, p: 1, x: 0, y: 0, o: 1 }] });
   const groups = api.buildRemoteSyntheticItems(remote, snapshot);
   assert.equal(groups[0].overall.centerX, 200);
   assert.equal(groups[0].overall.centerY, 50);
@@ -139,12 +256,17 @@ test('remote rendering resolves the automatic center on the receiving side', () 
 test('render callbacks keep local and overall transform layers separate', () => {
   const asset = makeAsset();
   const remote = { MemberNumber: 7, Appearance: [], AppearanceLayers: [], AssetFamily: 'Female3DCG' };
-  const value = { v: 1, or: 0.2, os: 1.25, ox: 4, oy: -3, m: [{ g: 'Cloth', a: 'Dress', c: [] }], l: [{ m: 0, n: 'Base', i: 0, p: 1, x: 0, y: 0, o: 1, r: 0.4, s: 1.5 }] };
+  const value = { v: 1, m: [{ g: 'Cloth', a: 'Dress', c: [], r: 0.2, s: 1.25, x: 4, y: -3 }], l: [{ m: 0, n: 'Base', i: 0, p: 1, x: 0, y: 0, o: 1, r: 0.4, s: 1.5 }] };
   const { api } = load({ assets: [asset], characters: [remote] });
   const canonical = api.canonicalRemoteSnapshot(value);
   api.setPendingRequest(7, { requestId: 'request_A', session: 'session_7', revision: 1, hash: 'hash_A' });
   api.acceptRemoteSnapshot(7, '7:identity', value, canonical);
   api.setRemotePrefsForTest({ receivingEnabled: true });
+  api.cacheOverallLayerGeometry({
+    __coeGeometryCharacter: remote,
+    __coeGeometryMaterialId: 'remote:7:0',
+    __coeGeometryLayerKey: '0:0',
+  }, 0, 0, 0, 400, 800, 550);
   const hooks = {};
   api.installHooksForTest({ hookFunction(name, _priority, fn) { hooks[name] = fn; } });
   const sorted = hooks.CharacterAppearanceSortLayers([remote], () => []);
@@ -160,4 +282,107 @@ test('render callbacks keep local and overall transform layers separate', () => 
   assert.equal(seen[0].OverallScale, 1.25);
   assert.equal(seen[0].OverallOffsetX, 4);
   assert.equal(seen[0].OverallOffsetY, -3);
+});
+
+test('runtime texture geometry replaces the nonexistent R130 asset dimensions for overall center', () => {
+  const { api } = load();
+  const character = { MemberNumber: 7 };
+  const identity = { __coeGeometryCharacter: character, __coeGeometryMaterialId: 'm' };
+  api.cacheOverallLayerGeometry({ ...identity, __coeGeometryLayerKey: 'base', Mirror: false, Invert: false }, 10, 20, 0, 400, 800, 1100);
+  api.cacheOverallLayerGeometry({ ...identity, __coeGeometryLayerKey: 'trim', Mirror: false, Invert: false }, 500, -10, 0, 200, 100, 1100);
+  let center = api.cachedOverallCenter(character, 'm');
+  assert.equal(center.x, 355);
+  assert.equal(center.y, 405);
+  // Blink's second-half offset and placeholder 1x1 textures must not corrupt the stable base geometry.
+  api.cacheOverallLayerGeometry({ ...identity, __coeGeometryLayerKey: 'base', __coeGeometryIsBlink: true }, 10, 20, 500, 999, 999, 1100);
+  api.cacheOverallLayerGeometry({ ...identity, __coeGeometryLayerKey: 'base' }, 10, 20, 0, 1, 1, 1100);
+  center = api.cachedOverallCenter(character, 'm');
+  assert.equal(center.x, 355);
+  assert.equal(center.y, 405);
+});
+
+test('overall transform input writes the current material and survives compact round-trip', () => {
+  const asset = makeAsset();
+  const { api } = load({ assets: [asset] });
+  const material = { id: 'm', sourceGroup: 'Cloth', sourceAsset: 'Dress' };
+  const composition = { materials: [material], layers: [{ materialId: 'm', sourceGroup: 'Cloth', sourceAsset: 'Dress', sourceLayer: 'Base', sourceLayerIndex: 0, priority: 1, offsetX: 0, offsetY: 0, opacity: 1 }] };
+  api.setEditingForTest(composition);
+  assert.equal(api.applyOverallTransformField('m', 'rotation', 30), true);
+  assert.equal(api.applyOverallTransformField('m', 'scale', 1.5), true);
+  assert.equal(api.applyOverallTransformField('m', 'offsetX', 100), true);
+  assert.equal(api.applyOverallTransformField('m', 'offsetY', 50), true);
+  const current = composition.materials[0];
+  assert.equal(current.overallRotation, Math.PI / 6);
+  assert.equal(current.overallScale, 1.5);
+  assert.equal(current.overallOffsetX, 100);
+  assert.equal(current.overallOffsetY, 50);
+  const restored = api.normalizeComposition(api.compactCompositionForStorage(composition));
+  assert.equal(restored.materials[0].overallRotation, Math.PI / 6);
+  assert.equal(restored.materials[0].overallScale, 1.5);
+  assert.equal(restored.materials[0].overallOffsetX, 100);
+  assert.equal(restored.materials[0].overallOffsetY, 50);
+});
+
+test('overall center follows R130 PoseRecord group moves and BodyStyle DrawOffset', () => {
+  const asset = makeAsset('Cloth', 'PoseDress', { DynamicGroupName: 'DynamicCloth', Layer: [{ Name: 'Base', Priority: 1, HasImage: true, LockLayer: false, DrawingWidth: 100, DrawingHeight: 80, DrawingLeft: { Kneel: 10 }, DrawingTop: { Kneel: 20 } }] });
+  const player = { AccountName: 'A', MemberNumber: 1, AssetFamily: 'Female3DCG', DrawPose: ['Kneel'], Appearance: [], AppearanceLayers: [], ExtensionSettings: {} };
+  const { api } = load({ assets: [asset], player, globals: {
+    PoseRecord: { Kneel: { MovePosition: [{ Group: 'Other', X: 99, Y: 99 }, { Group: 'DynamicCloth', X: 7, Y: 9 }] } },
+    CanvasUpperOverflow: 11,
+    InventoryGet: () => ({ Asset: { DrawOffset: [{ Group: 'DynamicCloth', Asset: 'PoseDress', Layer: ['Base'], X: 3, Y: 4 }] } }),
+  } });
+  const composition = api.normalizeComposition({ materials: [{ id: 'm', sourceGroup: 'Cloth', sourceAsset: 'PoseDress' }], layers: [{ materialId: 'm', sourceGroup: 'Cloth', sourceAsset: 'PoseDress', sourceLayer: 'Base', sourceLayerIndex: 0, priority: 1, offsetX: 5, offsetY: -5, opacity: 1 }] });
+  const center = api.computeDefaultOverallCenter(composition, player);
+  assert.equal(center.x, 75);
+  assert.equal(center.y, 79);
+});
+
+test('GLDrawImage transform hook retries after initialization race and recovers after overwrite', () => {
+  let retry;
+  const original = () => {};
+  const m4 = {
+    orthographic: () => ({}), translate: matrix => matrix, scale: matrix => matrix,
+    zRotate: matrix => matrix, multiply: matrix => matrix, zRotation: () => ({}),
+  };
+  const env = load({ globals: {
+    GLDrawImage: original, m4, GLDrawLoadImage: () => ({ width: 100, height: 80 }),
+    setInterval: callback => { retry = callback; return 1; },
+  } });
+  const hooks = {};
+  env.api.installHooksForTest({ hookFunction(name, _priority, fn) { hooks[name] = fn; } });
+  assert.equal(env.sandbox.GLDrawImage._coeTransformWrapped, true);
+  const replacement = () => {};
+  env.sandbox.GLDrawImage = replacement;
+  retry();
+  assert.equal(env.sandbox.GLDrawImage._coeTransformWrapped, true);
+  assert.equal(env.sandbox.GLDrawImage._coeTransformOriginal, undefined);
+  const program = { u_matrix: {} };
+  const colorMasks = [];
+  let matrixDraws = 0;
+  const gl = {
+    COLOR_WRITEMASK: 'mask', CURRENT_PROGRAM: 'program', TRIANGLES: 'triangles', canvas: { width: 500, height: 550 },
+    getParameter(value) { return value === 'mask' ? [true, true, true, true] : program; },
+    colorMask(...value) { colorMasks.push(value); }, uniformMatrix4fv() {}, drawArrays() { matrixDraws++; },
+    getUniformLocation() { return {}; },
+  };
+  hooks.GLDrawImage(['texture.png', gl, 0, 0, { OverallOffsetX: 10 }, 0], args => replacement(...args));
+  assert.ok(colorMasks.some(value => value.join(',') === 'false,false,false,false'));
+  assert.equal(matrixDraws, 1);
+});
+
+test('editor preview replaces a removable formal asset without recording formal-item-conflict', () => {
+  const asset = makeAsset();
+  const player = { AccountName: 'A', MemberNumber: 1, AssetFamily: 'Female3DCG', Appearance: [{ Asset: asset, Color: ['Default'], Property: {} }], AppearanceLayers: [], ExtensionSettings: {} };
+  const env = load({ assets: [asset], player });
+  env.api.setEditingForTest({ materials: [{ id: 'm', sourceGroup: 'Cloth', sourceAsset: 'Dress' }], layers: [{ materialId: 'm', sourceGroup: 'Cloth', sourceAsset: 'Dress', sourceLayer: 'Base', sourceLayerIndex: 0, priority: 1, offsetX: 0, offsetY: 0, opacity: 1 }] });
+  const hooks = {};
+  env.api.installHooksForTest({ hookFunction(name, _priority, fn) { hooks[name] = fn; } });
+  const sorted = hooks.CharacterAppearanceSortLayers([player], () => []);
+  player.AppearanceLayers = sorted;
+  let previewAppearance;
+  hooks.CommonDrawAppearanceBuild([player, {}], args => { previewAppearance = args[0].Appearance; });
+  assert.ok(previewAppearance.some(item => item.__coeMaterialId));
+  assert.equal(previewAppearance.some(item => item.Asset === asset), false);
+  assert.equal(player.Appearance[0].Asset, asset);
+  assert.equal(env.api.statusSnapshot().skippedMaterials.some(item => item.reason === 'formal-item-conflict'), false);
 });

@@ -82,13 +82,19 @@
     remoteAssertTree(value);
     if (!remotePlainObject(value) || value.v !== 1 || !Array.isArray(value.m) || !Array.isArray(value.l)) throw new Error("snapshot-root");
     if (value.m.length > REMOTE_LIMITS.materials || value.l.length > REMOTE_LIMITS.layers) throw new Error("snapshot-count");
-    for (const key of Object.keys(value)) if (!new Set(["v", "m", "l", "or", "os", "ox", "oy"]).has(key)) throw new Error("snapshot-root-key");
+    for (const key of Object.keys(value)) if (!new Set(["v", "m", "l"]).has(key)) throw new Error("snapshot-root-key");
     const materials = value.m.map(material => {
       if (!remotePlainObject(material)) throw new Error("snapshot-material");
-      for (const key of Object.keys(material)) if (!new Set(["g", "a", "c", "p"]).has(key)) throw new Error("snapshot-material-key");
+      for (const key of Object.keys(material)) if (!new Set(["g", "a", "c", "p", "r", "s", "x", "y"]).has(key)) throw new Error("snapshot-material-key");
       const output = { g: remoteString(material.g, "group"), a: remoteString(material.a, "asset") };
       if (!Array.isArray(material.c) || material.c.length > 40) throw new Error("snapshot-colors");
       output.c = material.c.map(color => remoteString(color, "color", REMOTE_LIMITS.color));
+      const overallFields = [["r", -Math.PI, Math.PI], ["s", 0.25, 3.0], ["x", -1200, 1200], ["y", -1200, 1200]];
+      for (const [key, min, max] of overallFields) {
+        if (material[key] == null) continue;
+        if (typeof material[key] !== "number" || !Number.isFinite(material[key])) throw new Error(`snapshot-material-${key}`);
+        output[key] = normalizeRemoteNumber(material[key], min, max);
+      }
       const property = validateRemoteProperty(material.p);
       if (property) output.p = property;
       return output;
@@ -116,12 +122,6 @@
       return output;
     });
     const snapshot = { v: 1 };
-    const overallFields = [["or", -Math.PI, Math.PI], ["os", 0.25, 3.0], ["ox", -1200, 1200], ["oy", -1200, 1200]];
-    for (const [key, min, max] of overallFields) {
-      if (value[key] == null) continue;
-      if (typeof value[key] !== "number" || !Number.isFinite(value[key])) throw new Error(`snapshot-overall-${key}`);
-      snapshot[key] = normalizeRemoteNumber(value[key], min, max);
-    }
     snapshot.m = materials;
     snapshot.l = layers;
     const canonical = JSON.stringify(snapshot);

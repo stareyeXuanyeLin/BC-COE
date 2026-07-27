@@ -64,6 +64,16 @@
       Archetype: null,
       AssetArchetype: null,
       Extended: false,
+      // A synthetic visual item must never re-activate formal appearance
+      // semantics while BC computes its coordinates or effects.
+      FixedPosition: undefined,
+      SetPose: undefined,
+      OverrideHeight: undefined,
+      HeightModifier: undefined,
+      Hide: [],
+      HideItem: [],
+      Block: [],
+      Effect: [],
       __coeVisualProxy: true,
       __coeSourceAsset: asset,
     };

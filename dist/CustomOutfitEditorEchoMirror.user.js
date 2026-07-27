@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bondage Club - Custom Outfit Editor
 // @namespace    https://github.com/stareyeXuanyeLin/BC-COE
-// @version      1.0.0
+// @version      1.8.1
 // @description  制作中（WIP）。仓库公开仅便于 Tampermonkey 引用，不建议使用。
 // @author       凡尘 / 佩菈
 // @match        https://www.bondageprojects.com/R*/*
@@ -15,8 +15,8 @@
 // @match        http://localhost:*/*
 // @run-at       document-end
 // @grant        none
-// @downloadURL  https://cdn.jsdelivr.net/gh/stareyeXuanyeLin/BC-COE@main/dist/CustomOutfitEditorEchoMirror.user.js
-// @updateURL    https://cdn.jsdelivr.net/gh/stareyeXuanyeLin/BC-COE@main/dist/CustomOutfitEditorEchoMirror.user.js
+// @downloadURL  https://cdn.jsdelivr.net/gh/stareyeXuanyeLin/BC-COE@single-layer-transform-rebuild/dist/CustomOutfitEditorEchoMirror.user.js
+// @updateURL    https://cdn.jsdelivr.net/gh/stareyeXuanyeLin/BC-COE@single-layer-transform-rebuild/dist/CustomOutfitEditorEchoMirror.user.js
 // ==/UserScript==
 
 (() => {
@@ -25,7 +25,7 @@
 
 
   const MOD_NAME = "CustomOutfitEditor";
-  const VERSION = "1.8.1";
+  const VERSION = "1.8.2";
   console.info(`[${MOD_NAME}] userscript injected`, location.href);
   const SETTINGS_KEY = "CustomOutfitEditor";
   const STORAGE_KEY = "BC.CustomOutfitEditor.v1";
@@ -61,6 +61,8 @@
   let previewPoseMapping = null;
   let editorAppearanceSnapshot = null;
   let editorPoseSnapshot = null;
+  let glTransformHookTarget = null;
+  let glTransformHookWatch = 0;
   let layerNameCache = null;
   let layerNameCachePromise = null;
   let colorPickerSession = null;
@@ -176,6 +178,15 @@
       defaultColors: sanitizeColorArray(raw.defaultColors),
       sourceColor: sanitizeColor(raw.sourceColor),
       sourceProperty: sanitizeSourceProperty(raw.sourceProperty),
+      // These values belong to one source Asset and transform all of its image
+      // layers together. They intentionally live on the material, never on the
+      // composition, so two materials can be rotated independently.
+      overallRotation: typeof raw.overallRotation === "number" && isFinite(raw.overallRotation) && raw.overallRotation !== 0
+        ? clamp(raw.overallRotation, -Math.PI, Math.PI) : undefined,
+      overallScale: typeof raw.overallScale === "number" && isFinite(raw.overallScale) && Math.abs(raw.overallScale - 1) > 0.001
+        ? clamp(raw.overallScale, 0.25, 3.0) : undefined,
+      overallOffsetX: optionalFiniteNumber(raw.overallOffsetX, -1200, 1200),
+      overallOffsetY: optionalFiniteNumber(raw.overallOffsetY, -1200, 1200),
       hidden: raw.hidden === true,
       collapsed: raw.collapsed === true,
     };
@@ -243,16 +254,20 @@
       }
     }
     const used = new Set([...layers, ...recycle].map(layer => layer.materialId));
-    const overall = normalizeOverallTransform(raw);
-    const output = {
+    const usedMaterials = materials.filter(material => used.has(material.id));
+    // Older rebuild snapshots stored one composition-wide transform. Preserve it
+    // only when the old composition contains one material; with multiple materials
+    // applying it would recreate the very bug this schema removes.
+    const legacyOverall = normalizeOverallTransform(raw);
+    const hasLegacyOverall = Object.values(legacyOverall).some(value => typeof value === "number");
+    if (hasLegacyOverall && usedMaterials.length === 1) Object.assign(usedMaterials[0], legacyOverall);
+    return {
       version: COMPOSITION_VERSION,
       name: String(raw?.name || "未命名方案").slice(0, 60),
-      materials: materials.filter(material => used.has(material.id)),
+      materials: usedMaterials,
       layers,
       recycle,
     };
-    Object.assign(output, overall);
-    return output;
   }
 
   function firstFinite(value, fallback = 0) {
@@ -288,39 +303,201 @@
     return { left: firstFinite(sourceLayer?.DrawingLeft, 0), top: firstFinite(sourceLayer?.DrawingTop, 0), width: Math.max(1, width), height: Math.max(1, height) };
   }
 
-  function computeDefaultOverallCenter(composition, character = globalThis.Player) {
-    let largest = null;
+  function resolveCoordinateVector(value, character, fallback = { x: 0, y: 0 }) {
+    if (typeof value === "number" && Number.isFinite(value)) return { x: 0, y: value };
+    if (!value || typeof value !== "object") return fallback;
+    const poses = Array.isArray(character?.DrawPose) ? character.DrawPose : [];
+    const candidates = [...poses, "Default"];
+    for (const pose of candidates) {
+      const entry = value[pose];
+      if (typeof entry === "number" && Number.isFinite(entry)) return { x: 0, y: entry };
+      if (entry && typeof entry === "object") {
+        const x = firstFinite(entry.x ?? entry.X ?? entry.left ?? entry.Left, 0);
+        const y = firstFinite(entry.y ?? entry.Y ?? entry.top ?? entry.Top, 0);
+        if (Number.isFinite(x) || Number.isFinite(y)) return { x, y };
+      }
+    }
+    return {
+      x: firstFinite(value.x ?? value.X ?? value.left ?? value.Left, fallback.x),
+      y: firstFinite(value.y ?? value.Y ?? value.top ?? value.Top, fallback.y),
+    };
+  }
+
+  function resolveCoordinatePipelineOffset(asset, sourceLayer, character) {
+    let x = 0;
+    let y = 0;
+    // CommonDraw uses DynamicGroupName for pose moves and body offsets. The
+    // static Group name is only a fallback for older/custom assets without it.
+    const groupName = asset?.DynamicGroupName || asset?.Group?.Name || "";
+    const poseNames = Array.isArray(character?.DrawPose) ? character.DrawPose : [];
+    const poseRecord = globalThis.PoseRecord;
+    for (const poseName of poseNames) {
+      const pose = poseRecord && typeof poseRecord === "object" ? poseRecord[poseName] : null;
+      const move = Array.isArray(pose?.MovePosition)
+        ? pose.MovePosition.find(entry => entry?.Group === groupName)
+        : null;
+      if (move) {
+        x += firstFinite(move.X ?? move.x, 0);
+        y += firstFinite(move.Y ?? move.y, 0);
+      }
+    }
+
+    // This mirrors CommonDrawComputeDrawingCoordinates() in BC R130. Fixed
+    // position assets use the character's height correction before the global
+    // canvas overflow is added.
+    if (asset?.FixedPosition || sourceLayer?.FixedPosition) {
+      const inverted = typeof character?.IsInverted === "function"
+        ? character.IsInverted() === true : character?.IsInverted === true;
+      const currentY = resolveNumericOrigin(sourceLayer?.DrawingTop, character, 0) + y;
+      if (inverted) {
+        const heightRatio = firstFinite(character?.HeightRatio, 1) || 1;
+        const appearanceYOffset = typeof globalThis.CharacterAppearanceYOffset === "function"
+          ? firstFinite(globalThis.CharacterAppearanceYOffset(character, heightRatio, true), 0) : 0;
+        y += -currentY + 1000 - (currentY + appearanceYOffset / heightRatio);
+      } else {
+        const heightRatio = firstFinite(character?.HeightRatio, 1);
+        const heightModifier = firstFinite(character?.HeightModifier, 0);
+        const proportion = firstFinite(character?.HeightRatioProportion, 0);
+        y += heightModifier + (heightRatio ? (1000 * (1 - heightRatio) * (1 - proportion)) / heightRatio : 0);
+      }
+    }
+
+    const upperOverflow = firstFinite(globalThis.CanvasUpperOverflow ?? character?.CanvasUpperOverflow, 0);
+    y += upperOverflow;
+
+    const bodyStyleItem = typeof globalThis.InventoryGet === "function"
+      ? globalThis.InventoryGet(character, "BodyStyle") : null;
+    const bodyStyle = bodyStyleItem?.Asset || character?.BodyStyle || globalThis.BodyStyle;
+    const offsets = bodyStyle?.DrawOffset;
+    const drawOffset = Array.isArray(offsets)
+      ? offsets.find(offset => offset?.Group === groupName &&
+        (offset.Asset === undefined || offset.Asset === asset?.Name) &&
+        (offset.Layer === undefined || offset.Layer.includes?.(sourceLayer?.Name ?? "")))
+      : null;
+    if (drawOffset) {
+      x += firstFinite(drawOffset.X ?? drawOffset.x, 0);
+      y += firstFinite(drawOffset.Y ?? drawOffset.y, 0);
+    }
+    return { x, y };
+  }
+
+  function resolveOverallCanvasHeight(character) {
+    const candidates = [
+      globalThis.GLDrawCanvas?.height,
+      globalThis.CanvasDrawHeight,
+      character?.Canvas?.height,
+      550,
+    ];
+    return candidates.find(value => Number.isFinite(value) && value > 0) || 550;
+  }
+
+  function resolveOverallLayerRect(composition, layer, character, material) {
+    const asset = typeof globalThis.AssetGet === "function"
+      ? AssetGet(character?.AssetFamily || globalThis.Player?.AssetFamily || "Female3DCG", layer.sourceGroup, layer.sourceAsset) : null;
+    if (!asset) return null;
+    const sourceLayer = typeof resolveSourceLayer === "function"
+      ? resolveSourceLayer(asset, layer) : asset.Layer?.[layer.sourceLayerIndex] || asset.Layer?.[0];
+    if (!isDrawableLayer(sourceLayer)) return null;
+
+    const offsetX = Number.isFinite(layer.offsetX) ? layer.offsetX : 0;
+    const offsetY = Number.isFinite(layer.offsetY) ? layer.offsetY : 0;
+    const positionedLayer = {
+      ...sourceLayer,
+      DrawingLeft: typeof shiftOrigin === "function" ? shiftOrigin(sourceLayer.DrawingLeft, offsetX) : sourceLayer.DrawingLeft,
+      DrawingTop: typeof shiftOrigin === "function" ? shiftOrigin(sourceLayer.DrawingTop, offsetY) : sourceLayer.DrawingTop,
+    };
+    const properties = material?.sourceProperty && typeof material.sourceProperty === "object"
+      ? material.sourceProperty : {};
+    let left;
+    let top;
+    const coordinateResolver = globalThis.CommonDrawComputeDrawingCoordinates;
+    if (typeof coordinateResolver === "function" && character) {
+      try {
+        // Reuse BC's own coordinate pipeline whenever it is available. This keeps
+        // pose moves, fixed-position correction, CanvasUpperOverflow and
+        // BodyStyle.DrawOffset in the same coordinate space as GLDrawImage.
+        const coordinates = coordinateResolver(
+          character,
+          asset,
+          positionedLayer,
+          asset.DynamicGroupName || asset.Group?.Name || "",
+          properties,
+        );
+        left = Number(coordinates?.X);
+        top = Number(coordinates?.Y);
+      } catch (_) {
+        left = undefined;
+        top = undefined;
+      }
+    }
+    if (!Number.isFinite(left) || !Number.isFinite(top)) {
+      const pipeline = resolveCoordinatePipelineOffset(asset, sourceLayer, character);
+      left = resolveNumericOrigin(sourceLayer.DrawingLeft, character, 0) + pipeline.x + offsetX;
+      top = resolveNumericOrigin(sourceLayer.DrawingTop, character, 0) + pipeline.y + offsetY;
+    }
+
+    const width = Math.max(1, resolveNumericOrigin(
+      sourceLayer.DrawingWidth ?? sourceLayer.Width ?? asset.Width, character, 100,
+    ));
+    const height = Math.max(1, resolveNumericOrigin(
+      sourceLayer.DrawingHeight ?? sourceLayer.Height ?? asset.Height, character, 100,
+    ));
+    let right = left + width;
+    let bottom = top + height;
+
+    // GLDrawImage applies Mirror and Invert after CommonDraw has produced X/Y.
+    // Convert the rectangle into that same final canvas space before combining
+    // it with the other layers of the material.
+    if (properties.Mirror === true) {
+      const mirroredLeft = 500 - right;
+      const mirroredRight = 500 - left;
+      left = mirroredLeft;
+      right = mirroredRight;
+    }
+    if (properties.Invert === true) {
+      const canvasBottom = resolveOverallCanvasHeight(character) + 550;
+      const invertedTop = canvasBottom - bottom;
+      const invertedBottom = canvasBottom - top;
+      top = invertedTop;
+      bottom = invertedBottom;
+    }
+    return { left, top, right, bottom };
+  }
+
+  function computeDefaultOverallCenter(composition, character = globalThis.Player, materialId = null) {
+    const material = materialId == null
+      ? null : composition?.materials?.find(item => item.id === materialId) || null;
+    let bounds = null;
     for (const layer of composition?.layers || []) {
-      if (layer.hidden) continue;
-      const asset = typeof globalThis.AssetGet === "function"
-        ? AssetGet(character?.AssetFamily || globalThis.Player?.AssetFamily || "Female3DCG", layer.sourceGroup, layer.sourceAsset) : null;
-      if (!asset) continue;
-      const sourceLayer = typeof resolveSourceLayer === "function" ? resolveSourceLayer(asset, layer) : asset.Layer?.[layer.sourceLayerIndex] || asset.Layer?.[0];
-      if (!isDrawableLayer(sourceLayer)) continue;
-      // DrawingLeft/DrawingTop 按姿势存储为对象，必须先解析成当前角色姿势的数字。
-      // 这里仍只是没有渲染几何记录时的 fallback；真实绘制后由 renderer 提供最终坐标。
-      var baseLeft = resolveNumericOrigin(sourceLayer.DrawingLeft, character, 0);
-      var baseTop = resolveNumericOrigin(sourceLayer.DrawingTop, character, 0);
-      var left = baseLeft + (Number.isFinite(layer.offsetX) ? layer.offsetX : 0);
-      var top = baseTop + (Number.isFinite(layer.offsetY) ? layer.offsetY : 0);
-      var width = resolveNumericOrigin(sourceLayer.DrawingWidth ?? sourceLayer.Width ?? asset.Width, character, 100);
-      var height = resolveNumericOrigin(sourceLayer.DrawingHeight ?? sourceLayer.Height ?? asset.Height, character, 100);
-      var area = Math.max(1, width) * Math.max(1, height);
-      if (!largest || area > largest.area) largest = { left: left, top: top, width: width, height: height, area: area };
+      if (layer.hidden || (materialId != null && layer.materialId !== materialId)) continue;
+      const rect = resolveOverallLayerRect(composition, layer, character, material);
+      if (!rect) continue;
+      if (!bounds) bounds = { ...rect };
+      else {
+        bounds.left = Math.min(bounds.left, rect.left);
+        bounds.top = Math.min(bounds.top, rect.top);
+        bounds.right = Math.max(bounds.right, rect.right);
+        bounds.bottom = Math.max(bounds.bottom, rect.bottom);
+      }
     }
     // Overall transform centers are expressed in composition/screen pixels. Use
     // the character canvas center as a stable empty-composition fallback.
-    if (!largest) return { x: 250, y: 275 };
-    return { x: largest.left + largest.width / 2, y: largest.top + largest.height / 2 };
+    if (!bounds) return { x: 250, y: 275 };
+    return {
+      x: (bounds.left + bounds.right) / 2,
+      y: (bounds.top + bounds.bottom) / 2,
+    };
   }
 
-  function resolveOverallTransform(composition, character = globalThis.Player) {
-    const center = computeDefaultOverallCenter(composition, character);
+  function resolveOverallTransform(composition, character = globalThis.Player, material = null) {
+    const materialId = typeof material === "string" ? material : material?.id ?? null;
+    const source = material && typeof material === "object" ? material : composition;
+    const center = computeDefaultOverallCenter(composition, character, materialId);
     return {
-      rotation: typeof composition?.overallRotation === "number" ? composition.overallRotation : 0,
-      scale: typeof composition?.overallScale === "number" ? composition.overallScale : 1,
-      offsetX: typeof composition?.overallOffsetX === "number" ? composition.overallOffsetX : 0,
-      offsetY: typeof composition?.overallOffsetY === "number" ? composition.overallOffsetY : 0,
+      rotation: typeof source?.overallRotation === "number" ? source.overallRotation : 0,
+      scale: typeof source?.overallScale === "number" ? source.overallScale : 1,
+      offsetX: typeof source?.overallOffsetX === "number" ? source.overallOffsetX : 0,
+      offsetY: typeof source?.overallOffsetY === "number" ? source.overallOffsetY : 0,
       centerX: center.x,
       centerY: center.y,
     };
@@ -394,6 +571,9 @@
     };
     if (material.label) output.label = material.label;
     if (material.colors?.length) output.colors = material.colors;
+    for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY"]) {
+      if (typeof material[key] === "number") output[key] = material[key];
+    }
     if (material.hidden) output.hidden = true;
     const property = sanitizeSourceProperty(material.sourceProperty);
     if (Object.keys(property).length) output.sourceProperty = property;
@@ -408,9 +588,6 @@
       materials: normalized.materials.map(compactMaterialForStorage),
       layers: normalized.layers.map(compactLayerForStorage),
     };
-    for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY"]) {
-      if (typeof normalized[key] === "number") compact[key] = normalized[key];
-    }
     if (normalized.recycle.length) compact.recycle = normalized.recycle.map(compactLayerForStorage);
     if (utf8Bytes(compact) > MAX_SCHEME_BYTES) throw new Error("scheme-byte-budget");
     return compact;
@@ -449,9 +626,11 @@
       try { json = LZString.decompressFromUTF16(value.slice(3)); }
       catch (error) { return { status: "corrupt", raw: value, data: null, error: String(error?.message || error) }; }
       if (typeof json !== "string" || !json.trim()) return { status: "corrupt", raw: value, data: null, error: "lz-empty-result" };
+      if (utf8Bytes(json) > MAX_WARDROBE_BYTES) return { status: "corrupt", raw: value, data: null, error: "wardrobe-byte-budget" };
     } else if (value.startsWith("json:")) {
       json = value.slice(5);
       if (!json.trim()) return { status: "corrupt", raw: value, data: null, error: "json-empty" };
+      if (utf8Bytes(json) > MAX_WARDROBE_BYTES) return { status: "corrupt", raw: value, data: null, error: "wardrobe-byte-budget" };
     } else {
       return { status: "unsupported", raw: value, data: null, error: "unknown-prefix" };
     }
@@ -543,9 +722,14 @@
   }
 
   function shiftOrigin(origin, offset) {
+    const delta = Number.isFinite(Number(offset)) ? Number(offset) : 0;
+    if (typeof origin === "number") return Number.isFinite(origin) ? origin + delta : origin;
     if (!origin || typeof origin !== "object") return origin;
     const shifted = {};
-    for (const [key, value] of Object.entries(origin)) shifted[key] = (Number(value) || 0) + offset;
+    for (const [key, value] of Object.entries(origin)) {
+      const numeric = Number(value);
+      shifted[key] = Number.isFinite(numeric) ? numeric + delta : value;
+    }
     return shifted;
   }
 
@@ -775,6 +959,16 @@
       Archetype: null,
       AssetArchetype: null,
       Extended: false,
+      // A synthetic visual item must never re-activate formal appearance
+      // semantics while BC computes its coordinates or effects.
+      FixedPosition: undefined,
+      SetPose: undefined,
+      OverrideHeight: undefined,
+      HeightModifier: undefined,
+      Hide: [],
+      HideItem: [],
+      Block: [],
+      Effect: [],
       __coeVisualProxy: true,
       __coeSourceAsset: asset,
     };
@@ -853,15 +1047,18 @@
   function recordMaterialSkip(material, analysis, stage, reason) {
     const entry = { materialId: material?.id || null, group: material?.sourceGroup || null, asset: material?.sourceAsset || null, provider: analysis?.provider || null, providerVersion: analysis?.providerVersion || null, stage, reason: String(reason?.message || reason) };
     runtimeMaterialState.set(material?.id, { disabled: true, analysis: cloneJSON(analysis), reason: entry.reason });
-    diagnostics.skippedMaterials.push(entry);
-    diagnostics.skippedMaterials = diagnostics.skippedMaterials.slice(-100);
+    const duplicate = diagnostics.skippedMaterials.some(item =>
+      item?.materialId === entry.materialId && item?.stage === entry.stage && item?.reason === entry.reason);
+    if (!duplicate) {
+      diagnostics.skippedMaterials.push(entry);
+      diagnostics.skippedMaterials = diagnostics.skippedMaterials.slice(-100);
+    }
   }
 
   function buildLocalSyntheticItems(character) {
     const rawComposition = getComposition(character);
     if (!rawComposition || !isLocalPlayer(character)) return [];
     const composition = normalizeComposition(rawComposition);
-    const overall = resolveOverallTransform(composition, character);
     const materialMap = new Map(composition.materials.map(material => [material.id, material]));
     const groupedRefs = new Map();
     for (let layerIndex = 0; layerIndex < composition.layers.length; layerIndex++) {
@@ -883,10 +1080,26 @@
       try {
         sourceAsset = AssetGet(character.AssetFamily || "Female3DCG", material.sourceGroup, material.sourceAsset);
         if (!sourceAsset) throw new Error("source-asset-missing");
-        if ((character.Appearance || []).some(item => item?.Asset === sourceAsset)) throw new Error("formal-item-conflict");
+        const formalConflict = (character.Appearance || []).some(item => item?.Asset === sourceAsset);
+        // During editor preview a removable formal appearance is replaced by the
+        // synthetic static layers in CommonDrawAppearanceBuild. Protected groups
+        // still fail closed to avoid drawing two competing copies.
+        if (formalConflict && !(uiMode === "editor" && isEditorRemovableAsset(sourceAsset))) throw new Error("formal-item-conflict");
         // Capability analysis is diagnostic only. Every loaded asset is projected to
         // inert static image layers; unsupported dynamic behavior is not invoked.
         analysis = analyzeAssetCached(sourceAsset);
+        const overall = resolveOverallTransform(composition, character, material);
+        pruneOverallGeometry(character, material.id, sourceAsset, refs);
+        const runtimeCenter = cachedOverallCenter(character, material.id);
+        if (runtimeCenter) {
+          overall.centerX = runtimeCenter.x;
+          overall.centerY = runtimeCenter.y;
+        } else {
+          // Do not visibly rotate/scale around the legacy 100x100 metadata
+          // fallback while the real texture geometry is still being learned.
+          overall.rotation = 0;
+          overall.scale = 1;
+        }
         const layerGroups = buildStaticSynthetic({ character, material, refs, asset: sourceAsset, analysis, overall });
         for (let sourceOrder = 0; sourceOrder < layerGroups.length; sourceOrder++) {
           const group = layerGroups[sourceOrder];
@@ -907,6 +1120,105 @@
   const CONTENT_SCAN_MAX_EDGE = 512;
   const textureContentPivotCache = new Map();
   let contentPivotRefreshScheduled = false;
+
+  // Asset metadata in BC R130 does not contain rendered texture dimensions.
+  // Geometry discovered at GLDrawImage is therefore the authoritative source
+  // for the next frame's material pivot. The cache is kept per character so
+  // identical materials on different characters cannot contaminate one another.
+  const overallGeometryCache = new WeakMap();
+
+  function cacheOverallLayerGeometry(options, dstX, dstY, offsetX, texW, texH, canvasHeight, url = null) {
+    const character = options?.__coeGeometryCharacter;
+    const materialId = options?.__coeGeometryMaterialId;
+    const layerKey = options?.__coeGeometryLayerKey;
+    if (!character || materialId == null || layerKey == null || options?.__coeGeometryIsBlink === true ||
+      !(texW > 1) || !(texH > 1)) return;
+    const materialMap = overallGeometryCache.get(character) || new Map();
+    const layerMap = materialMap.get(materialId) || new Map();
+    const off = Number.isFinite(offsetX) ? offsetX : 0;
+    const mirror = options.Mirror === true;
+    const invert = options.Invert === true;
+    let drawX = mirror ? 500 - dstX : dstX;
+    drawX += off;
+    let drawY = invert ? canvasHeight - dstY + 550 : dstY;
+    // Store the normal (non-blink) material geometry. Blink receives the same
+    // pivot plus offsetX at consumption time, so retaining the blink offset here
+    // would apply it twice.
+    drawX -= off;
+    const signedW = (mirror ? -1 : 1) * texW;
+    const signedH = (invert ? -1 : 1) * texH;
+    const contentBounds = url ? resolveTextureContentBounds(url) : null;
+    const contentState = url ? textureContentPivotCache.get(url) : null;
+    const readyForOverall = !url || contentState?.status === "ready" || contentState?.status === "failed";
+    const normalized = contentBounds || { left: 0, top: 0, right: 1, bottom: 1 };
+    const corners = [
+      { x: drawX + normalized.left * signedW, y: drawY + normalized.top * signedH },
+      { x: drawX + normalized.right * signedW, y: drawY + normalized.top * signedH },
+      { x: drawX + normalized.right * signedW, y: drawY + normalized.bottom * signedH },
+      { x: drawX + normalized.left * signedW, y: drawY + normalized.bottom * signedH },
+    ];
+    const localRotation = typeof options.Rotation === "number" ? options.Rotation : 0;
+    const localScale = clamp(typeof options.Scale === "number" ? options.Scale : 1, 0.25, 3);
+    if (localRotation || Math.abs(localScale - 1) > 0.001) {
+      const pivot = contentState?.pivot || { x: 0.5, y: 0.5 };
+      const pivotX = drawX + pivot.x * signedW;
+      const pivotY = drawY + pivot.y * signedH;
+      const cos = Math.cos(localRotation);
+      const sin = Math.sin(localRotation);
+      for (const corner of corners) {
+        const dx = corner.x - pivotX;
+        const dy = corner.y - pivotY;
+        corner.x = pivotX + localScale * (cos * dx - sin * dy);
+        corner.y = pivotY + localScale * (sin * dx + cos * dy);
+      }
+    }
+    const rect = {
+      left: Math.min(...corners.map(point => point.x)),
+      top: Math.min(...corners.map(point => point.y)),
+      right: Math.max(...corners.map(point => point.x)),
+      bottom: Math.max(...corners.map(point => point.y)),
+      readyForOverall,
+    };
+    const previous = layerMap.get(layerKey);
+    const changed = !previous || previous.left !== rect.left || previous.top !== rect.top ||
+      previous.right !== rect.right || previous.bottom !== rect.bottom ||
+      previous.readyForOverall !== rect.readyForOverall;
+    layerMap.set(layerKey, rect);
+    materialMap.set(materialId, layerMap);
+    overallGeometryCache.set(character, materialMap);
+    if (changed) scheduleContentPivotRefresh();
+  }
+
+  function pruneOverallGeometry(character, materialId, asset, refs) {
+    const materialMap = overallGeometryCache.get(character);
+    const layerMap = materialMap?.get(materialId);
+    if (!layerMap) return;
+    const drawable = refs.map(ref => ({ ref, sourceLayer: resolveSourceLayer(asset, ref) }))
+      .filter(entry => isDrawableLayer(entry.sourceLayer))
+      .sort((a, b) => (a.ref.sourceLayerIndex ?? asset.Layer.indexOf(a.sourceLayer)) -
+        (b.ref.sourceLayerIndex ?? asset.Layer.indexOf(b.sourceLayer)));
+    const validKeys = new Set(drawable.map((entry, sourceOrder) =>
+      `${entry.ref.sourceLayerIndex ?? asset.Layer.indexOf(entry.sourceLayer)}:${sourceOrder}`));
+    for (const key of layerMap.keys()) if (!validKeys.has(key)) layerMap.delete(key);
+    if (!layerMap.size) materialMap.delete(materialId);
+  }
+
+  function cachedOverallCenter(character, materialId) {
+    const layerMap = overallGeometryCache.get(character)?.get(materialId);
+    if (!layerMap?.size) return null;
+    let bounds = null;
+    for (const rect of layerMap.values()) {
+      if (rect.readyForOverall === false) return null;
+      if (!bounds) bounds = { ...rect };
+      else {
+        bounds.left = Math.min(bounds.left, rect.left);
+        bounds.top = Math.min(bounds.top, rect.top);
+        bounds.right = Math.max(bounds.right, rect.right);
+        bounds.bottom = Math.max(bounds.bottom, rect.bottom);
+      }
+    }
+    return bounds ? { x: (bounds.left + bounds.right) / 2, y: (bounds.top + bounds.bottom) / 2 } : null;
+  }
 
   // Alpha 边界只依赖纹理本身，与颜色、Mirror、Invert 和图层变换无关。
   // 因此扫描结果按 URL 缓存，不能在每帧读取像素。
@@ -932,13 +1244,23 @@
     return { minX, minY, maxX, maxY, count };
   }
 
+  function contentBoundsFromBounds(bounds, width, height) {
+    if (!bounds || !(Number(width) > 0) || !(Number(height) > 0)) {
+      return { left: 0, top: 0, right: 1, bottom: 1 };
+    }
+    return {
+      left: clamp(Number(bounds.minX) / Number(width), 0, 1),
+      top: clamp(Number(bounds.minY) / Number(height), 0, 1),
+      right: clamp((Number(bounds.maxX) + 1) / Number(width), 0, 1),
+      bottom: clamp((Number(bounds.maxY) + 1) / Number(height), 0, 1),
+    };
+  }
+
   function contentPivotFromBounds(bounds, width, height) {
     if (!bounds || !(Number(width) > 0) || !(Number(height) > 0)) return { x: 0.5, y: 0.5 };
-    const x = (Number(bounds.minX) + Number(bounds.maxX) + 1) / 2 / Number(width);
-    const y = (Number(bounds.minY) + Number(bounds.maxY) + 1) / 2 / Number(height);
     return {
-      x: Number.isFinite(x) ? clamp(x, 0, 1) : 0.5,
-      y: Number.isFinite(y) ? clamp(y, 0, 1) : 0.5,
+      x: (Number(bounds.minX) + Number(bounds.maxX) + 1) / 2 / Number(width),
+      y: (Number(bounds.minY) + Number(bounds.maxY) + 1) / 2 / Number(height),
     };
   }
 
@@ -961,10 +1283,10 @@
     else if (typeof globalThis.setTimeout === "function") globalThis.setTimeout(refresh, 0);
   }
 
-  function finishTextureContentPivot(url, pivot) {
+  function finishTextureContentPivot(url, pivot, bounds) {
     const current = textureContentPivotCache.get(url);
     if (!current || current.status !== "pending") return;
-    textureContentPivotCache.set(url, { status: "ready", pivot });
+    textureContentPivotCache.set(url, { status: "ready", pivot, bounds });
     scheduleContentPivotRefresh();
   }
 
@@ -1007,7 +1329,8 @@
           context.drawImage(image, 0, 0, width, height);
           const imageData = context.getImageData(0, 0, width, height);
           const bounds = scanAlphaBounds(imageData?.data, width, height);
-          finishTextureContentPivot(url, bounds ? contentPivotFromBounds(bounds, width, height) : { x: 0.5, y: 0.5 });
+          const normalizedBounds = contentBoundsFromBounds(bounds, width, height);
+          finishTextureContentPivot(url, contentPivotFromBounds(bounds, width, height), normalizedBounds);
         } catch (_) {
           const pending = textureContentPivotCache.get(url);
           if (pending?.status === "pending") textureContentPivotCache.set(url, { status: "failed" });
@@ -1037,6 +1360,14 @@
     return null;
   }
 
+  function resolveTextureContentBounds(url) {
+    if (!url) return null;
+    const cached = textureContentPivotCache.get(url);
+    if (cached?.status === "ready" && cached.bounds) return cached.bounds;
+    if (!cached) scanTextureContentPivot(url);
+    return null;
+  }
+
   // 从纹理 URL 解析出资产和图层，获取纹理原始宽高
   function resolveTextureDimensions(url) {
     try {
@@ -1061,6 +1392,21 @@
       if (!layer) return null;
       return { w: layer.DrawingWidth || asset.Width || 100, h: layer.DrawingHeight || asset.Height || 100 };
     } catch (_) { return null; }
+  }
+
+  // Apply one uniform 2D transform around a shared screen-space pivot.
+  // Keeping this as a pure helper makes the invariant explicit: the pivot
+  // itself may only receive the requested overall offset, never rotation or
+  // scale drift.
+  function transformPointAroundOverallPivot(x, y, pivotX, pivotY, rotation, scale, offsetX = 0, offsetY = 0) {
+    const dx = x - pivotX;
+    const dy = y - pivotY;
+    const cos = Math.cos(rotation || 0);
+    const sin = Math.sin(rotation || 0);
+    return {
+      x: pivotX + offsetX + scale * (cos * dx - sin * dy),
+      y: pivotY + offsetY + scale * (sin * dx + cos * dy),
+    };
   }
 
   // 合成图层的变换参数渲染穿线
@@ -1092,11 +1438,24 @@
     } catch (_) { /* ExtendedItemGetDrawingOptions hook 不可用；Mirror/Invert 以默认行为 fallback */ }
 
     // --- GLDrawImage 包装：加入旋转和缩放的矩阵变换 ---
-    try {
-      if (typeof GLDrawImage !== "function" || typeof m4 !== "object") return;
-      var _gldrawOriginal = GLDrawImage;
-      GLDrawImage = function coeGLDrawImage(url, gl, dstX, dstY, options, offsetX) {
+    // BC/其它 Mod 可能在 COE 初始化前后替换 GLDrawImage，因此这里不是
+    // 一次性安装，而是由同一个闭包重复检查并包住当前函数。
+    const installGLDrawImageTransformHook = () => {
+      try {
+        const currentGLDrawImage = globalThis.GLDrawImage;
+        if (typeof currentGLDrawImage !== "function" || typeof globalThis.m4 !== "object" || typeof modApi?.hookFunction !== "function") return false;
+        if (currentGLDrawImage._coeTransformHooked === true) {
+          glTransformHookTarget = currentGLDrawImage;
+          return true;
+        }
+        if (glTransformHookTarget && glTransformHookTarget !== currentGLDrawImage) {
+          const message = "GLDrawImage 变换包装被覆盖，正在恢复";
+          if (!diagnostics.lastWarnings.includes(message)) diagnostics.lastWarnings.push(message);
+        }
+        const transformHook = function coeGLDrawImageHook(args, next) {
         try {
+          const [url, gl, dstX, dstY, options, offsetX] = args;
+          const drawOriginal = () => next(args);
           var opts = options || {};
         var rotation = typeof opts.Rotation === "number" ? opts.Rotation : 0;
         var scale = typeof opts.Scale === "number" ? opts.Scale : 1;
@@ -1107,7 +1466,10 @@
         // 无变换时直接走原始函数，保持零开销。
         if (!rotation && Math.abs(scale - 1) <= 0.001 && !overallRotation && Math.abs(overallScale - 1) <= 0.001 &&
           !overallOffsetX && !overallOffsetY) {
-          return _gldrawOriginal.call(window, url, gl, dstX, dstY, options, offsetX);
+          const result = drawOriginal();
+          const textureInfo = typeof GLDrawLoadImage === "function" ? GLDrawLoadImage(gl, url) : null;
+          cacheOverallLayerGeometry(opts, dstX, dstY, offsetX, Number(textureInfo?.width), Number(textureInfo?.height), gl.canvas.height, url);
+          return result;
         }
 
         // --- 变换绘制 ---
@@ -1117,7 +1479,7 @@
         try {
           colorMaskSaved = gl.getParameter(gl.COLOR_WRITEMASK);
           gl.colorMask(false, false, false, false);
-          _gldrawOriginal.call(window, url, gl, dstX, dstY, options, offsetX);
+          drawOriginal();
         } finally {
           if (colorMaskSaved) gl.colorMask(colorMaskSaved[0], colorMaskSaved[1], colorMaskSaved[2], colorMaskSaved[3]);
         }
@@ -1130,17 +1492,20 @@
           : resolveTextureDimensions(url);
         if (!dim || !(dim.w > 0) || !(dim.h > 0)) {
           // 不能取得尺寸时必须恢复一次正常绘制，避免 colorMask 路径吞掉图层。
-          return _gldrawOriginal.call(window, url, gl, dstX, dstY, options, offsetX);
+          return drawOriginal();
         }
         var texW = dim.w, texH = dim.h;
+        cacheOverallLayerGeometry(opts, dstX, dstY, offsetX, texW, texH, gl.canvas.height, url);
         var uniformScale = clamp(scale, 0.25, 3.0);
         var groupScale = clamp(overallScale, 0.25, 3.0);
         var off = typeof offsetX === "number" ? offsetX : 0;
         var mirror = opts.Mirror === true;
         var invert = opts.Invert === true;
-        var drawX = dstX + off;
+        // Match BC's GLDrawImage order: Mirror changes the destination first,
+        // then the blink/draw offset is added in screen space.
+        var drawX = mirror ? 500 - dstX : dstX;
+        drawX += off;
         var drawY = dstY;
-        if (mirror) drawX = 500 - drawX;
         if (invert) drawY = gl.canvas.height - drawY + 550;
         var signedW = (mirror ? -1 : 1) * texW;
         var signedH = (invert ? -1 : 1) * texH;
@@ -1151,35 +1516,47 @@
         var localPivotY = contentPivot?.y ?? 0.5;
         var localCenterScreenX = drawX + localPivotX * signedW;
         var localCenterScreenY = drawY + localPivotY * signedH;
-        var overallCenterX = typeof opts.OverallCenterX === "number" ? opts.OverallCenterX : localCenterScreenX;
+        // The blink callback renders into the second 500px canvas half. Keep the
+        // shared material pivot in that same half; otherwise the blink image is
+        // transformed around the normal-image center and appears to jump.
+        var overallCenterX = typeof opts.OverallCenterX === "number"
+          ? opts.OverallCenterX + off : localCenterScreenX;
         var overallCenterY = typeof opts.OverallCenterY === "number" ? opts.OverallCenterY : localCenterScreenY;
 
         var program = gl.getParameter(gl.CURRENT_PROGRAM);
-        if (!program) return _gldrawOriginal.call(window, url, gl, dstX, dstY, options, offsetX);
+        if (!program) return drawOriginal();
 
         // 获取 u_matrix 位置。BC 的 GLDraw 在 program 上缓存了此位置，
         // 但用 gl.getUniformLocation 更健壮，不依赖内部实现。
         var uMatrix = program.u_matrix || gl.getUniformLocation(program, "u_matrix");
-        if (!uMatrix) return _gldrawOriginal.call(window, url, gl, dstX, dstY, options, offsetX);
+        if (!uMatrix) return drawOriginal();
 
+        // First transform the local image pivot as a point. The resulting point
+        // is then used as the sole translation anchor for the sprite matrix.
+        // This avoids relying on a long chain of nested screen-space translates
+        // and makes it impossible for local rotation/scale to move the shared
+        // material pivot accidentally.
+        const transformedLocalCenter = transformPointAroundOverallPivot(
+          localCenterScreenX,
+          localCenterScreenY,
+          overallCenterX,
+          overallCenterY,
+          overallRotation,
+          groupScale,
+          overallOffsetX,
+          overallOffsetY,
+        );
         var matrix = m4.orthographic(0, gl.canvas.width, gl.canvas.height, 0, -1, 1);
-        // 顶点仍是单位正方形，局部使用素材中点，整体使用自动计算位置，
-        // 再把纹理尺寸放在矩阵最右端。矩阵顺序表达：整体 × 局部 × 原图。
-        matrix = m4.translate(matrix, overallCenterX + overallOffsetX, overallCenterY + overallOffsetY, 0);
-        if (overallRotation) {
+        // Vertices remain a unit square. Local and overall uniform transforms can
+        // be combined into one rotation/scale around the transformed local pivot.
+        matrix = m4.translate(matrix, transformedLocalCenter.x, transformedLocalCenter.y, 0);
+        const combinedRotation = overallRotation + rotation;
+        if (combinedRotation) {
           matrix = typeof m4.zRotate === "function"
-            ? m4.zRotate(matrix, overallRotation)
-            : m4.multiply(matrix, m4.zRotation(overallRotation));
+            ? m4.zRotate(matrix, combinedRotation)
+            : m4.multiply(matrix, m4.zRotation(combinedRotation));
         }
-        matrix = m4.scale(matrix, groupScale, groupScale, 1);
-        matrix = m4.translate(matrix, -overallCenterX, -overallCenterY, 0);
-        matrix = m4.translate(matrix, localCenterScreenX, localCenterScreenY, 0);
-        if (rotation) {
-          matrix = typeof m4.zRotate === "function"
-            ? m4.zRotate(matrix, rotation)
-            : m4.multiply(matrix, m4.zRotation(rotation));
-        }
-        matrix = m4.scale(matrix, uniformScale, uniformScale, 1);
+        matrix = m4.scale(matrix, groupScale * uniformScale, groupScale * uniformScale, 1);
         matrix = m4.translate(matrix, -localCenterScreenX, -localCenterScreenY, 0);
         matrix = m4.translate(matrix, drawX, drawY, 0);
         matrix = m4.scale(matrix, signedW, signedH, 1);
@@ -1188,11 +1565,27 @@
         gl.drawArrays(gl.TRIANGLES, 0, 6);
         } catch (_coeTransformErr) {
           // 任何异常不传播到 BC 绘制循环，降级为原始绘制
-          try { _gldrawOriginal.call(window, url, gl, dstX, dstY, options, offsetX); } catch (_e2) {}
+          try { drawOriginal(); } catch (_e2) {}
         }
-      };
-      GLDrawImage._coeTransformWrapped = true;
-    } catch (_) { /* GLDrawImage 包装失败，Rotation/Scale 渲染不可用 */ }
+        };
+        modApi.hookFunction("GLDrawImage", 10, transformHook);
+        const installedTarget = globalThis.GLDrawImage;
+        if (typeof installedTarget === "function") {
+          installedTarget._coeTransformHooked = true;
+          installedTarget._coeTransformWrapped = true;
+          glTransformHookTarget = installedTarget;
+        } else glTransformHookTarget = currentGLDrawImage;
+        return true;
+      } catch (error) {
+        const message = `GLDrawImage 变换包装失败: ${error?.message || error}`;
+        if (!diagnostics.lastWarnings.includes(message)) diagnostics.lastWarnings.push(message);
+        return false;
+      }
+    };
+    installGLDrawImageTransformHook();
+    if (!glTransformHookWatch && typeof globalThis.setInterval === "function") {
+      glTransformHookWatch = globalThis.setInterval(installGLDrawImageTransformHook, 500);
+    }
   }
 
   // Backward-compatible internal alias used by the local editor tests/API.
@@ -1225,18 +1618,11 @@
       refsByMaterial.get(layer.m).push(remoteRef);
     }
     const groups = [];
-    const overall = resolveOverallTransform({
-      overallRotation: snapshot.or,
-      overallScale: snapshot.os,
-      overallOffsetX: snapshot.ox,
-      overallOffsetY: snapshot.oy,
-      layers: [...refsByMaterial.values()].flat(),
-    }, character);
     for (let materialOrder = 0; materialOrder < (snapshot.m || []).length; materialOrder++) {
       const compact = snapshot.m[materialOrder];
       const refs = refsByMaterial.get(materialOrder) || [];
       if (!refs.length) continue;
-      const material = { id: `remote:${memberNumber}:${materialOrder}`, sourceGroup: compact.g, sourceAsset: compact.a, colors: compact.c, sourceProperty: compact.p || {}, hidden: false };
+      const material = { id: `remote:${memberNumber}:${materialOrder}`, sourceGroup: compact.g, sourceAsset: compact.a, colors: compact.c, sourceProperty: compact.p || {}, overallRotation: compact.r, overallScale: compact.s, overallOffsetX: compact.x, overallOffsetY: compact.y, hidden: false };
       let analysis = null;
       try {
         const sourceAsset = AssetGet(character.AssetFamily || "Female3DCG", compact.g, compact.a);
@@ -1250,6 +1636,16 @@
           if (!isDrawableLayer(sourceLayer)) throw new Error("source-layer-not-drawable");
         }
         analysis = analyzeAssetCached(sourceAsset);
+        const overall = resolveOverallTransform({ layers: refs }, character, material);
+        pruneOverallGeometry(character, material.id, sourceAsset, refs);
+        const runtimeCenter = cachedOverallCenter(character, material.id);
+        if (runtimeCenter) {
+          overall.centerX = runtimeCenter.x;
+          overall.centerY = runtimeCenter.y;
+        } else {
+          overall.rotation = 0;
+          overall.scale = 1;
+        }
         const layerGroups = buildStaticSynthetic({ character, material, refs, asset: sourceAsset, analysis, overall });
         for (let sourceOrder = 0; sourceOrder < layerGroups.length; sourceOrder++) {
           const group = layerGroups[sourceOrder];
@@ -1304,6 +1700,7 @@
             __coeSyntheticLayer: {
               item: group.item, ref, sourceLayer: visualLayer,
               sourceLayerIndex: ref.sourceLayerIndex ?? group.item.Asset.Layer.indexOf(entry.sourceLayer),
+              materialId: group.material.id,
               materialOrder: group.materialOrder, sourceOrder: entry.sourceOrder, overall: group.overall,
             },
           });
@@ -1379,7 +1776,12 @@
       const originalCallbacks = args[1];
       let currentDrawLayer = null;
       try {
-        character.Appearance = groups.map(group => group.item).concat(originalAppearance || []);
+        const previewAssets = uiMode === "editor" && isLocalPlayer(character)
+          ? new Set(groups.map(group => group.item?.Asset?.__coeSourceAsset || group.item?.Asset?.Asset).filter(Boolean)) : null;
+        const renderableAppearance = previewAssets
+          ? (originalAppearance || []).filter(item => !(previewAssets.has(item?.Asset) && isEditorRemovableAsset(item?.Asset)))
+          : (originalAppearance || []);
+        character.Appearance = groups.map(group => group.item).concat(renderableAppearance);
         const drawLayers = (originalLayers || []).map(layer => {
           const marker = layer.__coeSyntheticLayer;
           if (!marker) return layer;
@@ -1432,6 +1834,13 @@
                 transformed.OverallCenterX = overall.centerX;
                 transformed.OverallCenterY = overall.centerY;
               }
+              // GLDrawImage is the first point where the actual texture size is
+              // known. Carry an internal identity through the callback so it can
+              // feed authoritative, untransformed geometry into the next frame.
+              transformed.__coeGeometryCharacter = character;
+              transformed.__coeGeometryMaterialId = marker.materialId;
+              transformed.__coeGeometryLayerKey = `${marker.sourceLayerIndex}:${marker.sourceOrder}`;
+              transformed.__coeGeometryIsBlink = name.includes("Blink");
               callbackArgs[3] = transformed;
               return callback.apply(this, callbackArgs);
             };
@@ -1618,16 +2027,9 @@
       layers,
       recycle: [],
     };
-    // The editor currently exposes one composition-level overall target. Preserve
-    // it when one scheme is equipped; with several schemes the active composition
-    // deliberately starts from the neutral overall transform instead of silently
-    // choosing one scheme's transform.
-    if (selected.length === 1) {
-      const source = normalizeComposition(selected[0].composition);
-      for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY"]) {
-        if (typeof source[key] === "number") combined[key] = source[key];
-      }
-    }
+    // Overall transforms are stored on each material, so cloning the materials
+    // above preserves independent per-asset rotation/scale even when schemes are
+    // equipped together. There is deliberately no composition-wide transform.
     return normalizeComposition(combined);
   }
 
@@ -1915,18 +2317,24 @@
 
   function transformTargetLabel() {
     if (!transformEditTarget) return "未选择变换对象";
-    if (transformEditTarget.kind === "overall") return "整体服装";
+    if (transformEditTarget.kind === "material") {
+      const material = editing?.materials?.find(item => item.id === transformEditTarget.materialId);
+      return material ? `${material.label || material.sourceAsset} · 素材整体` : "素材整体";
+    }
     const layer = transformEditTarget.layer;
     return layer ? `${layer.sourceAsset || "素材"} · ${layer.layerLabel || layer.sourceLayer || "图层"}` : "当前图层";
   }
 
   function setTransformTarget(target) {
-    if (transformPointer && (!target || target.kind !== transformEditTarget?.kind || target.index !== transformEditTarget?.index)) return;
+    const sameTarget = transformEditTarget && target && transformEditTarget.kind === target.kind &&
+      (target.kind === "material" ? transformEditTarget.materialId === target.materialId : transformEditTarget.index === target.index);
+    if (transformPointer && !sameTarget) return;
     if (!target) {
       transformEditTarget = null;
       transformPointer = null;
-    } else if (target.kind === "overall") {
-      transformEditTarget = { kind: "overall" };
+    } else if (target.kind === "material") {
+      const material = target.material || editing?.materials?.find(item => item.id === target.materialId);
+      transformEditTarget = material ? { kind: "material", materialId: material.id, material } : null;
     } else {
       const index = Number.isInteger(target.index) ? target.index : editing?.layers?.indexOf(target.layer);
       transformEditTarget = { kind: "layer", index: index >= 0 ? index : 0, layer: editing?.layers?.[index] || target.layer };
@@ -1940,10 +2348,27 @@
     else object[key] = value;
   }
 
-  function resetOverallTransform() {
-    if (!editing) return;
-    for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY"]) delete editing[key];
-    transformEditTarget = { kind: "overall" };
+  function applyOverallTransformField(materialId, field, rawValue) {
+    const material = editing?.materials?.find(item => item.id === materialId);
+    if (!material || !Number.isFinite(rawValue)) return false;
+    let value = rawValue;
+    if (field === "rotation") {
+      value = clamp(value, -180, 180) * Math.PI / 180;
+      setOptionalTransformValue(material, "overallRotation", value, 0);
+    } else if (field === "scale") {
+      value = clamp(value, 0.25, 3);
+      setOptionalTransformValue(material, "overallScale", value, 1);
+    } else if (field === "offsetX" || field === "offsetY") {
+      value = clamp(value, -1200, 1200);
+      setOptionalTransformValue(material, `overall${field[0].toUpperCase()}${field.slice(1)}`, value, 0);
+    } else return false;
+    return true;
+  }
+
+  function resetMaterialOverallTransform(material) {
+    if (!material) return;
+    for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY"]) delete material[key];
+    transformEditTarget = { kind: "material", materialId: material.id, material };
     refreshPreviewLoop();
     const host = document.querySelector(`#${ROOT_ID} .coe-editor-tools`);
     if (host) renderEditorTools(host);
@@ -1956,8 +2381,9 @@
       event.preventDefault();
       event.stopPropagation();
       const layer = transformEditTarget.kind === "layer" ? editing.layers[transformEditTarget.index] : null;
-      const overall = transformEditTarget.kind === "overall" ? resolveOverallTransform(editing, globalThis.Player) : null;
-      transformPointer = { kind, startX: event.clientX, startY: event.clientY, layer,
+      const material = transformEditTarget.kind === "material" ? editing.materials.find(item => item.id === transformEditTarget.materialId) : null;
+      const overall = material ? resolveOverallTransform(editing, globalThis.Player, material) : null;
+      transformPointer = { kind, startX: event.clientX, startY: event.clientY, layer, material,
         rotation: layer?.rotation || 0, scale: layer?.scale || 1, overallRotation: overall?.rotation || 0, overallScale: overall?.scale || 1 };
       const move = moveEvent => {
         if (!transformPointer) return;
@@ -1967,11 +2393,11 @@
         if (state.kind === "rotate") {
           const value = state.layer ? state.rotation + dx * Math.PI / 180 : state.overallRotation + dx * Math.PI / 180;
           if (state.layer) setOptionalTransformValue(state.layer, "rotation", clamp(value, -Math.PI, Math.PI), 0);
-          else setOptionalTransformValue(editing, "overallRotation", clamp(value, -Math.PI, Math.PI), 0);
+          else if (state.material) setOptionalTransformValue(state.material, "overallRotation", clamp(value, -Math.PI, Math.PI), 0);
         } else {
           const value = clamp((state.layer ? state.scale : state.overallScale) * Math.max(0.1, 1 - dy / 120), 0.25, 3);
           if (state.layer) setOptionalTransformValue(state.layer, "scale", value, 1);
-          else setOptionalTransformValue(editing, "overallScale", value, 1);
+          else if (state.material) setOptionalTransformValue(state.material, "overallScale", value, 1);
         }
         refreshPreviewLoop();
       };
@@ -1990,35 +2416,42 @@
   function renderTransformEditor(content) {
     const host = content.querySelector("[data-transform-editor]");
     if (!host) return;
-    const selectedIndex = transformEditTarget?.kind === "layer" ? transformEditTarget.index : "overall";
-    const options = ['<option value="overall">整体服装整体</option>'].concat((editing?.layers || []).map((layer, index) => {
+    const selectedIndex = transformEditTarget?.kind === "layer"
+      ? `layer:${transformEditTarget.index}`
+      : transformEditTarget?.kind === "material"
+        ? `material:${editing?.materials?.findIndex(item => item.id === transformEditTarget.materialId) ?? -1}` : "";
+    const materialOptions = (editing?.materials || []).map((material, index) => `<option value="material:${index}">${escapeHTML(`${material.label || material.sourceAsset} · 素材整体`)}</option>`);
+    const layerOptions = (editing?.layers || []).map((layer, index) => {
       const label = layer.layerLabel || layer.sourceLayer || `图层 #${index + 1}`;
-      return `<option value="${index}">${escapeHTML(`${layer.sourceAsset || "素材"} · ${label}`)}</option>`;
-    })).join("");
+      return `<option value="layer:${index}">${escapeHTML(`${layer.sourceAsset || "素材"} · ${label}`)}</option>`;
+    });
+    const options = materialOptions.concat(layerOptions).join("");
     host.innerHTML = `<div class="coe-transform-head"><div><strong>变换编辑</strong><span class="coe-muted">${escapeHTML(transformTargetLabel())}</span></div><div class="coe-actions"><select data-transform-target>${options}</select>${transformEditTarget ? '<button type="button" class="coe-btn" data-transform-done>完成</button>' : ''}</div></div><p class="coe-hint">旋转和缩放使用固定默认中心；未激活的图层不会显示变换控件。</p>${transformEditTarget ? '<div class="coe-transform-pad"><button type="button" data-transform-handle="rotate">↻ 旋转</button><button type="button" data-transform-handle="scale">⤢ 缩放</button></div>' : ''}`;
     const select = host.querySelector("[data-transform-target]");
     select.value = String(selectedIndex);
     select.addEventListener("change", () => {
-      if (select.value === "overall") setTransformTarget({ kind: "overall" });
-      else setTransformTarget({ kind: "layer", index: Number(select.value) });
+      const [kind, rawIndex] = select.value.split(":");
+      if (kind === "material") setTransformTarget({ kind: "material", material: editing?.materials?.[Number(rawIndex)] });
+      else setTransformTarget({ kind: "layer", index: Number(rawIndex) });
     });
     host.querySelector("[data-transform-done]")?.addEventListener("click", () => setTransformTarget(null));
     bindTransformHandle(host.querySelector('[data-transform-handle="rotate"]'), "rotate");
     bindTransformHandle(host.querySelector('[data-transform-handle="scale"]'), "scale");
     if (!transformEditTarget) return;
-    if (transformEditTarget.kind === "overall") {
-      const overall = resolveOverallTransform(editing, globalThis.Player);
-      host.insertAdjacentHTML("beforeend", `<div class="coe-transform-fields"><label>旋转<input type="number" step="1" data-overall-field="rotation" value="${Math.round(overall.rotation * 180 / Math.PI * 100) / 100}">°</label><label>缩放<input type="number" step="0.05" min="0.25" max="3" data-overall-field="scale" value="${overall.scale}"></label><label>偏移 X<input type="number" step="1" data-overall-field="offsetX" value="${overall.offsetX}"></label><label>偏移 Y<input type="number" step="1" data-overall-field="offsetY" value="${overall.offsetY}"></label></div><div class="coe-actions"><button type="button" class="coe-btn" data-reset-overall>重置整体服装变换</button></div>`);
+    if (transformEditTarget.kind === "material") {
+      const material = editing.materials.find(item => item.id === transformEditTarget.materialId);
+      transformEditTarget.material = material;
+      if (!material) return;
+      const overall = resolveOverallTransform(editing, globalThis.Player, material);
+      host.insertAdjacentHTML("beforeend", `<div class="coe-transform-fields"><label>旋转<input type="number" step="1" data-overall-field="rotation" value="${Math.round(overall.rotation * 180 / Math.PI * 100) / 100}">°</label><label>缩放<input type="number" step="0.05" min="0.25" max="3" data-overall-field="scale" value="${overall.scale}"></label><label>偏移 X<input type="number" step="1" data-overall-field="offsetX" value="${overall.offsetX}"></label><label>偏移 Y<input type="number" step="1" data-overall-field="offsetY" value="${overall.offsetY}"></label></div><div class="coe-actions"><button type="button" class="coe-btn" data-reset-overall>重置素材整体变换</button></div>`);
+      const materialId = material.id;
       host.querySelectorAll("[data-overall-field]").forEach(input => input.addEventListener("input", () => {
         const field = input.dataset.overallField;
-        let value = Number(input.value);
-        if (!Number.isFinite(value)) return;
-        if (field === "rotation") { value = clamp(value, -180, 180) * Math.PI / 180; setOptionalTransformValue(editing, "overallRotation", value, 0); }
-        else if (field === "scale") { value = clamp(value, 0.25, 3); setOptionalTransformValue(editing, "overallScale", value, 1); }
-        else if (field === "offsetX" || field === "offsetY") { value = clamp(value, -1200, 1200); setOptionalTransformValue(editing, `overall${field[0].toUpperCase()}${field.slice(1)}`, value, 0); }
+        const value = Number(input.value);
+        if (!applyOverallTransformField(materialId, field, value)) return;
         refreshPreviewLoop();
       }));
-      host.querySelector("[data-reset-overall]")?.addEventListener("click", resetOverallTransform);
+      host.querySelector("[data-reset-overall]")?.addEventListener("click", () => resetMaterialOverallTransform(material));
     } else {
       const layer = editing.layers[transformEditTarget.index];
       transformEditTarget.layer = layer;
@@ -2097,7 +2530,7 @@
     const overallLabel = uniform ? colors[0] : "多种颜色";
     group.innerHTML = `<div class="coe-material-editor-head"><button class="coe-collapse" type="button" data-collapse>${material.collapsed ? "▶" : "▼"}</button><div class="coe-material-identity"><strong>${escapeHTML(material.label || asset?.Description || material.sourceAsset)}</strong><span class="coe-muted">${escapeHTML(material.sourceGroup)} · ${layers.length} 层</span></div><label class="coe-overall-color">整体颜色<button type="button" class="coe-color-choice" data-overall-color title="使用游戏原版颜色选择器统一修改所有可着色颜色槽"><span class="coe-color-swatch"></span><code>${escapeHTML(overallLabel)}</code></button></label><button class="coe-btn" data-edit-overall>调整整体变换</button><button class="coe-btn" data-hide-material>${material.hidden ? "显示" : "隐藏"}</button><button class="coe-btn" data-reset-material>整件默认</button><button class="coe-btn coe-danger" data-remove-material>移除素材</button></div><div class="coe-material-editor-layers"></div>`;
     updateColorChoice(group.querySelector("[data-overall-color]"), overallColor, defaultHex, overallLabel);
-    group.querySelector("[data-edit-overall]").addEventListener("click", () => setTransformTarget({ kind: "overall" }));
+    group.querySelector("[data-edit-overall]").addEventListener("click", () => setTransformTarget({ kind: "material", material }));
     group.querySelector("[data-collapse]").addEventListener("click", () => {
       material.collapsed = !material.collapsed;
       renderLayerList(list);
@@ -2133,6 +2566,7 @@
         layer.rotation = layer.defaultRotation;
         layer.scale = layer.defaultScale;
       });
+      for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY"]) delete material[key];
       refreshPreviewLoop();
       renderLayerList(list);
     });
@@ -2302,7 +2736,7 @@
         sourceGroup: asset.Group.Name,
         sourceAsset: asset.Name,
         label: asset.Description || asset.Name,
-        colors: Array.isArray(sourceColor) ? sourceColor : asset.DefaultColor?.map(() => sourceColor),
+        colors: Array.isArray(sourceColor) ? sourceColor : (asset.DefaultColor?.map(() => sourceColor) ?? []),
         defaultColors: asset.DefaultColor,
         sourceColor,
         sourceProperty: sanitizeSourceProperty(worn?.Property),
@@ -2325,18 +2759,29 @@
 
   function saveEditing() {
     if (!ensureWardrobeWritable()) return;
-    editing = normalizeComposition(editing);
-    if (!editing.name.trim()) editing.name = "未命名方案";
-    const existingIndex = editingId ? wardrobe.schemes.findIndex(scheme => scheme.id === editingId) : -1;
-    const entry = { id: editingId || uid(), composition: cloneJSON(editing) };
-    if (existingIndex >= 0) wardrobe.schemes[existingIndex] = entry;
-    else {
-      if (wardrobe.schemes.length >= MAX_SCHEMES) { toast(`衣柜最多保存 ${MAX_SCHEMES} 套方案`, "warn"); return; }
-      wardrobe.schemes.unshift(entry);
-      editingId = entry.id;
+    const previousWardrobe = cloneJSON(wardrobe);
+    const previousEditing = cloneJSON(editing);
+    const previousEditingId = editingId;
+    try {
+      editing = normalizeComposition(editing);
+      if (!editing.name.trim()) editing.name = "未命名方案";
+      const existingIndex = editingId ? wardrobe.schemes.findIndex(scheme => scheme.id === editingId) : -1;
+      const entry = { id: editingId || uid(), composition: cloneJSON(editing) };
+      if (existingIndex >= 0) wardrobe.schemes[existingIndex] = entry;
+      else {
+        if (wardrobe.schemes.length >= MAX_SCHEMES) { toast(`衣柜最多保存 ${MAX_SCHEMES} 套方案`, "warn"); return; }
+        wardrobe.schemes.unshift(entry);
+        editingId = entry.id;
+      }
+      wardrobe.equippedIds = [...new Set([...(wardrobe.equippedIds || []), entry.id])];
+      persistWardrobe();
+    } catch (error) {
+      wardrobe = previousWardrobe;
+      editing = previousEditing;
+      editingId = previousEditingId;
+      toast(`保存失败: ${error?.message || error}`, "error");
+      return;
     }
-    wardrobe.equippedIds = [...new Set([...(wardrobe.equippedIds || []), entry.id])];
-    persistWardrobe();
     restoreEditorAppearance();
     syncEquippedSchemes();
     toast(`已保存「${editing.name}」并在本地启用`);
@@ -2493,13 +2938,19 @@
     remoteAssertTree(value);
     if (!remotePlainObject(value) || value.v !== 1 || !Array.isArray(value.m) || !Array.isArray(value.l)) throw new Error("snapshot-root");
     if (value.m.length > REMOTE_LIMITS.materials || value.l.length > REMOTE_LIMITS.layers) throw new Error("snapshot-count");
-    for (const key of Object.keys(value)) if (!new Set(["v", "m", "l", "or", "os", "ox", "oy"]).has(key)) throw new Error("snapshot-root-key");
+    for (const key of Object.keys(value)) if (!new Set(["v", "m", "l"]).has(key)) throw new Error("snapshot-root-key");
     const materials = value.m.map(material => {
       if (!remotePlainObject(material)) throw new Error("snapshot-material");
-      for (const key of Object.keys(material)) if (!new Set(["g", "a", "c", "p"]).has(key)) throw new Error("snapshot-material-key");
+      for (const key of Object.keys(material)) if (!new Set(["g", "a", "c", "p", "r", "s", "x", "y"]).has(key)) throw new Error("snapshot-material-key");
       const output = { g: remoteString(material.g, "group"), a: remoteString(material.a, "asset") };
       if (!Array.isArray(material.c) || material.c.length > 40) throw new Error("snapshot-colors");
       output.c = material.c.map(color => remoteString(color, "color", REMOTE_LIMITS.color));
+      const overallFields = [["r", -Math.PI, Math.PI], ["s", 0.25, 3.0], ["x", -1200, 1200], ["y", -1200, 1200]];
+      for (const [key, min, max] of overallFields) {
+        if (material[key] == null) continue;
+        if (typeof material[key] !== "number" || !Number.isFinite(material[key])) throw new Error(`snapshot-material-${key}`);
+        output[key] = normalizeRemoteNumber(material[key], min, max);
+      }
       const property = validateRemoteProperty(material.p);
       if (property) output.p = property;
       return output;
@@ -2527,12 +2978,6 @@
       return output;
     });
     const snapshot = { v: 1 };
-    const overallFields = [["or", -Math.PI, Math.PI], ["os", 0.25, 3.0], ["ox", -1200, 1200], ["oy", -1200, 1200]];
-    for (const [key, min, max] of overallFields) {
-      if (value[key] == null) continue;
-      if (typeof value[key] !== "number" || !Number.isFinite(value[key])) throw new Error(`snapshot-overall-${key}`);
-      snapshot[key] = normalizeRemoteNumber(value[key], min, max);
-    }
     snapshot.m = materials;
     snapshot.l = layers;
     const canonical = JSON.stringify(snapshot);
@@ -2709,7 +3154,11 @@
   function pendingRequestFor(memberNumber) { return remoteStore.pendingRequests.get(remotePeerKey(memberNumber)) || null; }
 
   function setPendingRequest(memberNumber, request) {
-    remoteStore.pendingRequests.set(remotePeerKey(memberNumber), { ...request, createdAt: remoteNow(), retries: request.retries || 0, generation: remoteStore.roomGeneration });
+    const key = remotePeerKey(memberNumber);
+    const previous = remoteStore.pendingRequests.get(key);
+    const identityChanged = previous && (previous.session !== request.session || previous.revision !== request.revision || previous.hash !== request.hash);
+    if (identityChanged) remoteStore.assemblies.delete(key);
+    remoteStore.pendingRequests.set(key, { ...request, createdAt: remoteNow(), retries: request.retries || 0, generation: remoteStore.roomGeneration });
   }
 
   function clearPendingRequest(memberNumber, requestId = null) {
@@ -2983,6 +3432,10 @@
       const index = visibleMaterials.length;
       materialIndexes.set(material.id, index);
       const compact = { g: material.sourceGroup, a: material.sourceAsset, c: sanitizeColorArray(material.colors) };
+      if (typeof material.overallRotation === "number") compact.r = material.overallRotation;
+      if (typeof material.overallScale === "number") compact.s = material.overallScale;
+      if (typeof material.overallOffsetX === "number") compact.x = material.overallOffsetX;
+      if (typeof material.overallOffsetY === "number") compact.y = material.overallOffsetY;
       const property = sanitizeSourceProperty(material.sourceProperty);
       if (Object.keys(property).length) compact.p = property;
       visibleMaterials.push(compact);
@@ -2993,12 +3446,7 @@
         layers.push(snapshotLayer);
       }
     }
-    const snapshot = { v: 1, m: visibleMaterials, l: layers };
-    if (typeof composition.overallRotation === "number") snapshot.or = composition.overallRotation;
-    if (typeof composition.overallScale === "number") snapshot.os = composition.overallScale;
-    if (typeof composition.overallOffsetX === "number") snapshot.ox = composition.overallOffsetX;
-    if (typeof composition.overallOffsetY === "number") snapshot.oy = composition.overallOffsetY;
-    return validateRemoteSnapshot(snapshot);
+    return validateRemoteSnapshot({ v: 1, m: visibleMaterials, l: layers });
   }
 
   function scheduleLocalRemoteBuild(forceState = false) {
@@ -3071,8 +3519,13 @@
     if (active?.identity === remoteIdentity(memberNumber, peer.session) && active.revision === peer.revision && active.hash === peer.hash) return false;
     const pending = pendingRequestFor(memberNumber);
     if (pending && pending.session === peer.session && pending.revision === peer.revision && pending.hash === peer.hash) return false;
+    const pendingIsStale = !!pending;
+    if (pendingIsStale) {
+      clearPendingRequest(memberNumber, pending.requestId);
+      remoteStore.assemblies.delete(remotePeerKey(memberNumber));
+    }
     const now = remoteNow();
-    if (now - (remoteStore.requestTimes.get(memberNumber) || 0) < 5000) return false;
+    if (!pendingIsStale && now - (remoteStore.requestTimes.get(memberNumber) || 0) < 5000) return false;
     const request = { requestId: remoteRandomId(9), session: peer.session, revision: peer.revision, hash: peer.hash, retries: 0 };
     setPendingRequest(memberNumber, request);
     remoteStore.requestTimes.set(memberNumber, now);
@@ -3126,7 +3579,7 @@
         clearPendingRequest(memberNumber);
         remoteStore.assemblies.delete(memberNumber);
         if (active) CharacterRefresh(sender, false, false);
-      } else if (!previous || result.isNewSession || previous.revision !== envelope.r || previous.hash !== envelope.h) maybeRequestRemoteSnapshot(memberNumber, result.peer);
+      } else if (!previous || result.isNewSession || previous.revision !== envelope.r || previous.hash !== envelope.h || previous.sharing !== envelope.sharing) maybeRequestRemoteSnapshot(memberNumber, result.peer);
       return;
     }
     if (envelope.t === "CLEAR") {
@@ -3201,7 +3654,7 @@
     localRemoteHash = "";
     localRemoteCanonical = "";
     localRemoteSnapshot = null;
-    installRemoteMessageHandler();
+    if (!installRemoteMessageHandler()) throw new Error("remote-message-handler-unavailable");
     scheduleLocalRemoteBuild(true);
   }
 
@@ -3356,9 +3809,9 @@
   if (globalThis.__COE_TEST_MODE__) {
     globalThis.__COE_TEST_API__ = {
       normalizeWardrobe, normalizeComposition, normalizeLayerTransform, compactWardrobeForStorage, compactCompositionForStorage, compactLayerForStorage, packWardrobe, unpackWardrobeDetailed,
-      computeDefaultOverallCenter, resolveOverallTransform, resolveNumericOrigin,
+      computeDefaultOverallCenter, resolveOverallTransform, resolveNumericOrigin, transformPointAroundOverallPivot,
       stableInsertSyntheticLayers, coeAssetLayerSort: stableInsertSyntheticLayers, analyzeSourceAsset, sanitizePlainRecord,
-      scanAlphaBounds, contentPivotFromBounds, resolveTextureContentPivot, buildSyntheticItems, buildLocalSyntheticItems, buildRemoteSyntheticItems, makeSyntheticLayers, statusSnapshot,
+      scanAlphaBounds, contentBoundsFromBounds, contentPivotFromBounds, resolveTextureContentPivot, resolveTextureContentBounds, cacheOverallLayerGeometry, cachedOverallCenter, buildSyntheticItems, buildLocalSyntheticItems, buildRemoteSyntheticItems, makeSyntheticLayers, statusSnapshot,
       isDrawableLayer, normalizedMaterialColors, normalizePickerColor, validateRemoteSnapshot, canonicalRemoteSnapshot, sha256Base64Url,
       parseRemoteContent, serializeRemoteEnvelope, encodeRemoteText, decodeRemoteText, splitRemoteData,
       createRemoteStore, setRemotePeer, setPendingRequest, pendingRequestFor, addRemoteChunk, expireRemoteAssemblies,
@@ -3370,6 +3823,7 @@
       setLocalRemoteStateForTest: value => { localPeerSessionId = value.session; localRemoteRevision = value.revision; localRemoteHash = value.hash; localRemoteCanonical = value.canonical; localRemoteSnapshot = value.snapshot; localRemoteBuildToken = value.buildToken ?? localRemoteBuildToken; },
       setActiveCompositionForTest: value => { activeComposition = value; },
       setEditingForTest: value => { editing = value; uiMode = value ? "editor" : null; },
+      applyOverallTransformField,
       installHooksForTest: api => { modApi = api; installRenderHooks(); },
       installAllHooksForTest: api => { modApi = api; installRenderHooks(); installRemoteLifecycleHooks(); },
     };

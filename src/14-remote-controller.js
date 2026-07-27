@@ -69,6 +69,10 @@
       const index = visibleMaterials.length;
       materialIndexes.set(material.id, index);
       const compact = { g: material.sourceGroup, a: material.sourceAsset, c: sanitizeColorArray(material.colors) };
+      if (typeof material.overallRotation === "number") compact.r = material.overallRotation;
+      if (typeof material.overallScale === "number") compact.s = material.overallScale;
+      if (typeof material.overallOffsetX === "number") compact.x = material.overallOffsetX;
+      if (typeof material.overallOffsetY === "number") compact.y = material.overallOffsetY;
       const property = sanitizeSourceProperty(material.sourceProperty);
       if (Object.keys(property).length) compact.p = property;
       visibleMaterials.push(compact);
@@ -79,12 +83,7 @@
         layers.push(snapshotLayer);
       }
     }
-    const snapshot = { v: 1, m: visibleMaterials, l: layers };
-    if (typeof composition.overallRotation === "number") snapshot.or = composition.overallRotation;
-    if (typeof composition.overallScale === "number") snapshot.os = composition.overallScale;
-    if (typeof composition.overallOffsetX === "number") snapshot.ox = composition.overallOffsetX;
-    if (typeof composition.overallOffsetY === "number") snapshot.oy = composition.overallOffsetY;
-    return validateRemoteSnapshot(snapshot);
+    return validateRemoteSnapshot({ v: 1, m: visibleMaterials, l: layers });
   }
 
   function scheduleLocalRemoteBuild(forceState = false) {
@@ -157,8 +156,13 @@
     if (active?.identity === remoteIdentity(memberNumber, peer.session) && active.revision === peer.revision && active.hash === peer.hash) return false;
     const pending = pendingRequestFor(memberNumber);
     if (pending && pending.session === peer.session && pending.revision === peer.revision && pending.hash === peer.hash) return false;
+    const pendingIsStale = !!pending;
+    if (pendingIsStale) {
+      clearPendingRequest(memberNumber, pending.requestId);
+      remoteStore.assemblies.delete(remotePeerKey(memberNumber));
+    }
     const now = remoteNow();
-    if (now - (remoteStore.requestTimes.get(memberNumber) || 0) < 5000) return false;
+    if (!pendingIsStale && now - (remoteStore.requestTimes.get(memberNumber) || 0) < 5000) return false;
     const request = { requestId: remoteRandomId(9), session: peer.session, revision: peer.revision, hash: peer.hash, retries: 0 };
     setPendingRequest(memberNumber, request);
     remoteStore.requestTimes.set(memberNumber, now);
@@ -212,7 +216,7 @@
         clearPendingRequest(memberNumber);
         remoteStore.assemblies.delete(memberNumber);
         if (active) CharacterRefresh(sender, false, false);
-      } else if (!previous || result.isNewSession || previous.revision !== envelope.r || previous.hash !== envelope.h) maybeRequestRemoteSnapshot(memberNumber, result.peer);
+      } else if (!previous || result.isNewSession || previous.revision !== envelope.r || previous.hash !== envelope.h || previous.sharing !== envelope.sharing) maybeRequestRemoteSnapshot(memberNumber, result.peer);
       return;
     }
     if (envelope.t === "CLEAR") {
@@ -287,6 +291,6 @@
     localRemoteHash = "";
     localRemoteCanonical = "";
     localRemoteSnapshot = null;
-    installRemoteMessageHandler();
+    if (!installRemoteMessageHandler()) throw new Error("remote-message-handler-unavailable");
     scheduleLocalRemoteBuild(true);
   }

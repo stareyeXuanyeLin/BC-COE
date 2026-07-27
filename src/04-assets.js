@@ -17,9 +17,14 @@
   }
 
   function shiftOrigin(origin, offset) {
+    const delta = Number.isFinite(Number(offset)) ? Number(offset) : 0;
+    if (typeof origin === "number") return Number.isFinite(origin) ? origin + delta : origin;
     if (!origin || typeof origin !== "object") return origin;
     const shifted = {};
-    for (const [key, value] of Object.entries(origin)) shifted[key] = (Number(value) || 0) + offset;
+    for (const [key, value] of Object.entries(origin)) {
+      const numeric = Number(value);
+      shifted[key] = Number.isFinite(numeric) ? numeric + delta : value;
+    }
     return shifted;
   }
 

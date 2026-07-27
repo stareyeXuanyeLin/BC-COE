@@ -82,7 +82,11 @@
   function pendingRequestFor(memberNumber) { return remoteStore.pendingRequests.get(remotePeerKey(memberNumber)) || null; }
 
   function setPendingRequest(memberNumber, request) {
-    remoteStore.pendingRequests.set(remotePeerKey(memberNumber), { ...request, createdAt: remoteNow(), retries: request.retries || 0, generation: remoteStore.roomGeneration });
+    const key = remotePeerKey(memberNumber);
+    const previous = remoteStore.pendingRequests.get(key);
+    const identityChanged = previous && (previous.session !== request.session || previous.revision !== request.revision || previous.hash !== request.hash);
+    if (identityChanged) remoteStore.assemblies.delete(key);
+    remoteStore.pendingRequests.set(key, { ...request, createdAt: remoteNow(), retries: request.retries || 0, generation: remoteStore.roomGeneration });
   }
 
   function clearPendingRequest(memberNumber, requestId = null) {

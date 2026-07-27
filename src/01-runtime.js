@@ -1,5 +1,5 @@
   const MOD_NAME = "CustomOutfitEditor";
-  const VERSION = "1.8.1";
+  const VERSION = "1.8.2";
   console.info(`[${MOD_NAME}] userscript injected`, location.href);
   const SETTINGS_KEY = "CustomOutfitEditor";
   const STORAGE_KEY = "BC.CustomOutfitEditor.v1";
@@ -35,6 +35,8 @@
   let previewPoseMapping = null;
   let editorAppearanceSnapshot = null;
   let editorPoseSnapshot = null;
+  let glTransformHookTarget = null;
+  let glTransformHookWatch = 0;
   let layerNameCache = null;
   let layerNameCachePromise = null;
   let colorPickerSession = null;

@@ -171,18 +171,24 @@
 
   function transformTargetLabel() {
     if (!transformEditTarget) return "未选择变换对象";
-    if (transformEditTarget.kind === "overall") return "整体服装";
+    if (transformEditTarget.kind === "material") {
+      const material = editing?.materials?.find(item => item.id === transformEditTarget.materialId);
+      return material ? `${material.label || material.sourceAsset} · 素材整体` : "素材整体";
+    }
     const layer = transformEditTarget.layer;
     return layer ? `${layer.sourceAsset || "素材"} · ${layer.layerLabel || layer.sourceLayer || "图层"}` : "当前图层";
   }
 
   function setTransformTarget(target) {
-    if (transformPointer && (!target || target.kind !== transformEditTarget?.kind || target.index !== transformEditTarget?.index)) return;
+    const sameTarget = transformEditTarget && target && transformEditTarget.kind === target.kind &&
+      (target.kind === "material" ? transformEditTarget.materialId === target.materialId : transformEditTarget.index === target.index);
+    if (transformPointer && !sameTarget) return;
     if (!target) {
       transformEditTarget = null;
       transformPointer = null;
-    } else if (target.kind === "overall") {
-      transformEditTarget = { kind: "overall" };
+    } else if (target.kind === "material") {
+      const material = target.material || editing?.materials?.find(item => item.id === target.materialId);
+      transformEditTarget = material ? { kind: "material", materialId: material.id, material } : null;
     } else {
       const index = Number.isInteger(target.index) ? target.index : editing?.layers?.indexOf(target.layer);
       transformEditTarget = { kind: "layer", index: index >= 0 ? index : 0, layer: editing?.layers?.[index] || target.layer };
@@ -196,10 +202,27 @@
     else object[key] = value;
   }
 
-  function resetOverallTransform() {
-    if (!editing) return;
-    for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY"]) delete editing[key];
-    transformEditTarget = { kind: "overall" };
+  function applyOverallTransformField(materialId, field, rawValue) {
+    const material = editing?.materials?.find(item => item.id === materialId);
+    if (!material || !Number.isFinite(rawValue)) return false;
+    let value = rawValue;
+    if (field === "rotation") {
+      value = clamp(value, -180, 180) * Math.PI / 180;
+      setOptionalTransformValue(material, "overallRotation", value, 0);
+    } else if (field === "scale") {
+      value = clamp(value, 0.25, 3);
+      setOptionalTransformValue(material, "overallScale", value, 1);
+    } else if (field === "offsetX" || field === "offsetY") {
+      value = clamp(value, -1200, 1200);
+      setOptionalTransformValue(material, `overall${field[0].toUpperCase()}${field.slice(1)}`, value, 0);
+    } else return false;
+    return true;
+  }
+
+  function resetMaterialOverallTransform(material) {
+    if (!material) return;
+    for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY"]) delete material[key];
+    transformEditTarget = { kind: "material", materialId: material.id, material };
     refreshPreviewLoop();
     const host = document.querySelector(`#${ROOT_ID} .coe-editor-tools`);
     if (host) renderEditorTools(host);
@@ -212,8 +235,9 @@
       event.preventDefault();
       event.stopPropagation();
       const layer = transformEditTarget.kind === "layer" ? editing.layers[transformEditTarget.index] : null;
-      const overall = transformEditTarget.kind === "overall" ? resolveOverallTransform(editing, globalThis.Player) : null;
-      transformPointer = { kind, startX: event.clientX, startY: event.clientY, layer,
+      const material = transformEditTarget.kind === "material" ? editing.materials.find(item => item.id === transformEditTarget.materialId) : null;
+      const overall = material ? resolveOverallTransform(editing, globalThis.Player, material) : null;
+      transformPointer = { kind, startX: event.clientX, startY: event.clientY, layer, material,
         rotation: layer?.rotation || 0, scale: layer?.scale || 1, overallRotation: overall?.rotation || 0, overallScale: overall?.scale || 1 };
       const move = moveEvent => {
         if (!transformPointer) return;
@@ -223,11 +247,11 @@
         if (state.kind === "rotate") {
           const value = state.layer ? state.rotation + dx * Math.PI / 180 : state.overallRotation + dx * Math.PI / 180;
           if (state.layer) setOptionalTransformValue(state.layer, "rotation", clamp(value, -Math.PI, Math.PI), 0);
-          else setOptionalTransformValue(editing, "overallRotation", clamp(value, -Math.PI, Math.PI), 0);
+          else if (state.material) setOptionalTransformValue(state.material, "overallRotation", clamp(value, -Math.PI, Math.PI), 0);
         } else {
           const value = clamp((state.layer ? state.scale : state.overallScale) * Math.max(0.1, 1 - dy / 120), 0.25, 3);
           if (state.layer) setOptionalTransformValue(state.layer, "scale", value, 1);
-          else setOptionalTransformValue(editing, "overallScale", value, 1);
+          else if (state.material) setOptionalTransformValue(state.material, "overallScale", value, 1);
         }
         refreshPreviewLoop();
       };
@@ -246,35 +270,42 @@
   function renderTransformEditor(content) {
     const host = content.querySelector("[data-transform-editor]");
     if (!host) return;
-    const selectedIndex = transformEditTarget?.kind === "layer" ? transformEditTarget.index : "overall";
-    const options = ['<option value="overall">整体服装整体</option>'].concat((editing?.layers || []).map((layer, index) => {
+    const selectedIndex = transformEditTarget?.kind === "layer"
+      ? `layer:${transformEditTarget.index}`
+      : transformEditTarget?.kind === "material"
+        ? `material:${editing?.materials?.findIndex(item => item.id === transformEditTarget.materialId) ?? -1}` : "";
+    const materialOptions = (editing?.materials || []).map((material, index) => `<option value="material:${index}">${escapeHTML(`${material.label || material.sourceAsset} · 素材整体`)}</option>`);
+    const layerOptions = (editing?.layers || []).map((layer, index) => {
       const label = layer.layerLabel || layer.sourceLayer || `图层 #${index + 1}`;
-      return `<option value="${index}">${escapeHTML(`${layer.sourceAsset || "素材"} · ${label}`)}</option>`;
-    })).join("");
+      return `<option value="layer:${index}">${escapeHTML(`${layer.sourceAsset || "素材"} · ${label}`)}</option>`;
+    });
+    const options = materialOptions.concat(layerOptions).join("");
     host.innerHTML = `<div class="coe-transform-head"><div><strong>变换编辑</strong><span class="coe-muted">${escapeHTML(transformTargetLabel())}</span></div><div class="coe-actions"><select data-transform-target>${options}</select>${transformEditTarget ? '<button type="button" class="coe-btn" data-transform-done>完成</button>' : ''}</div></div><p class="coe-hint">旋转和缩放使用固定默认中心；未激活的图层不会显示变换控件。</p>${transformEditTarget ? '<div class="coe-transform-pad"><button type="button" data-transform-handle="rotate">↻ 旋转</button><button type="button" data-transform-handle="scale">⤢ 缩放</button></div>' : ''}`;
     const select = host.querySelector("[data-transform-target]");
     select.value = String(selectedIndex);
     select.addEventListener("change", () => {
-      if (select.value === "overall") setTransformTarget({ kind: "overall" });
-      else setTransformTarget({ kind: "layer", index: Number(select.value) });
+      const [kind, rawIndex] = select.value.split(":");
+      if (kind === "material") setTransformTarget({ kind: "material", material: editing?.materials?.[Number(rawIndex)] });
+      else setTransformTarget({ kind: "layer", index: Number(rawIndex) });
     });
     host.querySelector("[data-transform-done]")?.addEventListener("click", () => setTransformTarget(null));
     bindTransformHandle(host.querySelector('[data-transform-handle="rotate"]'), "rotate");
     bindTransformHandle(host.querySelector('[data-transform-handle="scale"]'), "scale");
     if (!transformEditTarget) return;
-    if (transformEditTarget.kind === "overall") {
-      const overall = resolveOverallTransform(editing, globalThis.Player);
-      host.insertAdjacentHTML("beforeend", `<div class="coe-transform-fields"><label>旋转<input type="number" step="1" data-overall-field="rotation" value="${Math.round(overall.rotation * 180 / Math.PI * 100) / 100}">°</label><label>缩放<input type="number" step="0.05" min="0.25" max="3" data-overall-field="scale" value="${overall.scale}"></label><label>偏移 X<input type="number" step="1" data-overall-field="offsetX" value="${overall.offsetX}"></label><label>偏移 Y<input type="number" step="1" data-overall-field="offsetY" value="${overall.offsetY}"></label></div><div class="coe-actions"><button type="button" class="coe-btn" data-reset-overall>重置整体服装变换</button></div>`);
+    if (transformEditTarget.kind === "material") {
+      const material = editing.materials.find(item => item.id === transformEditTarget.materialId);
+      transformEditTarget.material = material;
+      if (!material) return;
+      const overall = resolveOverallTransform(editing, globalThis.Player, material);
+      host.insertAdjacentHTML("beforeend", `<div class="coe-transform-fields"><label>旋转<input type="number" step="1" data-overall-field="rotation" value="${Math.round(overall.rotation * 180 / Math.PI * 100) / 100}">°</label><label>缩放<input type="number" step="0.05" min="0.25" max="3" data-overall-field="scale" value="${overall.scale}"></label><label>偏移 X<input type="number" step="1" data-overall-field="offsetX" value="${overall.offsetX}"></label><label>偏移 Y<input type="number" step="1" data-overall-field="offsetY" value="${overall.offsetY}"></label></div><div class="coe-actions"><button type="button" class="coe-btn" data-reset-overall>重置素材整体变换</button></div>`);
+      const materialId = material.id;
       host.querySelectorAll("[data-overall-field]").forEach(input => input.addEventListener("input", () => {
         const field = input.dataset.overallField;
-        let value = Number(input.value);
-        if (!Number.isFinite(value)) return;
-        if (field === "rotation") { value = clamp(value, -180, 180) * Math.PI / 180; setOptionalTransformValue(editing, "overallRotation", value, 0); }
-        else if (field === "scale") { value = clamp(value, 0.25, 3); setOptionalTransformValue(editing, "overallScale", value, 1); }
-        else if (field === "offsetX" || field === "offsetY") { value = clamp(value, -1200, 1200); setOptionalTransformValue(editing, `overall${field[0].toUpperCase()}${field.slice(1)}`, value, 0); }
+        const value = Number(input.value);
+        if (!applyOverallTransformField(materialId, field, value)) return;
         refreshPreviewLoop();
       }));
-      host.querySelector("[data-reset-overall]")?.addEventListener("click", resetOverallTransform);
+      host.querySelector("[data-reset-overall]")?.addEventListener("click", () => resetMaterialOverallTransform(material));
     } else {
       const layer = editing.layers[transformEditTarget.index];
       transformEditTarget.layer = layer;
@@ -353,7 +384,7 @@
     const overallLabel = uniform ? colors[0] : "多种颜色";
     group.innerHTML = `<div class="coe-material-editor-head"><button class="coe-collapse" type="button" data-collapse>${material.collapsed ? "▶" : "▼"}</button><div class="coe-material-identity"><strong>${escapeHTML(material.label || asset?.Description || material.sourceAsset)}</strong><span class="coe-muted">${escapeHTML(material.sourceGroup)} · ${layers.length} 层</span></div><label class="coe-overall-color">整体颜色<button type="button" class="coe-color-choice" data-overall-color title="使用游戏原版颜色选择器统一修改所有可着色颜色槽"><span class="coe-color-swatch"></span><code>${escapeHTML(overallLabel)}</code></button></label><button class="coe-btn" data-edit-overall>调整整体变换</button><button class="coe-btn" data-hide-material>${material.hidden ? "显示" : "隐藏"}</button><button class="coe-btn" data-reset-material>整件默认</button><button class="coe-btn coe-danger" data-remove-material>移除素材</button></div><div class="coe-material-editor-layers"></div>`;
     updateColorChoice(group.querySelector("[data-overall-color]"), overallColor, defaultHex, overallLabel);
-    group.querySelector("[data-edit-overall]").addEventListener("click", () => setTransformTarget({ kind: "overall" }));
+    group.querySelector("[data-edit-overall]").addEventListener("click", () => setTransformTarget({ kind: "material", material }));
     group.querySelector("[data-collapse]").addEventListener("click", () => {
       material.collapsed = !material.collapsed;
       renderLayerList(list);
@@ -389,6 +420,7 @@
         layer.rotation = layer.defaultRotation;
         layer.scale = layer.defaultScale;
       });
+      for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY"]) delete material[key];
       refreshPreviewLoop();
       renderLayerList(list);
     });
@@ -558,7 +590,7 @@
         sourceGroup: asset.Group.Name,
         sourceAsset: asset.Name,
         label: asset.Description || asset.Name,
-        colors: Array.isArray(sourceColor) ? sourceColor : asset.DefaultColor?.map(() => sourceColor),
+        colors: Array.isArray(sourceColor) ? sourceColor : (asset.DefaultColor?.map(() => sourceColor) ?? []),
         defaultColors: asset.DefaultColor,
         sourceColor,
         sourceProperty: sanitizeSourceProperty(worn?.Property),
@@ -581,18 +613,29 @@
 
   function saveEditing() {
     if (!ensureWardrobeWritable()) return;
-    editing = normalizeComposition(editing);
-    if (!editing.name.trim()) editing.name = "未命名方案";
-    const existingIndex = editingId ? wardrobe.schemes.findIndex(scheme => scheme.id === editingId) : -1;
-    const entry = { id: editingId || uid(), composition: cloneJSON(editing) };
-    if (existingIndex >= 0) wardrobe.schemes[existingIndex] = entry;
-    else {
-      if (wardrobe.schemes.length >= MAX_SCHEMES) { toast(`衣柜最多保存 ${MAX_SCHEMES} 套方案`, "warn"); return; }
-      wardrobe.schemes.unshift(entry);
-      editingId = entry.id;
+    const previousWardrobe = cloneJSON(wardrobe);
+    const previousEditing = cloneJSON(editing);
+    const previousEditingId = editingId;
+    try {
+      editing = normalizeComposition(editing);
+      if (!editing.name.trim()) editing.name = "未命名方案";
+      const existingIndex = editingId ? wardrobe.schemes.findIndex(scheme => scheme.id === editingId) : -1;
+      const entry = { id: editingId || uid(), composition: cloneJSON(editing) };
+      if (existingIndex >= 0) wardrobe.schemes[existingIndex] = entry;
+      else {
+        if (wardrobe.schemes.length >= MAX_SCHEMES) { toast(`衣柜最多保存 ${MAX_SCHEMES} 套方案`, "warn"); return; }
+        wardrobe.schemes.unshift(entry);
+        editingId = entry.id;
+      }
+      wardrobe.equippedIds = [...new Set([...(wardrobe.equippedIds || []), entry.id])];
+      persistWardrobe();
+    } catch (error) {
+      wardrobe = previousWardrobe;
+      editing = previousEditing;
+      editingId = previousEditingId;
+      toast(`保存失败: ${error?.message || error}`, "error");
+      return;
     }
-    wardrobe.equippedIds = [...new Set([...(wardrobe.equippedIds || []), entry.id])];
-    persistWardrobe();
     restoreEditorAppearance();
     syncEquippedSchemes();
     toast(`已保存「${editing.name}」并在本地启用`);

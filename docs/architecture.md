@@ -14,7 +14,7 @@
 
 ## 正式 Appearance 边界
 
-COE Mirror 的当前架构只有三部分：本地衣柜、`COE_RVS/1` Remote Snapshot 和绘制阶段 Synthetic Rendering。运行时不创建或穿戴 `CustomOutfit` 正式服装项目，不读取 `CustomComposition`，也不安装旧容器入站过滤 Hook。
+COE Mirror 的当前架构只有三部分：本地衣柜、`COE_RVS/3` Remote Snapshot 和绘制阶段 Synthetic Rendering。运行时不创建或穿戴 `CustomOutfit` 正式服装项目，不读取 `CustomComposition`，也不安装旧容器入站过滤 Hook。
 
 `ServerAppearanceBundle` Hook 只承担一项职责：过滤带 `__coeMaterialId` 的临时 Synthetic Item。它不会改写或筛除其它正式服装项目。初始化在衣柜读取完成后只同步本地启用方案、初始化 Remote Controller 并暴露 API，不执行 Appearance 迁移或服务器/聊天室外观同步。
 
@@ -22,7 +22,7 @@ COE Mirror 的当前架构只有三部分：本地衣柜、`COE_RVS/1` Remote Sn
 
 ```text
 activeComposition
-  → resolveOverallTransform（整体中心与整体变换，默认取最大可见内容图层）
+  → resolveOverallTransform（逐素材中心与素材整体变换，默认取该素材最大可见内容图层）
   → buildLocalRemoteSnapshot（只取可见静态视觉）
   → strict canonical → async SHA-256
   → STATE → REQUEST → 定向 CHUNK
@@ -35,7 +35,7 @@ Hidden Content
   → Store<MemberNumber, validated snapshot>
   → CharacterRefresh(character, false, false)
 
-变换数据分为两个层级：图层保存 `rotation/scale/offsetX/offsetY`，方案保存 `overallRotation/overallScale/overallOffsetX/overallOffsetY`。GL 绘制按 `整体 × 单图层 × 原始图片` 组合，图层变换优先围绕纹理 Alpha 有效内容包围盒中心，扫描未完成或失败时回退到纹理中点，整体变换使用最大可见图层的自动中心；编辑器只提供旋转和缩放控件。
+变换数据分为两个层级：图层保存 `rotation/scale/offsetX/offsetY`，material 保存 `overallRotation/overallScale/overallOffsetX/overallOffsetY`。素材整体变换只作用于同一 source Asset 的全部图片层，不会旋转整个自定义方案。GL 绘制按 `素材整体 × 单图层 × 原始图片` 组合，图层变换优先围绕纹理 Alpha 有效内容包围盒中心，扫描未完成或失败时回退到纹理中点，素材整体变换使用该 material 最大可见图层的自动中心；编辑器按素材提供整体旋转、缩放和偏移控件。
 ```
 
 网络对象不会进入 `normalizeComposition()`；AssetGet 只发生在 validated snapshot 已进入 Store 后的绘制解析阶段。编辑器重绘使用非破坏性的字段规范化，素材/图层身份过滤只在衣柜加载、导入和持久化边界执行，避免临时解析失败时从正在编辑的对象中静默删层。

@@ -21,15 +21,18 @@
   function recordMaterialSkip(material, analysis, stage, reason) {
     const entry = { materialId: material?.id || null, group: material?.sourceGroup || null, asset: material?.sourceAsset || null, provider: analysis?.provider || null, providerVersion: analysis?.providerVersion || null, stage, reason: String(reason?.message || reason) };
     runtimeMaterialState.set(material?.id, { disabled: true, analysis: cloneJSON(analysis), reason: entry.reason });
-    diagnostics.skippedMaterials.push(entry);
-    diagnostics.skippedMaterials = diagnostics.skippedMaterials.slice(-100);
+    const duplicate = diagnostics.skippedMaterials.some(item =>
+      item?.materialId === entry.materialId && item?.stage === entry.stage && item?.reason === entry.reason);
+    if (!duplicate) {
+      diagnostics.skippedMaterials.push(entry);
+      diagnostics.skippedMaterials = diagnostics.skippedMaterials.slice(-100);
+    }
   }
 
   function buildLocalSyntheticItems(character) {
     const rawComposition = getComposition(character);
     if (!rawComposition || !isLocalPlayer(character)) return [];
     const composition = normalizeComposition(rawComposition);
-    const overall = resolveOverallTransform(composition, character);
     const materialMap = new Map(composition.materials.map(material => [material.id, material]));
     const groupedRefs = new Map();
     for (let layerIndex = 0; layerIndex < composition.layers.length; layerIndex++) {
@@ -51,10 +54,26 @@
       try {
         sourceAsset = AssetGet(character.AssetFamily || "Female3DCG", material.sourceGroup, material.sourceAsset);
         if (!sourceAsset) throw new Error("source-asset-missing");
-        if ((character.Appearance || []).some(item => item?.Asset === sourceAsset)) throw new Error("formal-item-conflict");
+        const formalConflict = (character.Appearance || []).some(item => item?.Asset === sourceAsset);
+        // During editor preview a removable formal appearance is replaced by the
+        // synthetic static layers in CommonDrawAppearanceBuild. Protected groups
+        // still fail closed to avoid drawing two competing copies.
+        if (formalConflict && !(uiMode === "editor" && isEditorRemovableAsset(sourceAsset))) throw new Error("formal-item-conflict");
         // Capability analysis is diagnostic only. Every loaded asset is projected to
         // inert static image layers; unsupported dynamic behavior is not invoked.
         analysis = analyzeAssetCached(sourceAsset);
+        const overall = resolveOverallTransform(composition, character, material);
+        pruneOverallGeometry(character, material.id, sourceAsset, refs);
+        const runtimeCenter = cachedOverallCenter(character, material.id);
+        if (runtimeCenter) {
+          overall.centerX = runtimeCenter.x;
+          overall.centerY = runtimeCenter.y;
+        } else {
+          // Do not visibly rotate/scale around the legacy 100x100 metadata
+          // fallback while the real texture geometry is still being learned.
+          overall.rotation = 0;
+          overall.scale = 1;
+        }
         const layerGroups = buildStaticSynthetic({ character, material, refs, asset: sourceAsset, analysis, overall });
         for (let sourceOrder = 0; sourceOrder < layerGroups.length; sourceOrder++) {
           const group = layerGroups[sourceOrder];
@@ -75,6 +94,105 @@
   const CONTENT_SCAN_MAX_EDGE = 512;
   const textureContentPivotCache = new Map();
   let contentPivotRefreshScheduled = false;
+
+  // Asset metadata in BC R130 does not contain rendered texture dimensions.
+  // Geometry discovered at GLDrawImage is therefore the authoritative source
+  // for the next frame's material pivot. The cache is kept per character so
+  // identical materials on different characters cannot contaminate one another.
+  const overallGeometryCache = new WeakMap();
+
+  function cacheOverallLayerGeometry(options, dstX, dstY, offsetX, texW, texH, canvasHeight, url = null) {
+    const character = options?.__coeGeometryCharacter;
+    const materialId = options?.__coeGeometryMaterialId;
+    const layerKey = options?.__coeGeometryLayerKey;
+    if (!character || materialId == null || layerKey == null || options?.__coeGeometryIsBlink === true ||
+      !(texW > 1) || !(texH > 1)) return;
+    const materialMap = overallGeometryCache.get(character) || new Map();
+    const layerMap = materialMap.get(materialId) || new Map();
+    const off = Number.isFinite(offsetX) ? offsetX : 0;
+    const mirror = options.Mirror === true;
+    const invert = options.Invert === true;
+    let drawX = mirror ? 500 - dstX : dstX;
+    drawX += off;
+    let drawY = invert ? canvasHeight - dstY + 550 : dstY;
+    // Store the normal (non-blink) material geometry. Blink receives the same
+    // pivot plus offsetX at consumption time, so retaining the blink offset here
+    // would apply it twice.
+    drawX -= off;
+    const signedW = (mirror ? -1 : 1) * texW;
+    const signedH = (invert ? -1 : 1) * texH;
+    const contentBounds = url ? resolveTextureContentBounds(url) : null;
+    const contentState = url ? textureContentPivotCache.get(url) : null;
+    const readyForOverall = !url || contentState?.status === "ready" || contentState?.status === "failed";
+    const normalized = contentBounds || { left: 0, top: 0, right: 1, bottom: 1 };
+    const corners = [
+      { x: drawX + normalized.left * signedW, y: drawY + normalized.top * signedH },
+      { x: drawX + normalized.right * signedW, y: drawY + normalized.top * signedH },
+      { x: drawX + normalized.right * signedW, y: drawY + normalized.bottom * signedH },
+      { x: drawX + normalized.left * signedW, y: drawY + normalized.bottom * signedH },
+    ];
+    const localRotation = typeof options.Rotation === "number" ? options.Rotation : 0;
+    const localScale = clamp(typeof options.Scale === "number" ? options.Scale : 1, 0.25, 3);
+    if (localRotation || Math.abs(localScale - 1) > 0.001) {
+      const pivot = contentState?.pivot || { x: 0.5, y: 0.5 };
+      const pivotX = drawX + pivot.x * signedW;
+      const pivotY = drawY + pivot.y * signedH;
+      const cos = Math.cos(localRotation);
+      const sin = Math.sin(localRotation);
+      for (const corner of corners) {
+        const dx = corner.x - pivotX;
+        const dy = corner.y - pivotY;
+        corner.x = pivotX + localScale * (cos * dx - sin * dy);
+        corner.y = pivotY + localScale * (sin * dx + cos * dy);
+      }
+    }
+    const rect = {
+      left: Math.min(...corners.map(point => point.x)),
+      top: Math.min(...corners.map(point => point.y)),
+      right: Math.max(...corners.map(point => point.x)),
+      bottom: Math.max(...corners.map(point => point.y)),
+      readyForOverall,
+    };
+    const previous = layerMap.get(layerKey);
+    const changed = !previous || previous.left !== rect.left || previous.top !== rect.top ||
+      previous.right !== rect.right || previous.bottom !== rect.bottom ||
+      previous.readyForOverall !== rect.readyForOverall;
+    layerMap.set(layerKey, rect);
+    materialMap.set(materialId, layerMap);
+    overallGeometryCache.set(character, materialMap);
+    if (changed) scheduleContentPivotRefresh();
+  }
+
+  function pruneOverallGeometry(character, materialId, asset, refs) {
+    const materialMap = overallGeometryCache.get(character);
+    const layerMap = materialMap?.get(materialId);
+    if (!layerMap) return;
+    const drawable = refs.map(ref => ({ ref, sourceLayer: resolveSourceLayer(asset, ref) }))
+      .filter(entry => isDrawableLayer(entry.sourceLayer))
+      .sort((a, b) => (a.ref.sourceLayerIndex ?? asset.Layer.indexOf(a.sourceLayer)) -
+        (b.ref.sourceLayerIndex ?? asset.Layer.indexOf(b.sourceLayer)));
+    const validKeys = new Set(drawable.map((entry, sourceOrder) =>
+      `${entry.ref.sourceLayerIndex ?? asset.Layer.indexOf(entry.sourceLayer)}:${sourceOrder}`));
+    for (const key of layerMap.keys()) if (!validKeys.has(key)) layerMap.delete(key);
+    if (!layerMap.size) materialMap.delete(materialId);
+  }
+
+  function cachedOverallCenter(character, materialId) {
+    const layerMap = overallGeometryCache.get(character)?.get(materialId);
+    if (!layerMap?.size) return null;
+    let bounds = null;
+    for (const rect of layerMap.values()) {
+      if (rect.readyForOverall === false) return null;
+      if (!bounds) bounds = { ...rect };
+      else {
+        bounds.left = Math.min(bounds.left, rect.left);
+        bounds.top = Math.min(bounds.top, rect.top);
+        bounds.right = Math.max(bounds.right, rect.right);
+        bounds.bottom = Math.max(bounds.bottom, rect.bottom);
+      }
+    }
+    return bounds ? { x: (bounds.left + bounds.right) / 2, y: (bounds.top + bounds.bottom) / 2 } : null;
+  }
 
   // Alpha 边界只依赖纹理本身，与颜色、Mirror、Invert 和图层变换无关。
   // 因此扫描结果按 URL 缓存，不能在每帧读取像素。
@@ -100,13 +218,23 @@
     return { minX, minY, maxX, maxY, count };
   }
 
+  function contentBoundsFromBounds(bounds, width, height) {
+    if (!bounds || !(Number(width) > 0) || !(Number(height) > 0)) {
+      return { left: 0, top: 0, right: 1, bottom: 1 };
+    }
+    return {
+      left: clamp(Number(bounds.minX) / Number(width), 0, 1),
+      top: clamp(Number(bounds.minY) / Number(height), 0, 1),
+      right: clamp((Number(bounds.maxX) + 1) / Number(width), 0, 1),
+      bottom: clamp((Number(bounds.maxY) + 1) / Number(height), 0, 1),
+    };
+  }
+
   function contentPivotFromBounds(bounds, width, height) {
     if (!bounds || !(Number(width) > 0) || !(Number(height) > 0)) return { x: 0.5, y: 0.5 };
-    const x = (Number(bounds.minX) + Number(bounds.maxX) + 1) / 2 / Number(width);
-    const y = (Number(bounds.minY) + Number(bounds.maxY) + 1) / 2 / Number(height);
     return {
-      x: Number.isFinite(x) ? clamp(x, 0, 1) : 0.5,
-      y: Number.isFinite(y) ? clamp(y, 0, 1) : 0.5,
+      x: (Number(bounds.minX) + Number(bounds.maxX) + 1) / 2 / Number(width),
+      y: (Number(bounds.minY) + Number(bounds.maxY) + 1) / 2 / Number(height),
     };
   }
 
@@ -129,10 +257,10 @@
     else if (typeof globalThis.setTimeout === "function") globalThis.setTimeout(refresh, 0);
   }
 
-  function finishTextureContentPivot(url, pivot) {
+  function finishTextureContentPivot(url, pivot, bounds) {
     const current = textureContentPivotCache.get(url);
     if (!current || current.status !== "pending") return;
-    textureContentPivotCache.set(url, { status: "ready", pivot });
+    textureContentPivotCache.set(url, { status: "ready", pivot, bounds });
     scheduleContentPivotRefresh();
   }
 
@@ -175,7 +303,8 @@
           context.drawImage(image, 0, 0, width, height);
           const imageData = context.getImageData(0, 0, width, height);
           const bounds = scanAlphaBounds(imageData?.data, width, height);
-          finishTextureContentPivot(url, bounds ? contentPivotFromBounds(bounds, width, height) : { x: 0.5, y: 0.5 });
+          const normalizedBounds = contentBoundsFromBounds(bounds, width, height);
+          finishTextureContentPivot(url, contentPivotFromBounds(bounds, width, height), normalizedBounds);
         } catch (_) {
           const pending = textureContentPivotCache.get(url);
           if (pending?.status === "pending") textureContentPivotCache.set(url, { status: "failed" });
@@ -205,6 +334,14 @@
     return null;
   }
 
+  function resolveTextureContentBounds(url) {
+    if (!url) return null;
+    const cached = textureContentPivotCache.get(url);
+    if (cached?.status === "ready" && cached.bounds) return cached.bounds;
+    if (!cached) scanTextureContentPivot(url);
+    return null;
+  }
+
   // 从纹理 URL 解析出资产和图层，获取纹理原始宽高
   function resolveTextureDimensions(url) {
     try {
@@ -229,6 +366,21 @@
       if (!layer) return null;
       return { w: layer.DrawingWidth || asset.Width || 100, h: layer.DrawingHeight || asset.Height || 100 };
     } catch (_) { return null; }
+  }
+
+  // Apply one uniform 2D transform around a shared screen-space pivot.
+  // Keeping this as a pure helper makes the invariant explicit: the pivot
+  // itself may only receive the requested overall offset, never rotation or
+  // scale drift.
+  function transformPointAroundOverallPivot(x, y, pivotX, pivotY, rotation, scale, offsetX = 0, offsetY = 0) {
+    const dx = x - pivotX;
+    const dy = y - pivotY;
+    const cos = Math.cos(rotation || 0);
+    const sin = Math.sin(rotation || 0);
+    return {
+      x: pivotX + offsetX + scale * (cos * dx - sin * dy),
+      y: pivotY + offsetY + scale * (sin * dx + cos * dy),
+    };
   }
 
   // 合成图层的变换参数渲染穿线
@@ -260,11 +412,24 @@
     } catch (_) { /* ExtendedItemGetDrawingOptions hook 不可用；Mirror/Invert 以默认行为 fallback */ }
 
     // --- GLDrawImage 包装：加入旋转和缩放的矩阵变换 ---
-    try {
-      if (typeof GLDrawImage !== "function" || typeof m4 !== "object") return;
-      var _gldrawOriginal = GLDrawImage;
-      GLDrawImage = function coeGLDrawImage(url, gl, dstX, dstY, options, offsetX) {
+    // BC/其它 Mod 可能在 COE 初始化前后替换 GLDrawImage，因此这里不是
+    // 一次性安装，而是由同一个闭包重复检查并包住当前函数。
+    const installGLDrawImageTransformHook = () => {
+      try {
+        const currentGLDrawImage = globalThis.GLDrawImage;
+        if (typeof currentGLDrawImage !== "function" || typeof globalThis.m4 !== "object" || typeof modApi?.hookFunction !== "function") return false;
+        if (currentGLDrawImage._coeTransformHooked === true) {
+          glTransformHookTarget = currentGLDrawImage;
+          return true;
+        }
+        if (glTransformHookTarget && glTransformHookTarget !== currentGLDrawImage) {
+          const message = "GLDrawImage 变换包装被覆盖，正在恢复";
+          if (!diagnostics.lastWarnings.includes(message)) diagnostics.lastWarnings.push(message);
+        }
+        const transformHook = function coeGLDrawImageHook(args, next) {
         try {
+          const [url, gl, dstX, dstY, options, offsetX] = args;
+          const drawOriginal = () => next(args);
           var opts = options || {};
         var rotation = typeof opts.Rotation === "number" ? opts.Rotation : 0;
         var scale = typeof opts.Scale === "number" ? opts.Scale : 1;
@@ -275,7 +440,10 @@
         // 无变换时直接走原始函数，保持零开销。
         if (!rotation && Math.abs(scale - 1) <= 0.001 && !overallRotation && Math.abs(overallScale - 1) <= 0.001 &&
           !overallOffsetX && !overallOffsetY) {
-          return _gldrawOriginal.call(window, url, gl, dstX, dstY, options, offsetX);
+          const result = drawOriginal();
+          const textureInfo = typeof GLDrawLoadImage === "function" ? GLDrawLoadImage(gl, url) : null;
+          cacheOverallLayerGeometry(opts, dstX, dstY, offsetX, Number(textureInfo?.width), Number(textureInfo?.height), gl.canvas.height, url);
+          return result;
         }
 
         // --- 变换绘制 ---
@@ -285,7 +453,7 @@
         try {
           colorMaskSaved = gl.getParameter(gl.COLOR_WRITEMASK);
           gl.colorMask(false, false, false, false);
-          _gldrawOriginal.call(window, url, gl, dstX, dstY, options, offsetX);
+          drawOriginal();
         } finally {
           if (colorMaskSaved) gl.colorMask(colorMaskSaved[0], colorMaskSaved[1], colorMaskSaved[2], colorMaskSaved[3]);
         }
@@ -298,17 +466,20 @@
           : resolveTextureDimensions(url);
         if (!dim || !(dim.w > 0) || !(dim.h > 0)) {
           // 不能取得尺寸时必须恢复一次正常绘制，避免 colorMask 路径吞掉图层。
-          return _gldrawOriginal.call(window, url, gl, dstX, dstY, options, offsetX);
+          return drawOriginal();
         }
         var texW = dim.w, texH = dim.h;
+        cacheOverallLayerGeometry(opts, dstX, dstY, offsetX, texW, texH, gl.canvas.height, url);
         var uniformScale = clamp(scale, 0.25, 3.0);
         var groupScale = clamp(overallScale, 0.25, 3.0);
         var off = typeof offsetX === "number" ? offsetX : 0;
         var mirror = opts.Mirror === true;
         var invert = opts.Invert === true;
-        var drawX = dstX + off;
+        // Match BC's GLDrawImage order: Mirror changes the destination first,
+        // then the blink/draw offset is added in screen space.
+        var drawX = mirror ? 500 - dstX : dstX;
+        drawX += off;
         var drawY = dstY;
-        if (mirror) drawX = 500 - drawX;
         if (invert) drawY = gl.canvas.height - drawY + 550;
         var signedW = (mirror ? -1 : 1) * texW;
         var signedH = (invert ? -1 : 1) * texH;
@@ -319,35 +490,47 @@
         var localPivotY = contentPivot?.y ?? 0.5;
         var localCenterScreenX = drawX + localPivotX * signedW;
         var localCenterScreenY = drawY + localPivotY * signedH;
-        var overallCenterX = typeof opts.OverallCenterX === "number" ? opts.OverallCenterX : localCenterScreenX;
+        // The blink callback renders into the second 500px canvas half. Keep the
+        // shared material pivot in that same half; otherwise the blink image is
+        // transformed around the normal-image center and appears to jump.
+        var overallCenterX = typeof opts.OverallCenterX === "number"
+          ? opts.OverallCenterX + off : localCenterScreenX;
         var overallCenterY = typeof opts.OverallCenterY === "number" ? opts.OverallCenterY : localCenterScreenY;
 
         var program = gl.getParameter(gl.CURRENT_PROGRAM);
-        if (!program) return _gldrawOriginal.call(window, url, gl, dstX, dstY, options, offsetX);
+        if (!program) return drawOriginal();
 
         // 获取 u_matrix 位置。BC 的 GLDraw 在 program 上缓存了此位置，
         // 但用 gl.getUniformLocation 更健壮，不依赖内部实现。
         var uMatrix = program.u_matrix || gl.getUniformLocation(program, "u_matrix");
-        if (!uMatrix) return _gldrawOriginal.call(window, url, gl, dstX, dstY, options, offsetX);
+        if (!uMatrix) return drawOriginal();
 
+        // First transform the local image pivot as a point. The resulting point
+        // is then used as the sole translation anchor for the sprite matrix.
+        // This avoids relying on a long chain of nested screen-space translates
+        // and makes it impossible for local rotation/scale to move the shared
+        // material pivot accidentally.
+        const transformedLocalCenter = transformPointAroundOverallPivot(
+          localCenterScreenX,
+          localCenterScreenY,
+          overallCenterX,
+          overallCenterY,
+          overallRotation,
+          groupScale,
+          overallOffsetX,
+          overallOffsetY,
+        );
         var matrix = m4.orthographic(0, gl.canvas.width, gl.canvas.height, 0, -1, 1);
-        // 顶点仍是单位正方形，局部使用素材中点，整体使用自动计算位置，
-        // 再把纹理尺寸放在矩阵最右端。矩阵顺序表达：整体 × 局部 × 原图。
-        matrix = m4.translate(matrix, overallCenterX + overallOffsetX, overallCenterY + overallOffsetY, 0);
-        if (overallRotation) {
+        // Vertices remain a unit square. Local and overall uniform transforms can
+        // be combined into one rotation/scale around the transformed local pivot.
+        matrix = m4.translate(matrix, transformedLocalCenter.x, transformedLocalCenter.y, 0);
+        const combinedRotation = overallRotation + rotation;
+        if (combinedRotation) {
           matrix = typeof m4.zRotate === "function"
-            ? m4.zRotate(matrix, overallRotation)
-            : m4.multiply(matrix, m4.zRotation(overallRotation));
+            ? m4.zRotate(matrix, combinedRotation)
+            : m4.multiply(matrix, m4.zRotation(combinedRotation));
         }
-        matrix = m4.scale(matrix, groupScale, groupScale, 1);
-        matrix = m4.translate(matrix, -overallCenterX, -overallCenterY, 0);
-        matrix = m4.translate(matrix, localCenterScreenX, localCenterScreenY, 0);
-        if (rotation) {
-          matrix = typeof m4.zRotate === "function"
-            ? m4.zRotate(matrix, rotation)
-            : m4.multiply(matrix, m4.zRotation(rotation));
-        }
-        matrix = m4.scale(matrix, uniformScale, uniformScale, 1);
+        matrix = m4.scale(matrix, groupScale * uniformScale, groupScale * uniformScale, 1);
         matrix = m4.translate(matrix, -localCenterScreenX, -localCenterScreenY, 0);
         matrix = m4.translate(matrix, drawX, drawY, 0);
         matrix = m4.scale(matrix, signedW, signedH, 1);
@@ -356,11 +539,27 @@
         gl.drawArrays(gl.TRIANGLES, 0, 6);
         } catch (_coeTransformErr) {
           // 任何异常不传播到 BC 绘制循环，降级为原始绘制
-          try { _gldrawOriginal.call(window, url, gl, dstX, dstY, options, offsetX); } catch (_e2) {}
+          try { drawOriginal(); } catch (_e2) {}
         }
-      };
-      GLDrawImage._coeTransformWrapped = true;
-    } catch (_) { /* GLDrawImage 包装失败，Rotation/Scale 渲染不可用 */ }
+        };
+        modApi.hookFunction("GLDrawImage", 10, transformHook);
+        const installedTarget = globalThis.GLDrawImage;
+        if (typeof installedTarget === "function") {
+          installedTarget._coeTransformHooked = true;
+          installedTarget._coeTransformWrapped = true;
+          glTransformHookTarget = installedTarget;
+        } else glTransformHookTarget = currentGLDrawImage;
+        return true;
+      } catch (error) {
+        const message = `GLDrawImage 变换包装失败: ${error?.message || error}`;
+        if (!diagnostics.lastWarnings.includes(message)) diagnostics.lastWarnings.push(message);
+        return false;
+      }
+    };
+    installGLDrawImageTransformHook();
+    if (!glTransformHookWatch && typeof globalThis.setInterval === "function") {
+      glTransformHookWatch = globalThis.setInterval(installGLDrawImageTransformHook, 500);
+    }
   }
 
   // Backward-compatible internal alias used by the local editor tests/API.
@@ -393,18 +592,11 @@
       refsByMaterial.get(layer.m).push(remoteRef);
     }
     const groups = [];
-    const overall = resolveOverallTransform({
-      overallRotation: snapshot.or,
-      overallScale: snapshot.os,
-      overallOffsetX: snapshot.ox,
-      overallOffsetY: snapshot.oy,
-      layers: [...refsByMaterial.values()].flat(),
-    }, character);
     for (let materialOrder = 0; materialOrder < (snapshot.m || []).length; materialOrder++) {
       const compact = snapshot.m[materialOrder];
       const refs = refsByMaterial.get(materialOrder) || [];
       if (!refs.length) continue;
-      const material = { id: `remote:${memberNumber}:${materialOrder}`, sourceGroup: compact.g, sourceAsset: compact.a, colors: compact.c, sourceProperty: compact.p || {}, hidden: false };
+      const material = { id: `remote:${memberNumber}:${materialOrder}`, sourceGroup: compact.g, sourceAsset: compact.a, colors: compact.c, sourceProperty: compact.p || {}, overallRotation: compact.r, overallScale: compact.s, overallOffsetX: compact.x, overallOffsetY: compact.y, hidden: false };
       let analysis = null;
       try {
         const sourceAsset = AssetGet(character.AssetFamily || "Female3DCG", compact.g, compact.a);
@@ -418,6 +610,16 @@
           if (!isDrawableLayer(sourceLayer)) throw new Error("source-layer-not-drawable");
         }
         analysis = analyzeAssetCached(sourceAsset);
+        const overall = resolveOverallTransform({ layers: refs }, character, material);
+        pruneOverallGeometry(character, material.id, sourceAsset, refs);
+        const runtimeCenter = cachedOverallCenter(character, material.id);
+        if (runtimeCenter) {
+          overall.centerX = runtimeCenter.x;
+          overall.centerY = runtimeCenter.y;
+        } else {
+          overall.rotation = 0;
+          overall.scale = 1;
+        }
         const layerGroups = buildStaticSynthetic({ character, material, refs, asset: sourceAsset, analysis, overall });
         for (let sourceOrder = 0; sourceOrder < layerGroups.length; sourceOrder++) {
           const group = layerGroups[sourceOrder];
@@ -472,6 +674,7 @@
             __coeSyntheticLayer: {
               item: group.item, ref, sourceLayer: visualLayer,
               sourceLayerIndex: ref.sourceLayerIndex ?? group.item.Asset.Layer.indexOf(entry.sourceLayer),
+              materialId: group.material.id,
               materialOrder: group.materialOrder, sourceOrder: entry.sourceOrder, overall: group.overall,
             },
           });
@@ -547,7 +750,12 @@
       const originalCallbacks = args[1];
       let currentDrawLayer = null;
       try {
-        character.Appearance = groups.map(group => group.item).concat(originalAppearance || []);
+        const previewAssets = uiMode === "editor" && isLocalPlayer(character)
+          ? new Set(groups.map(group => group.item?.Asset?.__coeSourceAsset || group.item?.Asset?.Asset).filter(Boolean)) : null;
+        const renderableAppearance = previewAssets
+          ? (originalAppearance || []).filter(item => !(previewAssets.has(item?.Asset) && isEditorRemovableAsset(item?.Asset)))
+          : (originalAppearance || []);
+        character.Appearance = groups.map(group => group.item).concat(renderableAppearance);
         const drawLayers = (originalLayers || []).map(layer => {
           const marker = layer.__coeSyntheticLayer;
           if (!marker) return layer;
@@ -600,6 +808,13 @@
                 transformed.OverallCenterX = overall.centerX;
                 transformed.OverallCenterY = overall.centerY;
               }
+              // GLDrawImage is the first point where the actual texture size is
+              // known. Carry an internal identity through the callback so it can
+              // feed authoritative, untransformed geometry into the next frame.
+              transformed.__coeGeometryCharacter = character;
+              transformed.__coeGeometryMaterialId = marker.materialId;
+              transformed.__coeGeometryLayerKey = `${marker.sourceLayerIndex}:${marker.sourceOrder}`;
+              transformed.__coeGeometryIsBlink = name.includes("Blink");
               callbackArgs[3] = transformed;
               return callback.apply(this, callbackArgs);
             };

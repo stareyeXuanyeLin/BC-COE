@@ -18,9 +18,11 @@
       try { json = LZString.decompressFromUTF16(value.slice(3)); }
       catch (error) { return { status: "corrupt", raw: value, data: null, error: String(error?.message || error) }; }
       if (typeof json !== "string" || !json.trim()) return { status: "corrupt", raw: value, data: null, error: "lz-empty-result" };
+      if (utf8Bytes(json) > MAX_WARDROBE_BYTES) return { status: "corrupt", raw: value, data: null, error: "wardrobe-byte-budget" };
     } else if (value.startsWith("json:")) {
       json = value.slice(5);
       if (!json.trim()) return { status: "corrupt", raw: value, data: null, error: "json-empty" };
+      if (utf8Bytes(json) > MAX_WARDROBE_BYTES) return { status: "corrupt", raw: value, data: null, error: "wardrobe-byte-budget" };
     } else {
       return { status: "unsupported", raw: value, data: null, error: "unknown-prefix" };
     }

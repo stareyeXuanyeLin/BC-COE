@@ -1,50 +1,72 @@
-# Bondage Club - Custom Outfit Editor（重构分支）
+# Bondage Club - Custom Outfit Editor
 
-> **重构分支说明**：本分支为 `single-layer-transform-rebuild` 重构分支，包含图层复制、图层变换和素材整体变换功能。功能用于当前重构验证，不与旧 `main` 版本混用。
+Custom Outfit Editor 是独立的自定义服装编辑器，包含图层复制、图层变换、素材整体变换、服装格标签以及跨玩家远端视觉同步。项目开发过程中加入了对 Echo 的服装扩展插件的兼容；仓库目录和构建文件中的 `Echo`、`Echo Mirror` 是早期用于区分开发版本的历史名称，不表示插件基于或依赖 Echo。当前正式发布线路统一使用 `main` 分支。
 
-## 本分支新增功能
+## 功能
 
 ### 图层复制
-每个图层面板中新增 **复制** 按钮，点击后在当前图层后生成一份副本（带 `_copy` 后缀）。复制图层继承原图层的全部属性（位置、偏移、透明度、颜色），可独立调整。两个图层共用纹理缓存，不增加额外加载开销。
 
-### 旋转
-在素材变换区域中可调整旋转角度（−180° ~ 180°，步进 1°）。单图层旋转以纹理有效内容中心为优先锚点，可与镜像/翻转叠加使用。素材整体旋转作用于同一素材的全部图片层，不会把整个自定义服装方案一起旋转。
+每个图层面板均可复制当前图层。副本继承位置、偏移、透明度、颜色和变换参数，并可独立调整；共用纹理缓存，不重复加载图片。
 
-### 缩放
-支持等比缩放，范围 **0.25 ~ 3.0**，步进 0.05。图层和素材整体分别保存缩放参数，可先对单层微调，再对同一素材的全部图层统一缩放。
+### 图层与素材变换
 
-变换参数存储在图层字段和 material 字段中，不写入 `sourceProperty`：
-- 图层：`rotation` / `scale` / `offsetX` / `offsetY`
-- 素材整体：`overallRotation` / `overallScale` / `overallOffsetX` / `overallOffsetY`
+- 单图层支持旋转、等比缩放和偏移；
+- 素材整体变换作用于同一素材的全部图片层；
+- 单图层与素材整体变换共用各自的旋转/缩放中心语义；
+- 变换参数保存在 material 和 layer 字段中，不写入 `sourceProperty`。
 
-### 已知限制
-- 旋转与半透明（opacity < 1）组合时存在透明度叠加残影，建议在编辑器预览中避免同时使用
-- Canvas 2D 回退管线的旋转支持暂未实现（WebGL 不可用时极少触发该路径）
-- GLDrawImage 包装依赖 `window.GLDrawImage` 全局可达，少部分 BC 版本可能需要额外适配
+### 服装格标签
+
+启用方案时，插件会在对应原版服装格穿上透明的 `COECustomOutfit` 标签。标签属于正式 Appearance，用于参与 BC 原生穿脱互动；移除标签会隐藏该格对应的自定义服装，但不会关闭衣柜中的启用状态。
+
+### 跨玩家同步
+
+双方安装同一正式版本并分别开启共享与接收后，插件通过 `COE_RVS/4` Hidden 消息同步静态视觉快照。协议只传 Asset、图层、颜色和变换参数，不传图片；如果服装来自 BC 之外的素材扩展，双方还需要加载能够解析相同 Asset 与图层的对应扩展版本。
 
 ## 安装
 
-### 重构版加载器安装（推荐）
+### 加载器安装（推荐）
 
-[![Install Beta Loader](https://img.shields.io/badge/Tampermonkey-%E2%86%95%20%E5%AE%89%E8%A3%85%E6%B5%8B%E8%AF%95%E7%89%88-8B0000?labelColor=1c1c1c&logo=tampermonkey)](https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/single-layer-transform-rebuild/dist/CustomOutfitEditorEchoMirror.loader.user.js)
+[![Install Loader](https://img.shields.io/badge/Tampermonkey-%E2%86%95%20%E5%AE%89%E8%A3%85%E6%AD%A3%E5%BC%8F%E7%89%88-8B0000?labelColor=1c1c1c&logo=tampermonkey)](https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/main/dist/CustomOutfitEditorEchoMirror.loader.user.js)
 
-点击上方按钮安装重构版加载器。当前版本应与旧版分开验证，避免两个版本同时改写同一绘制链。
+加载器每次进入游戏时从 `main` 分支获取最新核心脚本。请停用或删除旧 COE、COE-Echo、测试版加载器和重构版加载器，避免多个版本同时注册绘制 Hook。
 
 ### 完整脚本安装
 
-将 `https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/single-layer-transform-rebuild/dist/CustomOutfitEditorEchoMirror.user.js` 拖拽到 Tampermonkey 管理面板。
+直接安装：
 
-## 与旧版的差异
+<https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/main/dist/CustomOutfitEditorEchoMirror.user.js>
 
-| 项目 | 旧版 | single-layer-transform-rebuild |
-|------|------|-------------------------------|
-| 图层复制 | ❌ | ✅ |
-| 单图层旋转/缩放 | ❌ | ✅ |
-| 素材整体旋转/缩放 | 整体方案语义 | ✅ 仅同一素材的全部图层 |
-| 协议版本 | 旧版本 | COE_RVS/3 |
+## 多人验证
 
-> `COE_RVS/3` 将素材整体变换放在 material 条目中。旧版收到重构版数据时会因前缀不匹配自动忽略。
+双方进入同一聊天室后，可在控制台执行：
+
+```js
+CustomOutfitEditor.status()
+```
+
+至少确认：
+
+```text
+remoteProtocol: "COE_RVS/4"
+sharingEnabled / receivingEnabled: 与各自设置一致
+```
+
+标签资产可通过以下命令确认：
+
+```js
+Asset.filter(asset => asset?.Name === "COECustomOutfit").map(asset => asset.Group?.Name)
+```
+
+安装或更新后应完整刷新游戏并重新进入聊天室，使在线 Appearance 按新的标签 Asset 注册表重新解析。
+
+## 已知限制
+
+- Canvas 2D 回退管线暂不支持旋转；
+- GLDrawImage 包装依赖 `window.GLDrawImage` 全局可达；
+- 接收端缺少对应 Asset、图层索引或图层名称不一致时，该素材会被跳过；
+- Remote Snapshot 不传输图片、动态绘制脚本、锁、活动及完整 ExtendedItem 语义。
 
 ## 数据安全
 
-重构版继续使用本地存储键（`BC.CustomOutfitEditor.v1`）。读取旧方案时，只有单素材方案的旧整体字段会迁移到该素材；多素材旧整体字段会被丢弃，避免继续把多个素材错误地绑定为一个整体。
+衣柜使用本地存储键 `BC.CustomOutfitEditor.v1`。远端只接收通过严格 schema、大小预算和 SHA-256 完整性校验的静态视觉快照。

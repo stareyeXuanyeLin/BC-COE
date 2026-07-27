@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Bondage Club - Custom Outfit Editor
 // @namespace    https://github.com/stareyeXuanyeLin/BC-COE
-// @version      1.0.0
-// @description  COE Echo Mirror 正式版，基于 Echo Mirror 的自定义服装编辑器。
+// @version      1.0.1
+// @description  Custom Outfit Editor 正式版，支持 Echo 的服装扩展等已加载素材。
 // @author       林宣夜 ＆ 佩菈
 // @match        https://www.bondageprojects.com/R*/*
 // @match        https://bondageprojects.com/R*/*
@@ -15,8 +15,8 @@
 // @match        http://localhost:*/*
 // @run-at       document-end
 // @grant        none
-// @downloadURL  https://cdn.jsdelivr.net/gh/stareyeXuanyeLin/BC-COE@single-layer-transform-rebuild/dist/CustomOutfitEditorEchoMirror.user.js
-// @updateURL    https://cdn.jsdelivr.net/gh/stareyeXuanyeLin/BC-COE@single-layer-transform-rebuild/dist/CustomOutfitEditorEchoMirror.user.js
+// @downloadURL  https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/main/dist/CustomOutfitEditorEchoMirror.user.js
+// @updateURL    https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/main/dist/CustomOutfitEditorEchoMirror.user.js
 // ==/UserScript==
 
 (() => {
@@ -25,7 +25,7 @@
 
 
   const MOD_NAME = "CustomOutfitEditor";
-  const VERSION = "1.9.0";
+  const VERSION = "1.0.1";
   console.info(`[${MOD_NAME}] userscript injected`, location.href);
   const SETTINGS_KEY = "CustomOutfitEditor";
   const STORAGE_KEY = "BC.CustomOutfitEditor.v1";
@@ -70,11 +70,14 @@
     lastWarnings: [],
   };
   let previewTimer = 0;
+  let characterRefreshScheduled = false;
+  let pendingCharacterRefreshes = new Map();
   let previewPoseMapping = null;
   let editorAppearanceSnapshot = null;
   let editorPoseSnapshot = null;
   let glTransformHookTarget = null;
   let glTransformHookWatch = 0;
+  let visualAssetProxyCache = new WeakMap();
   let layerNameCache = null;
   let layerNameCachePromise = null;
   let colorPickerSession = null;
@@ -612,6 +615,10 @@
       layers: normalized.layers.map(compactLayerForStorage),
     };
     if (normalized.recycle.length) compact.recycle = normalized.recycle.map(compactLayerForStorage);
+    for (const material of compact.materials) {
+      const refs = [...compact.layers, ...(compact.recycle || [])].filter(layer => layer.materialId === material.id);
+      if (utf8Bytes({ material, refs }) > MAX_MATERIAL_BYTES) throw new Error("material-byte-budget");
+    }
     if (utf8Bytes(compact) > MAX_SCHEME_BYTES) throw new Error("scheme-byte-budget");
     return compact;
   }
@@ -1079,7 +1086,9 @@
     return poseMapping === layer?.PoseMapping ? { ...layer } : { ...layer, PoseMapping: poseMapping };
   }
 
-  function createVisualAssetProxy(asset) {
+  function createVisualAssetProxy(asset, owner = asset) {
+    const cached = visualAssetProxyCache.get(owner);
+    if (cached) return cached;
     // COE is a static layer compositor, not a second formal item system. A shallow
     // proxy keeps image-path/pose/color metadata while preventing CommonDraw from
     // invoking the source asset's dynamic or ExtendedItem behavior on a synthetic item.
@@ -1109,6 +1118,7 @@
     for (const key of ["DynamicBeforeDraw", "DynamicAfterDraw", "DynamicScriptDraw"]) {
       Object.defineProperty(proxy, key, { enumerable: true, configurable: false, get: () => false, set: () => {} });
     }
+    visualAssetProxyCache.set(owner, proxy);
     return proxy;
   }
 
@@ -1117,15 +1127,17 @@
       .filter(entry => isDrawableLayer(entry.sourceLayer))
       .sort((a, b) => (a.ref.sourceLayerIndex ?? asset.Layer.indexOf(a.sourceLayer)) - (b.ref.sourceLayerIndex ?? asset.Layer.indexOf(b.sourceLayer)));
     if (!drawable.length) throw new Error("no-drawable-layer");
-    // Byte budget check 在拆分前对整个素材+所有引用做一次
-    if (utf8Bytes({ material: compactMaterialForStorage(material), refs: refs.map(compactLayerForStorage) }) > MAX_MATERIAL_BYTES)
-      throw new Error("material-byte-budget");
+    // Byte budgets are enforced at persistence and remote-protocol boundaries.
+    // Avoid serializing unchanged material data on every preview frame.
     const colors = resolveMaterialColors(material, asset, refs);
     const baseProperty = sanitizeVisualProperty(material.sourceProperty || {}, analysis, asset);
     // 每层生成独立的 Item，Property 各自携带该层的变换
     const results = drawable.map((entry, index) => {
       const { ref, sourceLayer } = entry;
-      const visualAsset = createVisualAssetProxy(asset);
+      // CommonDraw resolves an Item by Asset object identity. Share the proxy only
+      // inside one material; two materials using the same source Asset may carry
+      // different colors and properties and therefore need distinct identities.
+      const visualAsset = createVisualAssetProxy(asset, material);
       const perLayerProperty = { ...baseProperty };
       if (typeof ref.rotation === "number" && isFinite(ref.rotation) && ref.rotation !== 0)
         perLayerProperty.Rotation = clamp(ref.rotation, -Math.PI, Math.PI);
@@ -1191,7 +1203,10 @@
   function buildLocalSyntheticItems(character) {
     const rawComposition = getComposition(character);
     if (!rawComposition || !isLocalPlayer(character)) return [];
-    const composition = normalizeComposition(rawComposition);
+    // Editor state is already normalized when opened and after structural UI edits.
+    // Keep its object identities during live transforms so the lightweight redraw
+    // path can reuse synthetic layers instead of cloning the whole composition.
+    const composition = uiMode === "editor" ? rawComposition : normalizeComposition(rawComposition);
     const materialMap = new Map(composition.materials.map(material => [material.id, material]));
     const groupedRefs = new Map();
     for (let layerIndex = 0; layerIndex < composition.layers.length; layerIndex++) {
@@ -1222,18 +1237,8 @@
         // Capability analysis is diagnostic only. Every loaded asset is projected to
         // inert static image layers; unsupported dynamic behavior is not invoked.
         analysis = analyzeAssetCached(sourceAsset);
-        const overall = resolveOverallTransform(composition, character, material);
         pruneOverallGeometry(character, material.id, sourceAsset, refs);
-        const runtimeCenter = cachedOverallCenter(character, material.id);
-        if (runtimeCenter) {
-          overall.centerX = runtimeCenter.x;
-          overall.centerY = runtimeCenter.y;
-        } else {
-          // Do not visibly rotate/scale around the legacy 100x100 metadata
-          // fallback while the real texture geometry is still being learned.
-          overall.rotation = 0;
-          overall.scale = 1;
-        }
+        const overall = resolveRenderableOverallTransform(composition, character, material);
         const layerGroups = buildStaticSynthetic({ character, material, refs, asset: sourceAsset, analysis, overall });
         for (let sourceOrder = 0; sourceOrder < layerGroups.length; sourceOrder++) {
           const group = layerGroups[sourceOrder];
@@ -1253,7 +1258,6 @@
   const CONTENT_MIN_PIXELS = 4;
   const CONTENT_SCAN_MAX_EDGE = 512;
   const textureContentPivotCache = new Map();
-  let contentPivotRefreshScheduled = false;
 
   // Asset metadata in BC R130 does not contain rendered texture dimensions.
   // Geometry discovered at GLDrawImage is therefore the authoritative source
@@ -1324,7 +1328,13 @@
     layerMap.set(layerKey, rect);
     materialMap.set(materialId, layerMap);
     overallGeometryCache.set(character, materialMap);
-    if (changed) scheduleContentPivotRefresh();
+    // A local transform changes this rectangle every input step. Repainting again
+    // is only useful when a material-level rotation/scale consumes the new union
+    // center; otherwise the current draw already contains the final local result.
+    const needsOverallCenter = options.__coeNeedsOverallCenter === true ||
+      (typeof options.OverallRotation === "number" && options.OverallRotation !== 0) ||
+      (typeof options.OverallScale === "number" && Math.abs(options.OverallScale - 1) > 0.001);
+    if (changed && needsOverallCenter) scheduleContentPivotRefresh();
   }
 
   function pruneOverallGeometry(character, materialId, asset, refs) {
@@ -1356,6 +1366,67 @@
       }
     }
     return bounds ? { x: (bounds.left + bounds.right) / 2, y: (bounds.top + bounds.bottom) / 2 } : null;
+  }
+
+  function resolveRenderableOverallTransform(composition, character, material) {
+    const rotation = typeof material?.overallRotation === "number" ? material.overallRotation : 0;
+    const scale = typeof material?.overallScale === "number" ? material.overallScale : 1;
+    const offsetX = typeof material?.overallOffsetX === "number" ? material.overallOffsetX : 0;
+    const offsetY = typeof material?.overallOffsetY === "number" ? material.overallOffsetY : 0;
+    const needsCenter = rotation !== 0 || Math.abs(scale - 1) > 0.001;
+    const runtimeCenter = cachedOverallCenter(character, material?.id);
+    const center = runtimeCenter || (needsCenter
+      ? computeDefaultOverallCenter(composition, character, material?.id)
+      : { x: 0, y: 0 });
+    // Do not visibly rotate/scale around metadata fallback while the authoritative
+    // texture geometry is still being learned. Offset-only transforms do not
+    // consume the center and can be rendered immediately.
+    return {
+      rotation: needsCenter && !runtimeCenter ? 0 : rotation,
+      scale: needsCenter && !runtimeCenter ? 1 : scale,
+      offsetX, offsetY, centerX: center.x, centerY: center.y,
+      pendingCenter: needsCenter && !runtimeCenter,
+    };
+  }
+
+  function syncLocalSyntheticRuntime(character) {
+    if (character !== globalThis.Player || uiMode !== "editor") return false;
+    const composition = getComposition(character);
+    const groups = syntheticByCharacter.get(character);
+    if (!composition || !Array.isArray(groups) || !groups.length) return false;
+    const materials = new Map((composition.materials || []).map(material => [material.id, material]));
+    const refsByMaterial = new Map();
+    for (const ref of composition.layers || []) {
+      if (!refsByMaterial.has(ref.materialId)) refsByMaterial.set(ref.materialId, []);
+      refsByMaterial.get(ref.materialId).push(ref);
+    }
+    const visibleRefs = new Set();
+    for (const ref of composition.layers || []) {
+      const material = materials.get(ref.materialId);
+      if (!ref.hidden && material && !material.hidden) visibleRefs.add(ref);
+    }
+    if (visibleRefs.size !== groups.length) return false;
+    const stateByMaterial = new Map();
+    for (const group of groups) {
+      const material = materials.get(group.material?.id);
+      const refs = refsByMaterial.get(material?.id) || [];
+      const asset = group.item?.Asset?.__coeSourceAsset || group.item?.Asset?.Asset;
+      const liveRef = group.drawable?.[0]?.ref;
+      if (!material || material.hidden || !asset || !refs.length || !visibleRefs.has(liveRef)) return false;
+      let state = stateByMaterial.get(material.id);
+      if (!state) {
+        state = {
+          material,
+          overall: resolveRenderableOverallTransform(composition, character, material),
+          colors: resolveMaterialColors(material, asset, refs),
+        };
+        stateByMaterial.set(material.id, state);
+      }
+      group.material = state.material;
+      Object.assign(group.overall, state.overall);
+      group.item.Color = state.colors;
+    }
+    return true;
   }
 
   // Alpha 边界只依赖纹理本身，与颜色、Mirror、Invert 和图层变换无关。
@@ -1403,22 +1474,13 @@
   }
 
   function scheduleContentPivotRefresh() {
-    if (contentPivotRefreshScheduled) return;
-    contentPivotRefreshScheduled = true;
-    const refresh = () => {
-      contentPivotRefreshScheduled = false;
-      try {
-        if (typeof globalThis.CharacterRefresh === "function" && globalThis.Player) {
-          CharacterRefresh(globalThis.Player, false, false);
-          const characters = Array.isArray(globalThis.ChatRoomCharacter) ? globalThis.ChatRoomCharacter : [];
-          for (const character of characters) {
-            if (character && character !== globalThis.Player) CharacterRefresh(character, false, false);
-          }
-        }
-      } catch (_) { /* Alpha 中心仅是视觉增强，刷新失败时保留几何中心 fallback */ }
-    };
-    if (typeof globalThis.requestAnimationFrame === "function") globalThis.requestAnimationFrame(refresh);
-    else if (typeof globalThis.setTimeout === "function") globalThis.setTimeout(refresh, 0);
+    try {
+      if (globalThis.Player) requestCharacterRefresh(globalThis.Player, uiMode === "editor" ? "visual" : "full");
+      const characters = Array.isArray(globalThis.ChatRoomCharacter) ? globalThis.ChatRoomCharacter : [];
+      for (const character of characters) {
+        if (character && character !== globalThis.Player) requestCharacterRefresh(character, "full");
+      }
+    } catch (_) { /* Alpha 中心仅是视觉增强，刷新失败时保留几何中心 fallback */ }
   }
 
   function finishTextureContentPivot(url, pivot, bounds) {
@@ -1774,16 +1836,8 @@
           if (!isDrawableLayer(sourceLayer)) throw new Error("source-layer-not-drawable");
         }
         analysis = analyzeAssetCached(sourceAsset);
-        const overall = resolveOverallTransform({ layers: refs }, character, material);
         pruneOverallGeometry(character, material.id, sourceAsset, refs);
-        const runtimeCenter = cachedOverallCenter(character, material.id);
-        if (runtimeCenter) {
-          overall.centerX = runtimeCenter.x;
-          overall.centerY = runtimeCenter.y;
-        } else {
-          overall.rotation = 0;
-          overall.scale = 1;
-        }
+        const overall = resolveRenderableOverallTransform({ layers: refs }, character, material);
         const layerGroups = buildStaticSynthetic({ character, material, refs, asset: sourceAsset, analysis, overall });
         for (let sourceOrder = 0; sourceOrder < layerGroups.length; sourceOrder++) {
           const group = layerGroups[sourceOrder];
@@ -1971,6 +2025,7 @@
                 transformed.OverallOffsetY = clamp(overall.offsetY, -1200, 1200);
                 transformed.OverallCenterX = overall.centerX;
                 transformed.OverallCenterY = overall.centerY;
+                if (overall.pendingCenter === true) transformed.__coeNeedsOverallCenter = true;
               }
               // GLDrawImage is the first point where the actual texture size is
               // known. Carry an internal identity through the callback so it can
@@ -2082,8 +2137,16 @@
     closeOwnedColorPicker();
     restoreEditorAppearance();
     document.getElementById(ROOT_ID)?.remove();
-    if (previewTimer) cancelAnimationFrame(previewTimer);
-    previewTimer = 0;
+    // Closing the local editor must not discard texture/geometry refreshes already
+    // queued for remote characters. Remove only the local preview request and keep
+    // the shared frame alive while any other character remains pending.
+    pendingCharacterRefreshes.delete(globalThis.Player);
+    if (!pendingCharacterRefreshes.size) {
+      if (characterRefreshScheduled && typeof globalThis.cancelAnimationFrame === "function") cancelAnimationFrame(previewTimer);
+      if (characterRefreshScheduled && typeof globalThis.clearTimeout === "function") clearTimeout(previewTimer);
+      previewTimer = 0;
+      characterRefreshScheduled = false;
+    }
     uiMode = null;
     editing = null;
     editingId = null;
@@ -2118,17 +2181,58 @@
     layerNameCachePromise?.then(() => { if (document.body.contains(layerList)) renderLayerList(layerList); });
   }
 
-  function refreshPreview() {
-    if (uiMode !== "editor" || !editorAppearanceSnapshot || !globalThis.Player) return;
-    CharacterRefresh(Player, false, false);
+  const CHARACTER_REFRESH_LEVEL = Object.freeze({ visual: 1, structure: 2, full: 3 });
+
+  function performCharacterRefresh(character, level) {
+    if (!character) return;
+    try {
+      if (level <= CHARACTER_REFRESH_LEVEL.visual && character === globalThis.Player && uiMode === "editor" &&
+        typeof globalThis.CharacterAppearanceBuildCanvas === "function" && syncLocalSyntheticRuntime(character)) {
+        CharacterAppearanceBuildCanvas(character);
+        character.MustDraw = false;
+        return;
+      }
+      if (level <= CHARACTER_REFRESH_LEVEL.structure && typeof globalThis.CharacterLoadCanvas === "function") {
+        CharacterLoadCanvas(character);
+        return;
+      }
+      if (typeof globalThis.CharacterRefresh === "function") CharacterRefresh(character, false, false);
+    } catch (error) {
+      warn("角色预览刷新失败", error);
+      // A failed lightweight redraw must not prevent other queued characters from
+      // refreshing. Try the full path once as a compatibility fallback.
+      if (level < CHARACTER_REFRESH_LEVEL.full && typeof globalThis.CharacterRefresh === "function") {
+        try { CharacterRefresh(character, false, false); } catch (fallbackError) { warn("角色完整刷新回退失败", fallbackError); }
+      }
+    }
   }
 
-  function refreshPreviewLoop() {
-    if (previewTimer) cancelAnimationFrame(previewTimer);
-    previewTimer = requestAnimationFrame(() => {
-      previewTimer = 0;
-      if (uiMode === "editor" && document.getElementById(ROOT_ID)) refreshPreview();
-    });
+  function flushCharacterRefreshes() {
+    previewTimer = 0;
+    characterRefreshScheduled = false;
+    const pending = pendingCharacterRefreshes;
+    pendingCharacterRefreshes = new Map();
+    for (const [character, level] of pending) performCharacterRefresh(character, level);
+  }
+
+  function requestCharacterRefresh(character, mode = "full") {
+    if (!character) return;
+    const level = CHARACTER_REFRESH_LEVEL[mode] || CHARACTER_REFRESH_LEVEL.full;
+    pendingCharacterRefreshes.set(character, Math.max(level, pendingCharacterRefreshes.get(character) || 0));
+    if (characterRefreshScheduled) return;
+    characterRefreshScheduled = true;
+    if (typeof globalThis.requestAnimationFrame === "function") {
+      const handle = requestAnimationFrame(flushCharacterRefreshes);
+      if (characterRefreshScheduled) previewTimer = handle;
+    } else if (typeof globalThis.setTimeout === "function") {
+      const handle = setTimeout(flushCharacterRefreshes, 0);
+      if (characterRefreshScheduled) previewTimer = handle;
+    } else flushCharacterRefreshes();
+  }
+
+  function refreshPreviewLoop(mode = "visual") {
+    if (uiMode !== "editor" || !editorAppearanceSnapshot || !globalThis.Player) return;
+    requestCharacterRefresh(globalThis.Player, mode);
   }
 
 
@@ -2601,9 +2705,8 @@
 
   function renderLayerList(list) {
     list.innerHTML = "";
-    // UI redraws must not delete a temporarily unresolved layer. Reference
-    // filtering happens at load/import/persistence boundaries instead.
-    editing = normalizeComposition(editing, { validateReferences: false });
+    // Editor state is normalized at open/import/save boundaries. Preserve object
+    // identities during UI redraws so live preview layers can reuse their refs.
     if (transformEditTarget?.kind === "layer") transformEditTarget.layer = editing.layers[transformEditTarget.index] || null;
     if (!editing.layers.length && !editing.recycle.length) {
       list.innerHTML = '<div class="coe-empty"><p>还没有素材。点击“添加素材”。</p></div>';
@@ -2629,7 +2732,7 @@
         group.querySelector("[data-restore-all]").addEventListener("click", () => {
           editing.layers.push(...layers);
           editing.recycle = editing.recycle.filter(layer => layer.materialId !== material.id);
-          refreshPreviewLoop();
+          refreshPreviewLoop("structure");
           renderLayerList(list);
         });
         const host = group.querySelector(".coe-material-editor-layers");
@@ -2640,7 +2743,7 @@
           row.querySelector("[data-restore]").addEventListener("click", () => {
             editing.recycle = editing.recycle.filter(item => item !== layer);
             editing.layers.push(layer);
-            refreshPreviewLoop();
+            refreshPreviewLoop("structure");
             renderLayerList(list);
           });
           host.appendChild(row);
@@ -2695,7 +2798,7 @@
     });
     group.querySelector("[data-hide-material]").addEventListener("click", () => {
       material.hidden = !material.hidden;
-      refreshPreviewLoop();
+      refreshPreviewLoop("structure");
       renderLayerList(list);
     });
     group.querySelector("[data-reset-material]").addEventListener("click", () => {
@@ -2711,7 +2814,7 @@
         layer.scale = layer.defaultScale;
       });
       for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY"]) delete material[key];
-      refreshPreviewLoop();
+      refreshPreviewLoop("structure");
       renderLayerList(list);
     });
     group.querySelector("[data-remove-material]").addEventListener("click", () => {
@@ -2721,7 +2824,7 @@
       editing.layers = editing.layers.filter(layer => layer.materialId !== materialId);
       editing.recycle = editing.recycle.filter(layer => layer.materialId !== materialId);
       editing.materials = editing.materials.filter(item => item.id !== materialId);
-      refreshPreviewLoop();
+      refreshPreviewLoop("structure");
       renderLayerList(list);
     });
     if (!material.collapsed) renderMaterialLayerCards(group.querySelector(".coe-material-editor-layers"), material, layers, asset, list);
@@ -2755,7 +2858,7 @@
       card.querySelector("[data-edit-transform]").addEventListener("click", () => setTransformTarget({ kind: "layer", index: editing.layers.indexOf(layer), layer }));
       card.querySelector("[data-hide]").addEventListener("click", () => {
         layer.hidden = !layer.hidden;
-        refreshPreviewLoop();
+        refreshPreviewLoop("structure");
         renderLayerList(list);
       });
       card.querySelector("[data-reset]").addEventListener("click", () => {
@@ -2768,7 +2871,7 @@
         layer.rotation = layer.defaultRotation;
         layer.scale = layer.defaultScale;
         if (canColor) material.colors[colorIndex] = material.defaultColors?.[colorIndex] || asset?.DefaultColor?.[colorIndex] || "Default";
-        refreshPreviewLoop();
+        refreshPreviewLoop("structure");
         renderLayerList(list);
       });
       card.querySelector("[data-copy]").addEventListener("click", () => {
@@ -2776,13 +2879,13 @@
         copy.layerLabel = nextCopyLayerLabel(layer);
         var idx = editing.layers.indexOf(layer);
         editing.layers.splice(idx + 1, 0, copy);
-        refreshPreviewLoop();
+        refreshPreviewLoop("structure");
         renderLayerList(list);
       });
       card.querySelector("[data-remove]").addEventListener("click", () => {
         editing.layers = editing.layers.filter(item => item !== layer);
         editing.recycle.push(layer);
-        refreshPreviewLoop();
+        refreshPreviewLoop("structure");
         renderLayerList(list);
       });
       card.querySelectorAll("[data-key]").forEach(input => input.addEventListener("input", () => {
@@ -2791,7 +2894,7 @@
         else if (key === "priority") layer[key] = clamp(input.value, -99, 99);
         else layer[key] = clamp(input.value, -1200, 1200);
         input.value = layer[key];
-        refreshPreviewLoop();
+        refreshPreviewLoop(key === "priority" ? "structure" : "visual");
       }));
       // 图层级变换参数输入监听
       card.querySelectorAll("[data-layer-transform]").forEach(function(input) {
@@ -2929,7 +3032,7 @@
       editing.layers.push(normalizeLayer({ materialId: material.id, sourceGroup: asset.Group.Name, sourceAsset: asset.Name, sourceLayer: layer.Name, sourceLayerIndex, layerLabel: getLayerLabel(asset, layer), priority: layer.Priority, defaultPriority: layer.Priority, offsetX: 0, offsetY: 0, defaultOffsetX: 0, defaultOffsetY: 0, opacity: defaultOpacity, defaultOpacity, color: null, defaultColor: null, sourceColor: material.sourceColor, sourceProperty: material.sourceProperty }));
       added++;
     });
-    refreshPreviewLoop();
+    refreshPreviewLoop("structure");
     toast(added ? `已添加「${material.label || asset.Name}」的 ${added} 个图层` : "这些图层已经在方案中", added ? "info" : "warn");
   }
 
@@ -3961,7 +4064,7 @@
     const domDuplicate = !!document.getElementById(ROOT_ID) || !!document.getElementById(BUTTON_ID) || !!document.getElementById(STYLE_ID);
     if (!api && !domDuplicate) return false;
     duplicateInstance = true;
-    const message = `[${MOD_NAME}] 检测到另一份 Custom Outfit Editor。COE-Echo Remote 已停止安装，请只启用一个版本。`;
+    const message = `[${MOD_NAME}] 检测到另一份 Custom Outfit Editor。当前实例已停止安装，请只启用一个版本。`;
     console.error(message);
     try { if (!globalThis.__coeDuplicateWarningShown) { globalThis.__coeDuplicateWarningShown = true; alert(message); } } catch (_) { /* console warning remains */ }
     return true;
@@ -3972,7 +4075,7 @@
     if (!runtimeInstalled) {
       if (detectDuplicateInstance()) return;
       try {
-        modApi = bcModSdk.registerMod({ name: MOD_NAME, fullName: "自定义服装编辑器 Echo Remote", version: VERSION }, { allowReplace: false });
+        modApi = bcModSdk.registerMod({ name: MOD_NAME, fullName: "Custom Outfit Editor", version: VERSION }, { allowReplace: false });
         registerTagAssets();
         installTagAssetPreviewHook();
         installRenderHooks();
@@ -3981,7 +4084,7 @@
         runtimeInstalled = true;
       } catch (error) {
         duplicateInstance = /already|duplicate|registered|replace/i.test(String(error?.message || error));
-        warn(duplicateInstance ? "检测到同名 Mod，COE-Echo Remote 已停止安装" : "安全 Hook 安装失败，将继续等待游戏加载", error);
+        warn(duplicateInstance ? "检测到同名 Mod，Custom Outfit Editor 当前实例已停止安装" : "安全 Hook 安装失败，将继续等待游戏加载", error);
         try { modApi?.unload(); } catch (_) { /* ignore */ }
         modApi = null;
         return;
@@ -4006,9 +4109,9 @@
   if (globalThis.__COE_TEST_MODE__) {
     globalThis.__COE_TEST_API__ = {
       normalizeWardrobe, normalizeComposition, normalizeLayerTransform, compactWardrobeForStorage, compactCompositionForStorage, compactLayerForStorage, packWardrobe, unpackWardrobeDetailed,
-      computeDefaultOverallCenter, resolveOverallTransform, resolveNumericOrigin, transformPointAroundOverallPivot,
+      computeDefaultOverallCenter, resolveOverallTransform, resolveRenderableOverallTransform, resolveNumericOrigin, transformPointAroundOverallPivot,
       stableInsertSyntheticLayers, coeAssetLayerSort: stableInsertSyntheticLayers, analyzeSourceAsset, sanitizePlainRecord,
-      scanAlphaBounds, contentBoundsFromBounds, contentPivotFromBounds, resolveTextureContentPivot, resolveTextureContentBounds, cacheOverallLayerGeometry, cachedOverallCenter, buildSyntheticItems, buildLocalSyntheticItems, buildRemoteSyntheticItems, makeSyntheticLayers, statusSnapshot,
+      scanAlphaBounds, contentBoundsFromBounds, contentPivotFromBounds, resolveTextureContentPivot, resolveTextureContentBounds, cacheOverallLayerGeometry, cachedOverallCenter, buildSyntheticItems, buildLocalSyntheticItems, buildRemoteSyntheticItems, makeSyntheticLayers, syncLocalSyntheticRuntime, requestCharacterRefresh, statusSnapshot,
       isDrawableLayer, normalizedMaterialColors, normalizePickerColor, nextCopyLayerLabel, localizedPoseLabel, clothingSlotGroups, registerTagAssets, isTagEquipped, equipTagForGroup, activateScheme, combinedEquippedComposition, validateRemoteSnapshot, canonicalRemoteSnapshot, sha256Base64Url,
       parseRemoteContent, serializeRemoteEnvelope, encodeRemoteText, decodeRemoteText, splitRemoteData,
       createRemoteStore, setRemotePeer, setPendingRequest, pendingRequestFor, addRemoteChunk, expireRemoteAssemblies,
@@ -4022,7 +4125,7 @@
       setWardrobeForTest: value => { wardrobe = normalizeWardrobe(value, { validateReferences: false }); },
       getWardrobeForTest: () => cloneJSON(wardrobe),
       setEditingForTest: value => { editing = value; uiMode = value ? "editor" : null; },
-      applyOverallTransformField,
+      applyOverallTransformField, closeUI,
       installHooksForTest: api => { modApi = api; installRenderHooks(); },
       installAllHooksForTest: api => { modApi = api; installRenderHooks(); installRemoteLifecycleHooks(); },
     };

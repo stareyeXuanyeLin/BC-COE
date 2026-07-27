@@ -104,7 +104,7 @@
     const domDuplicate = !!document.getElementById(ROOT_ID) || !!document.getElementById(BUTTON_ID) || !!document.getElementById(STYLE_ID);
     if (!api && !domDuplicate) return false;
     duplicateInstance = true;
-    const message = `[${MOD_NAME}] 检测到另一份 Custom Outfit Editor。COE-Echo Remote 已停止安装，请只启用一个版本。`;
+    const message = `[${MOD_NAME}] 检测到另一份 Custom Outfit Editor。当前实例已停止安装，请只启用一个版本。`;
     console.error(message);
     try { if (!globalThis.__coeDuplicateWarningShown) { globalThis.__coeDuplicateWarningShown = true; alert(message); } } catch (_) { /* console warning remains */ }
     return true;
@@ -115,7 +115,7 @@
     if (!runtimeInstalled) {
       if (detectDuplicateInstance()) return;
       try {
-        modApi = bcModSdk.registerMod({ name: MOD_NAME, fullName: "自定义服装编辑器 Echo Remote", version: VERSION }, { allowReplace: false });
+        modApi = bcModSdk.registerMod({ name: MOD_NAME, fullName: "Custom Outfit Editor", version: VERSION }, { allowReplace: false });
         registerTagAssets();
         installTagAssetPreviewHook();
         installRenderHooks();
@@ -124,7 +124,7 @@
         runtimeInstalled = true;
       } catch (error) {
         duplicateInstance = /already|duplicate|registered|replace/i.test(String(error?.message || error));
-        warn(duplicateInstance ? "检测到同名 Mod，COE-Echo Remote 已停止安装" : "安全 Hook 安装失败，将继续等待游戏加载", error);
+        warn(duplicateInstance ? "检测到同名 Mod，Custom Outfit Editor 当前实例已停止安装" : "安全 Hook 安装失败，将继续等待游戏加载", error);
         try { modApi?.unload(); } catch (_) { /* ignore */ }
         modApi = null;
         return;
@@ -149,9 +149,9 @@
   if (globalThis.__COE_TEST_MODE__) {
     globalThis.__COE_TEST_API__ = {
       normalizeWardrobe, normalizeComposition, normalizeLayerTransform, compactWardrobeForStorage, compactCompositionForStorage, compactLayerForStorage, packWardrobe, unpackWardrobeDetailed,
-      computeDefaultOverallCenter, resolveOverallTransform, resolveNumericOrigin, transformPointAroundOverallPivot,
+      computeDefaultOverallCenter, resolveOverallTransform, resolveRenderableOverallTransform, resolveNumericOrigin, transformPointAroundOverallPivot,
       stableInsertSyntheticLayers, coeAssetLayerSort: stableInsertSyntheticLayers, analyzeSourceAsset, sanitizePlainRecord,
-      scanAlphaBounds, contentBoundsFromBounds, contentPivotFromBounds, resolveTextureContentPivot, resolveTextureContentBounds, cacheOverallLayerGeometry, cachedOverallCenter, buildSyntheticItems, buildLocalSyntheticItems, buildRemoteSyntheticItems, makeSyntheticLayers, statusSnapshot,
+      scanAlphaBounds, contentBoundsFromBounds, contentPivotFromBounds, resolveTextureContentPivot, resolveTextureContentBounds, cacheOverallLayerGeometry, cachedOverallCenter, buildSyntheticItems, buildLocalSyntheticItems, buildRemoteSyntheticItems, makeSyntheticLayers, syncLocalSyntheticRuntime, requestCharacterRefresh, statusSnapshot,
       isDrawableLayer, normalizedMaterialColors, normalizePickerColor, nextCopyLayerLabel, localizedPoseLabel, clothingSlotGroups, registerTagAssets, isTagEquipped, equipTagForGroup, activateScheme, combinedEquippedComposition, validateRemoteSnapshot, canonicalRemoteSnapshot, sha256Base64Url,
       parseRemoteContent, serializeRemoteEnvelope, encodeRemoteText, decodeRemoteText, splitRemoteData,
       createRemoteStore, setRemotePeer, setPendingRequest, pendingRequestFor, addRemoteChunk, expireRemoteAssemblies,
@@ -165,7 +165,7 @@
       setWardrobeForTest: value => { wardrobe = normalizeWardrobe(value, { validateReferences: false }); },
       getWardrobeForTest: () => cloneJSON(wardrobe),
       setEditingForTest: value => { editing = value; uiMode = value ? "editor" : null; },
-      applyOverallTransformField,
+      applyOverallTransformField, closeUI,
       installHooksForTest: api => { modApi = api; installRenderHooks(); },
       installAllHooksForTest: api => { modApi = api; installRenderHooks(); installRemoteLifecycleHooks(); },
     };

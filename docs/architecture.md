@@ -14,9 +14,9 @@
 
 ## 正式 Appearance 边界
 
-COE Mirror 的当前架构只有三部分：本地衣柜、`COE_RVS/3` Remote Snapshot 和绘制阶段 Synthetic Rendering。运行时不创建或穿戴 `CustomOutfit` 正式服装项目，不读取 `CustomComposition`，也不安装旧容器入站过滤 Hook。
+COE Mirror 的当前架构由本地衣柜、`COE_RVS/4` Remote Snapshot、绘制阶段 Synthetic Rendering 和原版服装格标签组成。运行时不会把来源素材本体作为正式服装穿到 Appearance，也不读取旧 `CustomComposition` 或安装旧容器入站过滤 Hook；启用方案时只会在对应服装格穿上无图片的 `COECustomOutfit` 标签，用于参与 BC 原生穿脱互动和控制该格自定义服装的可见性。
 
-`ServerAppearanceBundle` Hook 只承担一项职责：过滤带 `__coeMaterialId` 的临时 Synthetic Item。它不会改写或筛除其它正式服装项目。初始化在衣柜读取完成后只同步本地启用方案、初始化 Remote Controller 并暴露 API，不执行 Appearance 迁移或服务器/聊天室外观同步。
+`ServerAppearanceBundle` Hook 只过滤带 `__coeMaterialId` 的临时 Synthetic Item，不会筛除 `COECustomOutfit` 标签或其它正式服装项目。每个客户端都必须在启动阶段注册同名标签 Asset；安装或更新后需刷新页面并重新入房，确保在线 Appearance 能按新的 Asset 注册表解析。
 
 ## 数据流
 

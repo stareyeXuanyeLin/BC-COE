@@ -288,9 +288,8 @@
 
   function renderLayerList(list) {
     list.innerHTML = "";
-    // UI redraws must not delete a temporarily unresolved layer. Reference
-    // filtering happens at load/import/persistence boundaries instead.
-    editing = normalizeComposition(editing, { validateReferences: false });
+    // Editor state is normalized at open/import/save boundaries. Preserve object
+    // identities during UI redraws so live preview layers can reuse their refs.
     if (transformEditTarget?.kind === "layer") transformEditTarget.layer = editing.layers[transformEditTarget.index] || null;
     if (!editing.layers.length && !editing.recycle.length) {
       list.innerHTML = '<div class="coe-empty"><p>还没有素材。点击“添加素材”。</p></div>';
@@ -316,7 +315,7 @@
         group.querySelector("[data-restore-all]").addEventListener("click", () => {
           editing.layers.push(...layers);
           editing.recycle = editing.recycle.filter(layer => layer.materialId !== material.id);
-          refreshPreviewLoop();
+          refreshPreviewLoop("structure");
           renderLayerList(list);
         });
         const host = group.querySelector(".coe-material-editor-layers");
@@ -327,7 +326,7 @@
           row.querySelector("[data-restore]").addEventListener("click", () => {
             editing.recycle = editing.recycle.filter(item => item !== layer);
             editing.layers.push(layer);
-            refreshPreviewLoop();
+            refreshPreviewLoop("structure");
             renderLayerList(list);
           });
           host.appendChild(row);
@@ -382,7 +381,7 @@
     });
     group.querySelector("[data-hide-material]").addEventListener("click", () => {
       material.hidden = !material.hidden;
-      refreshPreviewLoop();
+      refreshPreviewLoop("structure");
       renderLayerList(list);
     });
     group.querySelector("[data-reset-material]").addEventListener("click", () => {
@@ -398,7 +397,7 @@
         layer.scale = layer.defaultScale;
       });
       for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY"]) delete material[key];
-      refreshPreviewLoop();
+      refreshPreviewLoop("structure");
       renderLayerList(list);
     });
     group.querySelector("[data-remove-material]").addEventListener("click", () => {
@@ -408,7 +407,7 @@
       editing.layers = editing.layers.filter(layer => layer.materialId !== materialId);
       editing.recycle = editing.recycle.filter(layer => layer.materialId !== materialId);
       editing.materials = editing.materials.filter(item => item.id !== materialId);
-      refreshPreviewLoop();
+      refreshPreviewLoop("structure");
       renderLayerList(list);
     });
     if (!material.collapsed) renderMaterialLayerCards(group.querySelector(".coe-material-editor-layers"), material, layers, asset, list);
@@ -442,7 +441,7 @@
       card.querySelector("[data-edit-transform]").addEventListener("click", () => setTransformTarget({ kind: "layer", index: editing.layers.indexOf(layer), layer }));
       card.querySelector("[data-hide]").addEventListener("click", () => {
         layer.hidden = !layer.hidden;
-        refreshPreviewLoop();
+        refreshPreviewLoop("structure");
         renderLayerList(list);
       });
       card.querySelector("[data-reset]").addEventListener("click", () => {
@@ -455,7 +454,7 @@
         layer.rotation = layer.defaultRotation;
         layer.scale = layer.defaultScale;
         if (canColor) material.colors[colorIndex] = material.defaultColors?.[colorIndex] || asset?.DefaultColor?.[colorIndex] || "Default";
-        refreshPreviewLoop();
+        refreshPreviewLoop("structure");
         renderLayerList(list);
       });
       card.querySelector("[data-copy]").addEventListener("click", () => {
@@ -463,13 +462,13 @@
         copy.layerLabel = nextCopyLayerLabel(layer);
         var idx = editing.layers.indexOf(layer);
         editing.layers.splice(idx + 1, 0, copy);
-        refreshPreviewLoop();
+        refreshPreviewLoop("structure");
         renderLayerList(list);
       });
       card.querySelector("[data-remove]").addEventListener("click", () => {
         editing.layers = editing.layers.filter(item => item !== layer);
         editing.recycle.push(layer);
-        refreshPreviewLoop();
+        refreshPreviewLoop("structure");
         renderLayerList(list);
       });
       card.querySelectorAll("[data-key]").forEach(input => input.addEventListener("input", () => {
@@ -478,7 +477,7 @@
         else if (key === "priority") layer[key] = clamp(input.value, -99, 99);
         else layer[key] = clamp(input.value, -1200, 1200);
         input.value = layer[key];
-        refreshPreviewLoop();
+        refreshPreviewLoop(key === "priority" ? "structure" : "visual");
       }));
       // 图层级变换参数输入监听
       card.querySelectorAll("[data-layer-transform]").forEach(function(input) {
@@ -616,7 +615,7 @@
       editing.layers.push(normalizeLayer({ materialId: material.id, sourceGroup: asset.Group.Name, sourceAsset: asset.Name, sourceLayer: layer.Name, sourceLayerIndex, layerLabel: getLayerLabel(asset, layer), priority: layer.Priority, defaultPriority: layer.Priority, offsetX: 0, offsetY: 0, defaultOffsetX: 0, defaultOffsetY: 0, opacity: defaultOpacity, defaultOpacity, color: null, defaultColor: null, sourceColor: material.sourceColor, sourceProperty: material.sourceProperty }));
       added++;
     });
-    refreshPreviewLoop();
+    refreshPreviewLoop("structure");
     toast(added ? `已添加「${material.label || asset.Name}」的 ${added} 个图层` : "这些图层已经在方案中", added ? "info" : "warn");
   }
 

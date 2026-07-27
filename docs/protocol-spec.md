@@ -7,7 +7,7 @@ BC Hidden 消息：
 ```js
 ServerSend("ChatRoomChat", {
   Type: "Hidden",
-  Content: "COE_RVS/3|" + JSON.stringify(envelope),
+  Content: "COE_RVS/4|" + JSON.stringify(envelope),
   Target: memberNumber // 定向消息才有
 });
 ```

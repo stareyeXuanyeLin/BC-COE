@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Bondage Club - Custom Outfit Editor（重构版加载器）
-// @name:zh-CN   Bondage Club - 自定义服装编辑器（重构版加载器）
+// @name         Bondage Club - Custom Outfit Editor（正式版加载器）
+// @name:zh-CN   Bondage Club - 自定义服装编辑器（正式版加载器）
 // @namespace    https://github.com/stareyeXuanyeLin/BC-COE
-// @version      1.2.4
+// @version      1.2.5
 // @description  Loads the latest Custom Outfit Editor from the CDN on every page load.
 // @description:zh-CN 每次进入页面时从 CDN 拉取最新的自定义服装编辑器。
 // @author       林宣夜 ＆ 佩菈
@@ -22,20 +22,20 @@
 // @grant        none
 // @noframes
 // @run-at       document-end
-// @downloadURL  https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/single-layer-transform-rebuild/dist/CustomOutfitEditorEchoMirror.loader.user.js
-// @updateURL    https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/single-layer-transform-rebuild/dist/CustomOutfitEditorEchoMirror.loader.user.js
+// @downloadURL  https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/main/dist/CustomOutfitEditorEchoMirror.loader.user.js
+// @updateURL    https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/main/dist/CustomOutfitEditorEchoMirror.loader.user.js
 // ==/UserScript==
 
 (function () {
     "use strict";
 
-    if (window.__COE_ECHO_MIRROR_LOADER_REBUILD__) return;
-    window.__COE_ECHO_MIRROR_LOADER_REBUILD__ = true;
+    if (window.__COE_ECHO_MIRROR_LOADER__) return;
+    window.__COE_ECHO_MIRROR_LOADER__ = true;
 
     const script = document.createElement("script");
     const timestamp = Date.now();
-    script.src = `https://cdn.jsdelivr.net/gh/stareyeXuanyeLin/BC-COE@single-layer-transform-rebuild/dist/CustomOutfitEditorEchoMirror.user.js?timestamp=${timestamp}`;
-    script.onload = () => console.info(`[COE Loader] rebuild core loaded from CDN (cache key ${timestamp}).`);
+    script.src = `https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/main/dist/CustomOutfitEditorEchoMirror.user.js?timestamp=${timestamp}`;
+    script.onload = () => console.info(`[COE Loader] core loaded from main (cache key ${timestamp}).`);
     script.onerror = () => console.error("[COE Loader] failed to load the core script from CDN.");
     (document.head || document.documentElement).appendChild(script);
 })();

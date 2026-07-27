@@ -82,8 +82,16 @@
     closeOwnedColorPicker();
     restoreEditorAppearance();
     document.getElementById(ROOT_ID)?.remove();
-    if (previewTimer) cancelAnimationFrame(previewTimer);
-    previewTimer = 0;
+    // Closing the local editor must not discard texture/geometry refreshes already
+    // queued for remote characters. Remove only the local preview request and keep
+    // the shared frame alive while any other character remains pending.
+    pendingCharacterRefreshes.delete(globalThis.Player);
+    if (!pendingCharacterRefreshes.size) {
+      if (characterRefreshScheduled && typeof globalThis.cancelAnimationFrame === "function") cancelAnimationFrame(previewTimer);
+      if (characterRefreshScheduled && typeof globalThis.clearTimeout === "function") clearTimeout(previewTimer);
+      previewTimer = 0;
+      characterRefreshScheduled = false;
+    }
     uiMode = null;
     editing = null;
     editingId = null;
@@ -118,15 +126,56 @@
     layerNameCachePromise?.then(() => { if (document.body.contains(layerList)) renderLayerList(layerList); });
   }
 
-  function refreshPreview() {
-    if (uiMode !== "editor" || !editorAppearanceSnapshot || !globalThis.Player) return;
-    CharacterRefresh(Player, false, false);
+  const CHARACTER_REFRESH_LEVEL = Object.freeze({ visual: 1, structure: 2, full: 3 });
+
+  function performCharacterRefresh(character, level) {
+    if (!character) return;
+    try {
+      if (level <= CHARACTER_REFRESH_LEVEL.visual && character === globalThis.Player && uiMode === "editor" &&
+        typeof globalThis.CharacterAppearanceBuildCanvas === "function" && syncLocalSyntheticRuntime(character)) {
+        CharacterAppearanceBuildCanvas(character);
+        character.MustDraw = false;
+        return;
+      }
+      if (level <= CHARACTER_REFRESH_LEVEL.structure && typeof globalThis.CharacterLoadCanvas === "function") {
+        CharacterLoadCanvas(character);
+        return;
+      }
+      if (typeof globalThis.CharacterRefresh === "function") CharacterRefresh(character, false, false);
+    } catch (error) {
+      warn("角色预览刷新失败", error);
+      // A failed lightweight redraw must not prevent other queued characters from
+      // refreshing. Try the full path once as a compatibility fallback.
+      if (level < CHARACTER_REFRESH_LEVEL.full && typeof globalThis.CharacterRefresh === "function") {
+        try { CharacterRefresh(character, false, false); } catch (fallbackError) { warn("角色完整刷新回退失败", fallbackError); }
+      }
+    }
   }
 
-  function refreshPreviewLoop() {
-    if (previewTimer) cancelAnimationFrame(previewTimer);
-    previewTimer = requestAnimationFrame(() => {
-      previewTimer = 0;
-      if (uiMode === "editor" && document.getElementById(ROOT_ID)) refreshPreview();
-    });
+  function flushCharacterRefreshes() {
+    previewTimer = 0;
+    characterRefreshScheduled = false;
+    const pending = pendingCharacterRefreshes;
+    pendingCharacterRefreshes = new Map();
+    for (const [character, level] of pending) performCharacterRefresh(character, level);
+  }
+
+  function requestCharacterRefresh(character, mode = "full") {
+    if (!character) return;
+    const level = CHARACTER_REFRESH_LEVEL[mode] || CHARACTER_REFRESH_LEVEL.full;
+    pendingCharacterRefreshes.set(character, Math.max(level, pendingCharacterRefreshes.get(character) || 0));
+    if (characterRefreshScheduled) return;
+    characterRefreshScheduled = true;
+    if (typeof globalThis.requestAnimationFrame === "function") {
+      const handle = requestAnimationFrame(flushCharacterRefreshes);
+      if (characterRefreshScheduled) previewTimer = handle;
+    } else if (typeof globalThis.setTimeout === "function") {
+      const handle = setTimeout(flushCharacterRefreshes, 0);
+      if (characterRefreshScheduled) previewTimer = handle;
+    } else flushCharacterRefreshes();
+  }
+
+  function refreshPreviewLoop(mode = "visual") {
+    if (uiMode !== "editor" || !editorAppearanceSnapshot || !globalThis.Player) return;
+    requestCharacterRefresh(globalThis.Player, mode);
   }

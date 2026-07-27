@@ -367,6 +367,139 @@ test('overall center follows R130 PoseRecord group moves and BodyStyle DrawOffse
   assert.equal(center.y, 79);
 });
 
+test('local-only geometry changes do not schedule a redundant character refresh', () => {
+  let refreshes = 0;
+  const player = { AccountName: 'A', MemberNumber: 1, AssetFamily: 'Female3DCG', Appearance: [], AppearanceLayers: [], ExtensionSettings: {} };
+  const { api } = load({ player, globals: { CharacterRefresh() { refreshes++; } } });
+  api.cacheOverallLayerGeometry({
+    __coeGeometryCharacter: player, __coeGeometryMaterialId: 'local', __coeGeometryLayerKey: '0:0', Rotation: 0.2,
+  }, 0, 0, 0, 100, 100, 550);
+  assert.equal(refreshes, 0);
+  api.cacheOverallLayerGeometry({
+    __coeGeometryCharacter: player, __coeGeometryMaterialId: 'overall', __coeGeometryLayerKey: '0:0', OverallRotation: 0.2,
+  }, 0, 0, 0, 100, 100, 550);
+  assert.equal(refreshes, 1);
+});
+
+test('live editor transforms reuse refs, visual proxies and one lightweight frame refresh', () => {
+  const asset = makeAsset();
+  const composition = { materials: [{ id: 'm', sourceGroup: 'Cloth', sourceAsset: 'Dress', colors: [] }], layers: [{ materialId: 'm', sourceGroup: 'Cloth', sourceAsset: 'Dress', sourceLayer: 'Base', sourceLayerIndex: 0, priority: 1, offsetX: 0, offsetY: 0, opacity: 1 }] };
+  let queuedFrame;
+  let frameRequests = 0;
+  let canvasBuilds = 0;
+  let canvasLoads = 0;
+  let fullRefreshes = 0;
+  const env = load({ assets: [asset], globals: {
+    requestAnimationFrame(callback) { frameRequests++; queuedFrame = callback; return 1; },
+    CharacterAppearanceBuildCanvas() { canvasBuilds++; },
+    CharacterLoadCanvas() { canvasLoads++; },
+    CharacterRefresh() { fullRefreshes++; },
+  } });
+  env.api.setEditingForTest(composition);
+  const first = env.api.buildLocalSyntheticItems(env.player);
+  const second = env.api.buildLocalSyntheticItems(env.player);
+  assert.equal(first[0].drawable[0].ref, composition.layers[0]);
+  assert.equal(first[0].item.Asset, second[0].item.Asset);
+
+  const hooks = {};
+  env.api.installHooksForTest({ hookFunction(name, _priority, fn) { hooks[name] = fn; } });
+  env.player.AppearanceLayers = hooks.CharacterAppearanceSortLayers([env.player], () => []);
+  composition.layers[0].rotation = 0.4;
+  env.api.requestCharacterRefresh(env.player, 'visual');
+  env.api.requestCharacterRefresh(env.player, 'visual');
+  assert.equal(frameRequests, 1);
+  queuedFrame();
+  assert.equal(canvasBuilds, 1);
+  assert.equal(canvasLoads, 0);
+  assert.equal(fullRefreshes, 0);
+});
+
+test('neutral material transforms skip default center traversal and preview serialization', () => {
+  const asset = makeAsset();
+  const composition = { materials: [{ id: 'm', sourceGroup: 'Cloth', sourceAsset: 'Dress', colors: [] }], layers: [{ materialId: 'm', sourceGroup: 'Cloth', sourceAsset: 'Dress', sourceLayer: 'Base', sourceLayerIndex: 0, priority: 1, offsetX: 0, offsetY: 0, opacity: 1 }] };
+  let coordinateCalls = 0;
+  let encoderCalls = 0;
+  class CountingEncoder {
+    encode(text) { encoderCalls++; return Buffer.from(text); }
+  }
+  const env = load({ assets: [asset], globals: {
+    TextEncoder: CountingEncoder,
+    CommonDrawComputeDrawingCoordinates() { coordinateCalls++; return { X: 0, Y: 0 }; },
+  } });
+  env.api.setEditingForTest(composition);
+  const neutral = env.api.resolveRenderableOverallTransform(composition, env.player, composition.materials[0]);
+  assert.equal(neutral.rotation, 0);
+  assert.equal(coordinateCalls, 0);
+  composition.materials[0].overallRotation = 0.4;
+  const pending = env.api.resolveRenderableOverallTransform(composition, env.player, composition.materials[0]);
+  assert.equal(pending.rotation, 0);
+  assert.equal(pending.pendingCenter, true);
+  assert.equal(coordinateCalls, 1);
+  delete composition.materials[0].overallRotation;
+  env.api.buildLocalSyntheticItems(env.player);
+  assert.equal(encoderCalls, 1);
+});
+
+test('materials sharing one source asset keep distinct CommonDraw identities', () => {
+  const asset = makeAsset();
+  const composition = {
+    materials: [
+      { id: 'red', sourceGroup: 'Cloth', sourceAsset: 'Dress', colors: ['#ff0000'] },
+      { id: 'blue', sourceGroup: 'Cloth', sourceAsset: 'Dress', colors: ['#0000ff'] },
+    ],
+    layers: [
+      { materialId: 'red', sourceGroup: 'Cloth', sourceAsset: 'Dress', sourceLayer: 'Base', sourceLayerIndex: 0, priority: 1, offsetX: 0, offsetY: 0, opacity: 1 },
+      { materialId: 'blue', sourceGroup: 'Cloth', sourceAsset: 'Dress', sourceLayer: 'Base', sourceLayerIndex: 0, priority: 2, offsetX: 0, offsetY: 0, opacity: 1 },
+    ],
+  };
+  const env = load({ assets: [asset] });
+  env.api.setEditingForTest(composition);
+  const groups = env.api.buildLocalSyntheticItems(env.player);
+  assert.equal(groups.length, 2);
+  assert.notEqual(groups[0].item.Asset, groups[1].item.Asset);
+  assert.equal(groups[0].item.Color[0], '#ff0000');
+  assert.equal(groups[1].item.Color[0], '#0000ff');
+});
+
+test('closing the editor preserves queued remote character refreshes', () => {
+  let queuedFrame;
+  const refreshed = [];
+  const remote = { MemberNumber: 7 };
+  const env = load({ characters: [remote], globals: {
+    requestAnimationFrame(callback) { queuedFrame = callback; return 1; },
+    cancelAnimationFrame() { throw new Error('shared remote frame must remain queued'); },
+    CharacterRefresh(character) { refreshed.push(character); },
+  } });
+  env.api.setEditingForTest({ materials: [], layers: [] });
+  env.api.requestCharacterRefresh(env.player, 'visual');
+  env.api.requestCharacterRefresh(remote, 'full');
+  env.api.closeUI();
+  queuedFrame();
+  assert.deepEqual(refreshed, [remote]);
+});
+
+test('stale editor refs fall back to a structural canvas rebuild', () => {
+  const asset = makeAsset();
+  const composition = { materials: [{ id: 'm', sourceGroup: 'Cloth', sourceAsset: 'Dress', colors: [] }], layers: [{ materialId: 'm', sourceGroup: 'Cloth', sourceAsset: 'Dress', sourceLayer: 'Base', sourceLayerIndex: 0, priority: 1, offsetX: 0, offsetY: 0, opacity: 1 }] };
+  let queuedFrame;
+  let canvasBuilds = 0;
+  let canvasLoads = 0;
+  const env = load({ assets: [asset], globals: {
+    requestAnimationFrame(callback) { queuedFrame = callback; return 1; },
+    CharacterAppearanceBuildCanvas() { canvasBuilds++; },
+    CharacterLoadCanvas() { canvasLoads++; },
+  } });
+  env.api.setEditingForTest(composition);
+  const hooks = {};
+  env.api.installHooksForTest({ hookFunction(name, _priority, fn) { hooks[name] = fn; } });
+  env.player.AppearanceLayers = hooks.CharacterAppearanceSortLayers([env.player], () => []);
+  composition.layers = composition.layers.map(layer => ({ ...layer, rotation: 0.2 }));
+  env.api.requestCharacterRefresh(env.player, 'visual');
+  queuedFrame();
+  assert.equal(canvasBuilds, 0);
+  assert.equal(canvasLoads, 1);
+});
+
 test('GLDrawImage transform hook retries after initialization race and recovers after overwrite', () => {
   let retry;
   const original = () => {};

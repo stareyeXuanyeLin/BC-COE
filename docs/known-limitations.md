@@ -13,10 +13,11 @@ COE Remote 只复制本机已加载 Asset 的普通图片层。以下内容不�
 
 ## 协议与发现
 
-- 双方必须安装兼容 `COE_RVS/3` 插件并主动开启相应开关。
+- 双方必须安装兼容 `COE_RVS/4` 插件并主动开启相应开关；v3 与 v4 会严格隔离并静默忽略不同前缀。
 - 开关默认关闭；一方未安装时不会显示协议 UI 或普通聊天。
 - snapshot hash 只校验完整性，不认证现实身份。
-- 本版本不做跨房/跨页面缓存，不压缩 snapshot，不传输图片。
+- 本版本不做跨房/跨页面缓存，不压缩 snapshot，不传输图片；双方还必须加载可解析同名 Asset 与图层的素材版本。
+- `COECustomOutfit` 标签由插件启动时在各原版服装格本地注册。安装或更新后需完整刷新并重新入房，让在线 Appearance 按新的 Asset 注册表重新解析。
 - 硬预算之外的方案不会共享；不会用 Dictionary 绕过限制。
 - 自动请求只重试一次；持续丢包时需等待新的 STATE、切换接收开关或重新入房。
 - 素材整体变换以该素材最大可见图片层为自动中心；BC 版本若未暴露完整坐标管线字段，极少数姿势或自定义 BodyStyle 可能仍需要真实绘制复测。
@@ -27,7 +28,7 @@ COE Remote 只复制本机已加载 Asset 的普通图片层。以下内容不�
 
 ## 本地与 Mod 兼容
 
-- Remote Edition 与旧 COE/COE-Echo 不能同时启用。
+- Custom Outfit Editor 当前版本与旧 COE、COE-Echo 等历史版本不能同时启用。`Echo` 是历史版本区分与兼容标记，不表示当前插件依赖 Echo 的服装扩展。
 - 视觉代理已针对 LSCG `smartGetAssetGroup` 回退和动态标志写入做防护；拥有同等页面权限的其它 Mod 仍可能改变 BC 绘制链。
 - Character/Asset Family 不匹配时按素材缺失局部降级。
 - capability/provider/version 分析仅用于诊断，不保证第三方素材的静态图片路径在所有版本一致。

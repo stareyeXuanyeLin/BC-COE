@@ -500,6 +500,10 @@
       layers: normalized.layers.map(compactLayerForStorage),
     };
     if (normalized.recycle.length) compact.recycle = normalized.recycle.map(compactLayerForStorage);
+    for (const material of compact.materials) {
+      const refs = [...compact.layers, ...(compact.recycle || [])].filter(layer => layer.materialId === material.id);
+      if (utf8Bytes({ material, refs }) > MAX_MATERIAL_BYTES) throw new Error("material-byte-budget");
+    }
     if (utf8Bytes(compact) > MAX_SCHEME_BYTES) throw new Error("scheme-byte-budget");
     return compact;
   }

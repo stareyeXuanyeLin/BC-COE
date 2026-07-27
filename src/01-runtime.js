@@ -1,5 +1,5 @@
   const MOD_NAME = "CustomOutfitEditor";
-  const VERSION = "1.9.0";
+  const VERSION = "1.0.1";
   console.info(`[${MOD_NAME}] userscript injected`, location.href);
   const SETTINGS_KEY = "CustomOutfitEditor";
   const STORAGE_KEY = "BC.CustomOutfitEditor.v1";
@@ -44,11 +44,14 @@
     lastWarnings: [],
   };
   let previewTimer = 0;
+  let characterRefreshScheduled = false;
+  let pendingCharacterRefreshes = new Map();
   let previewPoseMapping = null;
   let editorAppearanceSnapshot = null;
   let editorPoseSnapshot = null;
   let glTransformHookTarget = null;
   let glTransformHookWatch = 0;
+  let visualAssetProxyCache = new WeakMap();
   let layerNameCache = null;
   let layerNameCachePromise = null;
   let colorPickerSession = null;

@@ -51,7 +51,9 @@
     return poseMapping === layer?.PoseMapping ? { ...layer } : { ...layer, PoseMapping: poseMapping };
   }
 
-  function createVisualAssetProxy(asset) {
+  function createVisualAssetProxy(asset, owner = asset) {
+    const cached = visualAssetProxyCache.get(owner);
+    if (cached) return cached;
     // COE is a static layer compositor, not a second formal item system. A shallow
     // proxy keeps image-path/pose/color metadata while preventing CommonDraw from
     // invoking the source asset's dynamic or ExtendedItem behavior on a synthetic item.
@@ -81,6 +83,7 @@
     for (const key of ["DynamicBeforeDraw", "DynamicAfterDraw", "DynamicScriptDraw"]) {
       Object.defineProperty(proxy, key, { enumerable: true, configurable: false, get: () => false, set: () => {} });
     }
+    visualAssetProxyCache.set(owner, proxy);
     return proxy;
   }
 
@@ -89,15 +92,17 @@
       .filter(entry => isDrawableLayer(entry.sourceLayer))
       .sort((a, b) => (a.ref.sourceLayerIndex ?? asset.Layer.indexOf(a.sourceLayer)) - (b.ref.sourceLayerIndex ?? asset.Layer.indexOf(b.sourceLayer)));
     if (!drawable.length) throw new Error("no-drawable-layer");
-    // Byte budget check 在拆分前对整个素材+所有引用做一次
-    if (utf8Bytes({ material: compactMaterialForStorage(material), refs: refs.map(compactLayerForStorage) }) > MAX_MATERIAL_BYTES)
-      throw new Error("material-byte-budget");
+    // Byte budgets are enforced at persistence and remote-protocol boundaries.
+    // Avoid serializing unchanged material data on every preview frame.
     const colors = resolveMaterialColors(material, asset, refs);
     const baseProperty = sanitizeVisualProperty(material.sourceProperty || {}, analysis, asset);
     // 每层生成独立的 Item，Property 各自携带该层的变换
     const results = drawable.map((entry, index) => {
       const { ref, sourceLayer } = entry;
-      const visualAsset = createVisualAssetProxy(asset);
+      // CommonDraw resolves an Item by Asset object identity. Share the proxy only
+      // inside one material; two materials using the same source Asset may carry
+      // different colors and properties and therefore need distinct identities.
+      const visualAsset = createVisualAssetProxy(asset, material);
       const perLayerProperty = { ...baseProperty };
       if (typeof ref.rotation === "number" && isFinite(ref.rotation) && ref.rotation !== 0)
         perLayerProperty.Rotation = clamp(ref.rotation, -Math.PI, Math.PI);

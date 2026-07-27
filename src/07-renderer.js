@@ -32,7 +32,10 @@
   function buildLocalSyntheticItems(character) {
     const rawComposition = getComposition(character);
     if (!rawComposition || !isLocalPlayer(character)) return [];
-    const composition = normalizeComposition(rawComposition);
+    // Editor state is already normalized when opened and after structural UI edits.
+    // Keep its object identities during live transforms so the lightweight redraw
+    // path can reuse synthetic layers instead of cloning the whole composition.
+    const composition = uiMode === "editor" ? rawComposition : normalizeComposition(rawComposition);
     const materialMap = new Map(composition.materials.map(material => [material.id, material]));
     const groupedRefs = new Map();
     for (let layerIndex = 0; layerIndex < composition.layers.length; layerIndex++) {
@@ -63,18 +66,8 @@
         // Capability analysis is diagnostic only. Every loaded asset is projected to
         // inert static image layers; unsupported dynamic behavior is not invoked.
         analysis = analyzeAssetCached(sourceAsset);
-        const overall = resolveOverallTransform(composition, character, material);
         pruneOverallGeometry(character, material.id, sourceAsset, refs);
-        const runtimeCenter = cachedOverallCenter(character, material.id);
-        if (runtimeCenter) {
-          overall.centerX = runtimeCenter.x;
-          overall.centerY = runtimeCenter.y;
-        } else {
-          // Do not visibly rotate/scale around the legacy 100x100 metadata
-          // fallback while the real texture geometry is still being learned.
-          overall.rotation = 0;
-          overall.scale = 1;
-        }
+        const overall = resolveRenderableOverallTransform(composition, character, material);
         const layerGroups = buildStaticSynthetic({ character, material, refs, asset: sourceAsset, analysis, overall });
         for (let sourceOrder = 0; sourceOrder < layerGroups.length; sourceOrder++) {
           const group = layerGroups[sourceOrder];
@@ -94,7 +87,6 @@
   const CONTENT_MIN_PIXELS = 4;
   const CONTENT_SCAN_MAX_EDGE = 512;
   const textureContentPivotCache = new Map();
-  let contentPivotRefreshScheduled = false;
 
   // Asset metadata in BC R130 does not contain rendered texture dimensions.
   // Geometry discovered at GLDrawImage is therefore the authoritative source
@@ -165,7 +157,13 @@
     layerMap.set(layerKey, rect);
     materialMap.set(materialId, layerMap);
     overallGeometryCache.set(character, materialMap);
-    if (changed) scheduleContentPivotRefresh();
+    // A local transform changes this rectangle every input step. Repainting again
+    // is only useful when a material-level rotation/scale consumes the new union
+    // center; otherwise the current draw already contains the final local result.
+    const needsOverallCenter = options.__coeNeedsOverallCenter === true ||
+      (typeof options.OverallRotation === "number" && options.OverallRotation !== 0) ||
+      (typeof options.OverallScale === "number" && Math.abs(options.OverallScale - 1) > 0.001);
+    if (changed && needsOverallCenter) scheduleContentPivotRefresh();
   }
 
   function pruneOverallGeometry(character, materialId, asset, refs) {
@@ -197,6 +195,67 @@
       }
     }
     return bounds ? { x: (bounds.left + bounds.right) / 2, y: (bounds.top + bounds.bottom) / 2 } : null;
+  }
+
+  function resolveRenderableOverallTransform(composition, character, material) {
+    const rotation = typeof material?.overallRotation === "number" ? material.overallRotation : 0;
+    const scale = typeof material?.overallScale === "number" ? material.overallScale : 1;
+    const offsetX = typeof material?.overallOffsetX === "number" ? material.overallOffsetX : 0;
+    const offsetY = typeof material?.overallOffsetY === "number" ? material.overallOffsetY : 0;
+    const needsCenter = rotation !== 0 || Math.abs(scale - 1) > 0.001;
+    const runtimeCenter = cachedOverallCenter(character, material?.id);
+    const center = runtimeCenter || (needsCenter
+      ? computeDefaultOverallCenter(composition, character, material?.id)
+      : { x: 0, y: 0 });
+    // Do not visibly rotate/scale around metadata fallback while the authoritative
+    // texture geometry is still being learned. Offset-only transforms do not
+    // consume the center and can be rendered immediately.
+    return {
+      rotation: needsCenter && !runtimeCenter ? 0 : rotation,
+      scale: needsCenter && !runtimeCenter ? 1 : scale,
+      offsetX, offsetY, centerX: center.x, centerY: center.y,
+      pendingCenter: needsCenter && !runtimeCenter,
+    };
+  }
+
+  function syncLocalSyntheticRuntime(character) {
+    if (character !== globalThis.Player || uiMode !== "editor") return false;
+    const composition = getComposition(character);
+    const groups = syntheticByCharacter.get(character);
+    if (!composition || !Array.isArray(groups) || !groups.length) return false;
+    const materials = new Map((composition.materials || []).map(material => [material.id, material]));
+    const refsByMaterial = new Map();
+    for (const ref of composition.layers || []) {
+      if (!refsByMaterial.has(ref.materialId)) refsByMaterial.set(ref.materialId, []);
+      refsByMaterial.get(ref.materialId).push(ref);
+    }
+    const visibleRefs = new Set();
+    for (const ref of composition.layers || []) {
+      const material = materials.get(ref.materialId);
+      if (!ref.hidden && material && !material.hidden) visibleRefs.add(ref);
+    }
+    if (visibleRefs.size !== groups.length) return false;
+    const stateByMaterial = new Map();
+    for (const group of groups) {
+      const material = materials.get(group.material?.id);
+      const refs = refsByMaterial.get(material?.id) || [];
+      const asset = group.item?.Asset?.__coeSourceAsset || group.item?.Asset?.Asset;
+      const liveRef = group.drawable?.[0]?.ref;
+      if (!material || material.hidden || !asset || !refs.length || !visibleRefs.has(liveRef)) return false;
+      let state = stateByMaterial.get(material.id);
+      if (!state) {
+        state = {
+          material,
+          overall: resolveRenderableOverallTransform(composition, character, material),
+          colors: resolveMaterialColors(material, asset, refs),
+        };
+        stateByMaterial.set(material.id, state);
+      }
+      group.material = state.material;
+      Object.assign(group.overall, state.overall);
+      group.item.Color = state.colors;
+    }
+    return true;
   }
 
   // Alpha 边界只依赖纹理本身，与颜色、Mirror、Invert 和图层变换无关。
@@ -244,22 +303,13 @@
   }
 
   function scheduleContentPivotRefresh() {
-    if (contentPivotRefreshScheduled) return;
-    contentPivotRefreshScheduled = true;
-    const refresh = () => {
-      contentPivotRefreshScheduled = false;
-      try {
-        if (typeof globalThis.CharacterRefresh === "function" && globalThis.Player) {
-          CharacterRefresh(globalThis.Player, false, false);
-          const characters = Array.isArray(globalThis.ChatRoomCharacter) ? globalThis.ChatRoomCharacter : [];
-          for (const character of characters) {
-            if (character && character !== globalThis.Player) CharacterRefresh(character, false, false);
-          }
-        }
-      } catch (_) { /* Alpha 中心仅是视觉增强，刷新失败时保留几何中心 fallback */ }
-    };
-    if (typeof globalThis.requestAnimationFrame === "function") globalThis.requestAnimationFrame(refresh);
-    else if (typeof globalThis.setTimeout === "function") globalThis.setTimeout(refresh, 0);
+    try {
+      if (globalThis.Player) requestCharacterRefresh(globalThis.Player, uiMode === "editor" ? "visual" : "full");
+      const characters = Array.isArray(globalThis.ChatRoomCharacter) ? globalThis.ChatRoomCharacter : [];
+      for (const character of characters) {
+        if (character && character !== globalThis.Player) requestCharacterRefresh(character, "full");
+      }
+    } catch (_) { /* Alpha 中心仅是视觉增强，刷新失败时保留几何中心 fallback */ }
   }
 
   function finishTextureContentPivot(url, pivot, bounds) {
@@ -615,16 +665,8 @@
           if (!isDrawableLayer(sourceLayer)) throw new Error("source-layer-not-drawable");
         }
         analysis = analyzeAssetCached(sourceAsset);
-        const overall = resolveOverallTransform({ layers: refs }, character, material);
         pruneOverallGeometry(character, material.id, sourceAsset, refs);
-        const runtimeCenter = cachedOverallCenter(character, material.id);
-        if (runtimeCenter) {
-          overall.centerX = runtimeCenter.x;
-          overall.centerY = runtimeCenter.y;
-        } else {
-          overall.rotation = 0;
-          overall.scale = 1;
-        }
+        const overall = resolveRenderableOverallTransform({ layers: refs }, character, material);
         const layerGroups = buildStaticSynthetic({ character, material, refs, asset: sourceAsset, analysis, overall });
         for (let sourceOrder = 0; sourceOrder < layerGroups.length; sourceOrder++) {
           const group = layerGroups[sourceOrder];
@@ -812,6 +854,7 @@
                 transformed.OverallOffsetY = clamp(overall.offsetY, -1200, 1200);
                 transformed.OverallCenterX = overall.centerX;
                 transformed.OverallCenterY = overall.centerY;
+                if (overall.pendingCenter === true) transformed.__coeNeedsOverallCenter = true;
               }
               // GLDrawImage is the first point where the actual texture size is
               // known. Carry an internal identity through the callback so it can

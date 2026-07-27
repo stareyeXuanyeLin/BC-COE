@@ -12,17 +12,12 @@
   }
 
   function statusSnapshot() {
-    const echo = echoRuntimeInfo();
     return cloneJSON({
       installed: runtimeInstalled,
       active: initialized && !duplicateInstance,
       duplicateInstance,
       version: VERSION,
       bcVersion: String(globalThis.GameVersion || globalThis.CurrentVersion || "R130"),
-      echoDetected: echo.detected,
-      echoVersion: echo.version,
-      echoVersionVerified: echo.verified,
-      authorizationStatus: echo.authorization,
       ...countCapabilities(),
       activeMaterialCount: runtimeMaterialState.size,
       skippedMaterials: diagnostics.skippedMaterials,

@@ -42,7 +42,7 @@ function load(options = {}) {
   };
   Object.assign(sandbox, options.globals || {});
   sandbox.globalThis = sandbox;
-  vm.runInNewContext(code, sandbox, { filename: 'coe-echo-remote.js' });
+  vm.runInNewContext(code, sandbox, { filename: 'custom-outfit-editor.js' });
   return { api: sandbox.__COE_TEST_API__, sandbox, assets, player, store, sent };
 }
 

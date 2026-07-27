@@ -33,7 +33,7 @@
 
   function sanitizeVisualPoseMapping(mapping) {
     if (!mapping || typeof mapping !== "object" || Array.isArray(mapping)) return mapping;
-    // R130 removed some legacy pose names (notably LegsOpen), while older Echo
+    // R130 removed some legacy pose names (notably LegsOpen), while older third-party
     // assets can still carry them. BC ignores those entries but warns on every
     // synthetic redraw, so strip only keys the current runtime does not know.
     if (typeof PoseRecord !== "object" || !PoseRecord) return mapping;

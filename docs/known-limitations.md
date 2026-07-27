@@ -28,13 +28,13 @@ COE Remote 只复制本机已加载 Asset 的普通图片层。以下内容不�
 
 ## 本地与 Mod 兼容
 
-- Custom Outfit Editor 当前版本与旧 COE、COE-Echo 等历史版本不能同时启用。`Echo` 是历史版本区分与兼容标记，不表示当前插件依赖 Echo 的服装扩展。
+- Custom Outfit Editor 当前版本不能与其它同名或旧版本实例同时启用。
 - 视觉代理已针对 LSCG `smartGetAssetGroup` 回退和动态标志写入做防护；拥有同等页面权限的其它 Mod 仍可能改变 BC 绘制链。
 - Character/Asset Family 不匹配时按素材缺失局部降级。
 - capability/provider/version 分析仅用于诊断，不保证第三方素材的静态图片路径在所有版本一致。
-- R130 已移除但旧 Echo 素材仍携带的姿势键（实测为 `LegsOpen`）会被合成视觉图层过滤；源 Asset 不修改，Echo 自身加载期仍可能输出少量同类警告。
+- R130 已移除但部分旧第三方素材仍携带的姿势键（实测为 `LegsOpen`）会被合成视觉图层过滤；源 Asset 不修改。
 - 实测出现过 `Assets/Female3DCG/Pussy/Hard/Pussy1_White.png` 404。它不影响协议与其它 material，但对应 Type 图片变体可能缺失；确认来源素材前不做全局移除 `Type` 的破坏性降级。
 
 ## 验收状态
 
-Node 协议、Store、transport 边界和 renderer 隔离测试已覆盖；1.8.0 已确认真实双客户端私人房在 Echo、BCX、LSCG、WCE 同开时可双向看见自定义服装。Appearance/Bundle/status、完整生命周期、缺失素材、1.8.1 页面复测及三客户端仍须按 `multiplayer-test-plan.md` 执行。
+Node 协议、Store、transport 边界和 renderer 隔离测试已覆盖；真实双客户端私人房已确认在多插件环境中可双向看见自定义服装。Appearance/Bundle/status、完整生命周期、缺失素材及三客户端仍须按多人测试计划继续复测。

@@ -1,6 +1,6 @@
 # Bondage Club - Custom Outfit Editor
 
-Custom Outfit Editor 是独立的自定义服装编辑器，包含图层复制、图层变换、素材整体变换、服装格标签以及跨玩家远端视觉同步。项目开发过程中加入了对 Echo 的服装扩展插件的兼容；仓库目录和构建文件中的 `Echo`、`Echo Mirror` 是早期用于区分开发版本的历史名称，不表示插件基于或依赖 Echo。当前正式发布线路统一使用 `main` 分支。
+Custom Outfit Editor 是用于组合、编辑和同步已加载服装素材的自定义服装编辑器，包含图层复制、图层变换、素材整体变换、服装格标签以及跨玩家远端视觉同步。当前正式发布线路统一使用 `main` 分支。
 
 ## 功能
 
@@ -27,15 +27,15 @@ Custom Outfit Editor 是独立的自定义服装编辑器，包含图层复制�
 
 ### 加载器安装（推荐）
 
-[![Install Loader](https://img.shields.io/badge/Tampermonkey-%E2%86%95%20%E5%AE%89%E8%A3%85%E6%AD%A3%E5%BC%8F%E7%89%88-8B0000?labelColor=1c1c1c&logo=tampermonkey)](https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/main/dist/CustomOutfitEditorEchoMirror.loader.user.js)
+[![Install Loader](https://img.shields.io/badge/Tampermonkey-%E2%86%95%20%E5%AE%89%E8%A3%85%E6%AD%A3%E5%BC%8F%E7%89%88-8B0000?labelColor=1c1c1c&logo=tampermonkey)](https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/main/dist/CustomOutfitEditor.loader.user.js)
 
-加载器每次进入游戏时从 `main` 分支获取最新核心脚本。请停用或删除旧 COE、COE-Echo、测试版加载器和重构版加载器，避免多个版本同时注册绘制 Hook。
+加载器每次进入游戏时从 `main` 分支获取最新核心脚本。请停用或删除其它 Custom Outfit Editor 版本，避免多个实例同时注册绘制 Hook。
 
 ### 完整脚本安装
 
 直接安装：
 
-<https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/main/dist/CustomOutfitEditorEchoMirror.user.js>
+<https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/main/dist/CustomOutfitEditor.user.js>
 
 ## 多人验证
 

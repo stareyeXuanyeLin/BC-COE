@@ -2,7 +2,7 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $source = Join-Path $root 'src'
 $dist = Join-Path $root 'dist'
-$output = Join-Path $dist 'CustomOutfitEditorEchoMirror.user.js'
+$output = Join-Path $dist 'CustomOutfitEditor.user.js'
 $parts = @(
   '00-userscript-header.js','01-runtime.js','02-data.js','03-storage.js','04-assets.js',
   '05-capabilities.js','06-adapters.js','07-renderer.js','08-ui-shell.js','09-wardrobe.js',

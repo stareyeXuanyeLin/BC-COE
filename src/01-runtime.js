@@ -1,5 +1,5 @@
   const MOD_NAME = "CustomOutfitEditor";
-  const VERSION = "1.0.1";
+  const VERSION = "1.0.2";
   console.info(`[${MOD_NAME}] userscript injected`, location.href);
   const SETTINGS_KEY = "CustomOutfitEditor";
   const STORAGE_KEY = "BC.CustomOutfitEditor.v1";

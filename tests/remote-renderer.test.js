@@ -38,7 +38,7 @@ test('character without remote snapshot returns original base layer reference', 
   assert.equal(hooks.CharacterAppearanceSortLayers([remote], () => base), base);
 });
 
-test('loaded static BC/Echo/other assets project through an inert visual proxy', () => {
+test('loaded static vanilla and third-party assets project through an inert visual proxy', () => {
   for (const asset of [makeAsset('Cloth', 'Dress'), makeAsset('Shoes', '鱼嘴高跟鞋'), makeAsset('ClothAccessory', 'OtherMod')]) {
     const remote = { MemberNumber: 7, Appearance: [], AppearanceLayers: [], AssetFamily: 'Female3DCG' };
     const value = { v: 1, m: [{ g: asset.Group.Name, a: asset.Name, c: ['#fff'] }], l: [{ m: 0, n: 'Base', i: 0, p: 10, x: 0, y: 0, o: 1 }] };

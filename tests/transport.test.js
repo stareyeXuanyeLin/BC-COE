@@ -16,7 +16,7 @@ test('Hidden handler validates the real sender and internally consumes damaged p
   assert.equal(api.onRemoteMessage({ Type: 'Chat', Sender: 7, Content: 'hello' }), false);
 });
 
-test('self broadcast echo is ignored', () => {
+test('self broadcast reflection is ignored', () => {
   const player = { AccountName: 'A', MemberNumber: 1, AssetFamily: 'Female3DCG', Appearance: [], AppearanceLayers: [], ExtensionSettings: {} };
   const { api } = load({ player, characters: [player] });
   assert.equal(api.onRemoteMessage({ Type: 'Hidden', Sender: 1, Content: state(api) }), true);

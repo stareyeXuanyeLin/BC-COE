@@ -1,10 +1,10 @@
 {
-  "name": "custom-outfit-editor-echo-mirror-edition",
+  "name": "custom-outfit-editor",
   "private": true,
-  "version": "1.0.1",
+  "version": "1.0.2",
   "scripts": {
     "build": "powershell -NoProfile -ExecutionPolicy Bypass -File ./build.ps1",
     "test": "node --test --test-isolation=none tests/*.test.js",
-    "check": "node --check dist/CustomOutfitEditorEchoMirror.user.js"
+    "check": "node --check dist/CustomOutfitEditor.user.js"
   }
 }

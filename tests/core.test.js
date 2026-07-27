@@ -46,7 +46,7 @@ function load(options = {}) {
   };
   Object.assign(sandbox, options.globals || {});
   sandbox.globalThis = sandbox;
-  vm.runInNewContext(code, sandbox, { filename: 'coe-echo.js' });
+  vm.runInNewContext(code, sandbox, { filename: 'custom-outfit-editor.js' });
   return { api: sandbox.__COE_TEST_API__, sandbox, assets, player, store };
 }
 
@@ -133,12 +133,12 @@ test('editor exposes only clothing or underwear appearance slots and stores the 
   cloth.Group.Description = '衣服';
   const eyes = makeAsset('Eyes', 'Blue');
   eyes.Group.AllowNone = false;
-  const echoBurger = makeAsset('EchoBurgerCloth', 'BurgerTag');
-  echoBurger.Group.Clothing = true;
-  echoBurger.Group.Description = '🍔 Echo服装格';
-  const { api } = load({ assets: [cloth, eyes, echoBurger] });
+  const customBurger = makeAsset('BurgerCloth', 'BurgerTag');
+  customBurger.Group.Clothing = true;
+  customBurger.Group.Description = '🍔 第三方服装格';
+  const { api } = load({ assets: [cloth, eyes, customBurger] });
   assert.deepEqual(Array.from(api.clothingSlotGroups(), group => group.Name), ['Cloth']);
-  assert.equal(api.clothingSlotGroups().some(group => group.Name === 'EchoBurgerCloth'), false);
+  assert.equal(api.clothingSlotGroups().some(group => group.Name === 'BurgerCloth'), false);
   const normalized = api.normalizeComposition({ name: '星裙', slotGroup: 'Cloth', materials: [], layers: [] }, { validateReferences: false });
   assert.equal(normalized.slotGroup, 'Cloth');
   assert.equal(api.compactCompositionForStorage(normalized).slotGroup, 'Cloth');
@@ -150,14 +150,14 @@ test('tag assets register as transparent clothing and enabling can replace the c
   const dress = makeAsset('Cloth', 'Dress');
   dress.Group.Clothing = true;
   dress.Group.Description = '衣服';
-  const burger = makeAsset('EchoBurgerCloth', 'BurgerDress');
+  const burger = makeAsset('BurgerCloth', 'BurgerDress');
   burger.Group.Clothing = true;
-  burger.Group.Description = '🍔 Echo服装格';
+  burger.Group.Description = '🍔 第三方服装格';
   const assets = [dress, burger];
   const player = { AccountName: 'A', MemberNumber: 1, AssetFamily: 'Female3DCG', Appearance: [{ Asset: dress }], AppearanceLayers: [], ExtensionSettings: {} };
   const globals = {
     AssetGroup: [dress.Group, burger.Group],
-    AssetFemale3DCG: [{ Group: 'Cloth', Clothing: true, AllowNone: true }, { Group: 'EchoBurgerCloth', Clothing: true, AllowNone: true }],
+    AssetFemale3DCG: [{ Group: 'Cloth', Clothing: true, AllowNone: true }, { Group: 'BurgerCloth', Clothing: true, AllowNone: true }],
     AssetAdd: (group, definition) => {
       const asset = { Name: definition.Name, Wear: true, Group: group, Layer: definition.Layer, Description: definition.Description, DynamicDescription: definition.DynamicDescription, DynamicName: definition.DynamicName, DefaultColor: [] };
       group.Asset ||= [];
@@ -177,7 +177,7 @@ test('tag assets register as transparent clothing and enabling can replace the c
   assert.equal(api.registerTagAssets(), true);
   const tag = assets.find(asset => asset.Name === 'COECustomOutfit');
   assert.equal(tag.Layer[0].HasImage, false);
-  assert.equal(assets.some(asset => asset.Name === 'COECustomOutfit' && asset.Group.Name === 'EchoBurgerCloth'), false);
+  assert.equal(assets.some(asset => asset.Name === 'COECustomOutfit' && asset.Group.Name === 'BurgerCloth'), false);
   assert.equal(tag.DynamicDescription(), '自定义衣服');
   assert.equal(api.equipTagForGroup('Cloth'), true);
   assert.equal(player.Appearance.length, 1);
@@ -298,23 +298,22 @@ test('ordinary vanilla Hide Block and Effect metadata do not disable static clot
   assert.equal(result.reasons.includes('formal-appearance-semantics'), false);
 });
 
-test('verified installed Echo runtime enables static Chinese-named Echo assets', () => {
+test('static third-party assets are analyzed without provider branding', () => {
   const asset = makeAsset('Cloth', '测试裙');
-  const bcModSdk = { getModsInfo: () => [{ name: '服装拓展', fullName: 'Echo的服装拓展', version: '1.129.4', repository: 'https://github.com/SugarChain-Studio/echo-clothing-ext' }] };
-  const { api } = load({ assets: [asset], globals: { bcModSdk } });
+  const { api } = load({ assets: [asset] });
   const result = api.analyzeSourceAsset(asset);
-  assert.equal(result.provider, 'echo');
+  assert.equal(result.provider, 'third-party');
   assert.equal(result.authorization, 'allowed');
   assert.equal(result.compatibility, 'safe');
-  assert.equal(result.adapterId, 'echo-static');
+  assert.equal(result.adapterId, 'static');
 });
 
-test('Echo candidates remain diagnosable without a verified runtime', () => {
+test('explicit high-risk third-party tuples remain diagnosable', () => {
   const { api } = load();
-  const result = api.analyzeSourceAsset(makeAsset('Shoes', '鱼嘴高跟鞋'));
-  assert.equal(result.provider, 'echo');
-  assert.equal(result.compatibility, 'unverified');
-  assert.ok(result.reasons.includes('echo-version-unknown'));
+  const result = api.analyzeSourceAsset(makeAsset('Cloth', '交领右衽'));
+  assert.equal(result.provider, 'third-party');
+  assert.equal(result.compatibility, 'unsupported');
+  assert.ok(result.reasons.includes('manifest-denied'));
 });
 
 test('diagnostic incompatibility does not block static projection', () => {
@@ -364,7 +363,7 @@ test('plain property schema rejects cycles, arrays, functions and oversized reco
 test('compact serializer omits redundant/UI/runtime fields', () => {
   const asset = makeAsset();
   const { api } = load({ assets: [asset] });
-  const raw = { version: 4, appearanceSanitizedVersion: 1, equippedIds: ['s'], schemes: [{ id: 's', updatedAt: 123, composition: { ...compositionFor(asset), materials: [{ ...compositionFor(asset).materials[0], collapsed: true, defaultColors: ['Default'], provider: 'echo' }], layers: [{ ...compositionFor(asset).layers[0], defaultOffsetX: 0, defaultOffsetY: 0, defaultColor: null, defaultPriority: 10, defaultOpacity: 1, sourceProperty: { Type: 'x' }, sourceColor: 'Default' }] } }] };
+  const raw = { version: 4, appearanceSanitizedVersion: 1, equippedIds: ['s'], schemes: [{ id: 's', updatedAt: 123, composition: { ...compositionFor(asset), materials: [{ ...compositionFor(asset).materials[0], collapsed: true, defaultColors: ['Default'], provider: 'third-party' }], layers: [{ ...compositionFor(asset).layers[0], defaultOffsetX: 0, defaultOffsetY: 0, defaultColor: null, defaultPriority: 10, defaultOpacity: 1, sourceProperty: { Type: 'x' }, sourceColor: 'Default' }] } }] };
   const compact = api.compactWardrobeForStorage(raw);
   const text = JSON.stringify(compact);
   for (const forbidden of ['updatedAt','appearanceSanitizedVersion','collapsed','defaultOffsetX','defaultOffsetY','defaultColor','defaultPriority','defaultOpacity','provider','sourceColor']) assert.equal(text.includes(forbidden), false, forbidden);

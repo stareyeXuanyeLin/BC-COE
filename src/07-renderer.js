@@ -755,9 +755,8 @@
       return next(args);
     });
 
-    // bcModSdk 1.2.0 calls higher priorities first. Echo's local snapshot does not
-    // hook CharacterAppearanceSortLayers; priority 0 therefore wraps only the
-    // verified downstream chain without assuming an arbitrary "late" number.
+    // bcModSdk 1.2.0 calls higher priorities first. The verified downstream chain
+    // is wrapped at priority 0 without assuming an arbitrary late priority.
     modApi.hookFunction("CharacterAppearanceSortLayers", 0, (args, next) => {
       const character = args[0];
       const baseLayers = next(args) || [];

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bondage Club - Custom Outfit Editor
 // @namespace    https://github.com/stareyeXuanyeLin/BC-COE
-// @version      1.8.1
+// @version      1.8.2
 // @description  制作中（WIP）。仓库公开仅便于 Tampermonkey 引用，不建议使用。
 // @author       凡尘 / 佩菈
 // @match        https://www.bondageprojects.com/R*/*
@@ -67,9 +67,9 @@
   let layerNameCachePromise = null;
   let colorPickerSession = null;
   let colorPickerClosing = false;
-  // Only one layer or composition-level target can own transform controls.
+  // Only one layer or material-level target can own transform controls.
   let transformEditTarget = null;
-  let transformPointer = null;
+  const expandedMaterialGroups = new Set();
 
   const log = (...args) => console.log(`[${MOD_NAME}]`, ...args);
   const warn = (...args) => console.warn(`[${MOD_NAME}]`, ...args);
@@ -1131,8 +1131,12 @@
     const character = options?.__coeGeometryCharacter;
     const materialId = options?.__coeGeometryMaterialId;
     const layerKey = options?.__coeGeometryLayerKey;
-    if (!character || materialId == null || layerKey == null || options?.__coeGeometryIsBlink === true ||
-      !(texW > 1) || !(texH > 1)) return;
+    if (!character || materialId == null || layerKey == null || options?.__coeGeometryIsBlink === true) return;
+    // BC only marks characters wearing a formal Appearance item dirty when its
+    // texture finishes loading. COE layers are synthetic, so start our own load
+    // observer before rejecting the initial 1x1 placeholder geometry.
+    if (url) resolveTextureContentBounds(url);
+    if (!(texW > 1) || !(texH > 1)) return;
     const materialMap = overallGeometryCache.get(character) || new Map();
     const layerMap = materialMap.get(materialId) || new Map();
     const off = Number.isFinite(offsetX) ? offsetX : 0;
@@ -1868,10 +1872,10 @@
     style.textContent = `
 #${BUTTON_ID}{position:fixed;left:18px;top:18px;z-index:99980;min-width:176px;border:2px solid #111;border-radius:8px;background:linear-gradient(#fff,#cfeaff);color:#102333;padding:9px 14px;font:700 15px/1.2 system-ui;box-shadow:0 3px 0 #111,0 9px 24px #0008;cursor:pointer}#${BUTTON_ID}:hover{filter:brightness(1.07);transform:translateY(-1px)}
 #${ROOT_ID}{position:fixed;inset:0;z-index:99990;background:transparent;color:#111;font:14px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif;box-sizing:border-box;pointer-events:none}#${ROOT_ID} *{box-sizing:border-box}#${ROOT_ID} button,#${ROOT_ID} input,#${ROOT_ID} select{font:inherit}.coe-panel{position:absolute;inset:0;background:transparent;pointer-events:none}.coe-head{position:absolute;left:0;right:0;top:0;height:72px;display:flex;align-items:center;gap:14px;padding:9px 18px;border-bottom:2px solid #111;background:linear-gradient(180deg,#f6fbff 0,#c4dbe9 100%);color:#132333;box-shadow:0 3px 12px #0008;pointer-events:auto;z-index:3}.coe-brand{display:flex;align-items:center;gap:11px;min-width:0;flex:1}.coe-brand-mark{display:grid;place-items:center;width:42px;height:42px;flex:none;border:2px solid #142535;border-radius:50%;background:#fff;color:#24658e;font-size:22px}.coe-head h2{margin:0;font-size:20px;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.coe-build{display:block;margin-top:3px;color:#496479;font:600 11px/1.2 ui-monospace,Consolas,monospace}.coe-body{position:absolute;right:0;top:72px;bottom:0;width:48%;min-width:560px;padding:12px;overflow:auto;border-left:2px solid #111;background:#d8d8d8f2;box-shadow:-6px 0 18px #0008;pointer-events:auto}.coe-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.coe-head .coe-actions{justify-content:flex-end}.coe-btn{border:2px solid #111923;border-radius:6px;background:linear-gradient(#fff,#c4d2dc);color:#152432;padding:7px 11px;font-weight:700;box-shadow:0 2px 0 #070b0f;cursor:pointer}.coe-btn:hover{filter:brightness(1.07)}.coe-btn:active{transform:translateY(1px);box-shadow:0 1px 0 #070b0f}.coe-primary{background:linear-gradient(#b8e9ff,#54b6eb);color:#071a27}.coe-danger{background:linear-gradient(#ffd0d8,#e67689);color:#32101a}.coe-muted{color:#536b7d}.coe-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.coe-card{border:2px solid #555;border-radius:7px;padding:11px;background:#f4f4f4;color:#142331;box-shadow:0 2px 5px #0003}.coe-card h3{margin:0 0 5px;font-size:16px}.coe-card-title{display:flex;align-items:center;gap:8px}.coe-card-title h3{flex:1}.coe-card.coe-equipped{border:3px solid #1889c8;background:#e0f3ff;box-shadow:0 0 0 2px #8bd2f7 inset}.coe-equipped-badge{display:inline-block;padding:3px 7px;border-radius:4px;background:#d5d5d5;color:#555;font-size:11px}.coe-card.coe-equipped .coe-equipped-badge{background:#1889c8;color:#fff}.coe-wardrobe-summary{margin-bottom:10px;padding:8px 10px;border:1px solid #677b88;border-radius:5px;background:#eef5f9;color:#233b4b;font-size:12px}.coe-remote-prefs{display:grid;gap:7px;margin-bottom:10px;padding:10px;border:2px solid #52758b;border-radius:7px;background:#e7f4fb}.coe-remote-prefs h3{margin:0 0 2px}.coe-remote-prefs label{display:flex;align-items:center;gap:7px;font-weight:700}.coe-remote-prefs input{width:17px;height:17px}.coe-remote-prefs p{margin:2px 0 0;color:#3f5c6d;font-size:11px}.coe-empty{text-align:center;padding:48px 18px;color:#536b7d}
-.coe-editor{height:100%;min-height:0}.coe-editor-tools{height:100%;min-height:0;display:grid;grid-template-rows:auto auto minmax(0,1fr);border:2px solid #555;border-radius:6px;background:#ededed;overflow:hidden}.coe-scheme-bar{padding:9px 11px;border-bottom:1px solid #777;background:#f7f7f7}.coe-field{display:flex;align-items:center;gap:8px}.coe-field label{font-weight:700;white-space:nowrap}.coe-field input,.coe-field select,.coe-search{min-width:0;border:1px solid #667c8c;border-radius:5px;background:#fff;color:#111;padding:7px 9px;outline:none}.coe-field input:focus,.coe-search:focus{border-color:#2699dc;box-shadow:0 0 0 2px #4bb9f044}.coe-title-input{width:100%;font-size:16px!important}.coe-tool-tabs{display:flex;gap:6px;padding:7px;border-bottom:1px solid #777;background:#c9c9c9}.coe-tool-tabs .coe-btn{flex:1;padding:6px 9px}.coe-tool-content{min-height:0;overflow:auto;padding:9px}.coe-editor-section{margin-bottom:11px}.coe-section-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 7px}.coe-section-head h3{margin:0;font-size:14px}.coe-badge{display:inline-flex;align-items:center;min-height:21px;padding:2px 7px;border:1px solid #688296;border-radius:999px;background:#e4f2fb;color:#24516c;font-size:11px}.coe-pose-groups{display:grid;gap:7px}.coe-pose-group{border:1px solid #777;border-radius:6px;padding:7px;background:#fafafa}.coe-pose-group h4{margin:0 0 6px;color:#222;font-size:12px}.coe-pose-buttons{display:flex;flex-wrap:wrap;gap:5px}.coe-pose-buttons .coe-btn{padding:4px 7px;font-size:12px}.coe-pose-buttons button.coe-active{background:linear-gradient(#b8e9ff,#54b6eb);border-color:#116c9d}.coe-hint{padding:7px 9px;border:1px solid #708798;border-radius:6px;background:#e4edf4;color:#233b4b;font-size:11px}.coe-transform-editor{margin:9px 0;padding:9px;border:2px solid #d28b28;border-radius:7px;background:#fff6df;color:#2b2112}.coe-transform-head{display:flex;align-items:center;justify-content:space-between;gap:8px}.coe-transform-head strong,.coe-transform-head .coe-muted{display:block}.coe-transform-fields{display:grid;grid-template-columns:repeat(4,minmax(70px,1fr));gap:6px;margin-top:7px}.coe-transform-fields label{display:flex;flex-direction:column;color:#333;font-size:10px}.coe-transform-fields input{margin-top:3px;width:100%;min-width:0;border:1px solid #967a45;border-radius:4px;background:#fff;color:#111;padding:5px}.coe-transform-head select{max-width:190px;border:1px solid #967a45;border-radius:4px;padding:5px;background:#fff;color:#111}.coe-transform-pad{display:flex;gap:6px;margin-top:7px}.coe-transform-pad button{border:2px solid #9a6a16;border-radius:5px;background:#ffe39a;color:#382400;padding:5px 8px;font-weight:700;cursor:grab;touch-action:none}.coe-transform-pad button:active{cursor:grabbing;background:#ffc95c}.coe-divider{height:1px;background:#888;margin:10px 0}.coe-layer-list{display:flex;flex-direction:column;gap:7px}.coe-layer{border:1px solid #777;border-radius:6px;padding:8px;background:#fafafa}.coe-layer.coe-hidden{opacity:.55}.coe-layer.coe-recycled{opacity:.7;border-style:dashed}.coe-layer-top{display:flex;gap:6px;align-items:center;margin-bottom:7px}.coe-drag-handle{color:#667;cursor:grab}.coe-layer-name{font-weight:700;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.coe-layer-top .coe-btn{padding:4px 6px;font-size:11px}.coe-controls{display:grid;grid-template-columns:repeat(5,minmax(62px,1fr));gap:6px}.coe-controls label{display:flex;flex-direction:column;color:#333;font-size:10px}.coe-controls input{margin-top:3px;width:100%;min-width:0;border:1px solid #777;border-radius:4px;background:#fff;color:#111;padding:5px}.coe-layer-transform{display:grid;grid-template-columns:repeat(2,minmax(100px,1fr));gap:6px;margin-top:6px;padding-top:6px;border-top:1px solid #bbb}.coe-layer-transform label{display:flex;flex-direction:column;color:#333;font-size:10px}.coe-layer-transform input{margin-top:3px;width:100%;min-width:0;border:1px solid #777;border-radius:4px;background:#fff;color:#111;padding:5px}.coe-color-choice{display:flex;align-items:center;gap:5px;margin-top:3px;width:100%;min-width:0;height:29px;padding:3px 5px;border:1px solid #667;border-radius:4px;background:#fff;color:#111;cursor:pointer}.coe-color-choice:hover{border-color:#168cca;background:#eaf7ff}.coe-color-choice:disabled{cursor:not-allowed;opacity:.55}.coe-color-swatch{width:18px;height:18px;flex:none;border:1px solid #555;border-radius:3px;background-color:#fff;background-image:linear-gradient(45deg,#ccc 25%,transparent 25%),linear-gradient(-45deg,#ccc 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#ccc 75%),linear-gradient(-45deg,transparent 75%,#ccc 75%);background-size:8px 8px;background-position:0 0,0 4px,4px -4px,-4px 0}.coe-color-swatch::after{display:block;width:100%;height:100%;border-radius:2px;background:var(--coe-color,#fff);content:""}.coe-color-choice code{min-width:0;overflow:hidden;color:inherit;font:700 10px/1.2 ui-monospace,Consolas,monospace;text-overflow:ellipsis;white-space:nowrap}.coe-material-editor{border:2px solid #666;border-radius:7px;background:#e4e4e4;overflow:hidden}.coe-material-editor+.coe-material-editor{margin-top:9px}.coe-material-editor.coe-hidden{opacity:.58}.coe-material-editor.coe-recycled{border-style:dashed}.coe-material-editor-head{display:flex;align-items:center;gap:7px;padding:8px;background:#d0d0d0;border-bottom:1px solid #777}.coe-material-identity{display:flex;flex:1;min-width:0;flex-direction:column}.coe-material-identity strong{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.coe-material-identity .coe-muted{font-size:10px}.coe-collapse{width:25px;height:25px;border:0;background:transparent;cursor:pointer}.coe-overall-color{display:flex;align-items:center;gap:5px;font-size:11px;font-weight:700}.coe-overall-color .coe-color-choice{width:auto;max-width:104px;margin-top:0}.coe-material-editor-layers{display:flex;flex-direction:column;gap:7px;padding:7px}.coe-material-editor.coe-collapsed .coe-material-editor-head{border-bottom:0}.coe-recycle-row{display:flex;align-items:center;gap:8px;padding:5px 7px;border:1px solid #888;border-radius:5px;background:#fafafa}.coe-recycle-row span{flex:1}
-.coe-material-picker{display:grid;grid-template-rows:auto minmax(0,1fr);height:100%;min-height:0}.coe-material-toolbar{position:sticky;top:-9px;z-index:2;padding:0 0 9px;background:#ededed}.coe-search{width:100%}.coe-materials{display:flex;flex-direction:column;gap:11px;min-height:0}.coe-material-group-title{position:sticky;top:38px;z-index:1;margin:0 0 6px;padding:5px 7px;border-radius:4px;background:#c9c9c9;color:#111;font-size:13px}.coe-material-group{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}.coe-material{display:flex;flex-direction:column;align-items:stretch;gap:4px;min-width:0;min-height:136px;border:1px solid #777;border-radius:5px;background:#fafafa;padding:6px;text-align:center;color:#111;cursor:pointer}.coe-material:hover{border-color:#168cca;background:#e2f4ff}.coe-material:disabled{cursor:not-allowed;filter:grayscale(.7);opacity:.58}.coe-material.coe-cap-safe{border-color:#268a52}.coe-material.coe-cap-limited{border-color:#c38b13}.coe-material.coe-cap-unverified,.coe-material.coe-cap-unsupported{border-color:#a34b56}.coe-material img{width:100%;height:96px;object-fit:contain;border-radius:4px;background:#eee}.coe-material strong{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:11px}.coe-material .coe-muted{font-size:10px}.coe-toast{position:fixed;left:50%;bottom:26px;transform:translate(-50%,14px);opacity:0;z-index:100010;background:#e8f4fc;color:#142331;border:2px solid #182735;border-radius:8px;padding:9px 15px;box-shadow:0 7px 22px #0009;transition:.2s;pointer-events:none}.coe-toast.coe-show{transform:translate(-50%,0);opacity:1}.coe-toast.coe-error{background:#ffd3dc}.coe-toast.coe-warn{background:#ffe4a8}
+.coe-editor{height:100%;min-height:0}.coe-editor-tools{height:100%;min-height:0;display:grid;grid-template-rows:auto auto minmax(0,1fr);border:2px solid #555;border-radius:6px;background:#ededed;overflow:hidden}.coe-scheme-bar{padding:9px 11px;border-bottom:1px solid #777;background:#f7f7f7}.coe-field{display:flex;align-items:center;gap:8px}.coe-field label{font-weight:700;white-space:nowrap}.coe-field input,.coe-field select,.coe-search{min-width:0;border:1px solid #667c8c;border-radius:5px;background:#fff;color:#111;padding:7px 9px;outline:none}.coe-field input:focus,.coe-search:focus{border-color:#2699dc;box-shadow:0 0 0 2px #4bb9f044}.coe-title-input{width:100%;font-size:16px!important}.coe-tool-tabs{display:flex;gap:6px;padding:7px;border-bottom:1px solid #777;background:#c9c9c9}.coe-tool-tabs .coe-btn{flex:1;padding:6px 9px}.coe-tool-content{min-height:0;overflow:auto;padding:9px}.coe-editor-section{margin-bottom:11px}.coe-section-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 7px}.coe-section-head h3{margin:0;font-size:14px}.coe-badge{display:inline-flex;align-items:center;min-height:21px;padding:2px 7px;border:1px solid #688296;border-radius:999px;background:#e4f2fb;color:#24516c;font-size:11px}.coe-pose-groups{display:grid;gap:3px}.coe-pose-group{display:grid;grid-template-columns:42px minmax(0,1fr);align-items:center;gap:5px}.coe-pose-group h4{margin:0;color:#3d5363;font-size:11px}.coe-pose-buttons{display:flex;flex-wrap:wrap;gap:3px}.coe-pose-buttons .coe-btn{padding:2px 6px;border-width:1px;border-radius:4px;box-shadow:none;font-size:10px}.coe-pose-buttons button.coe-active{background:linear-gradient(#b8e9ff,#54b6eb);border-color:#116c9d}.coe-hint{padding:7px 9px;border:1px solid #708798;border-radius:6px;background:#e4edf4;color:#233b4b;font-size:11px}.coe-transform-editor{margin:9px 0;padding:9px;border:2px solid #d28b28;border-radius:7px;background:#fff6df;color:#2b2112}.coe-transform-head{display:flex;align-items:center;justify-content:space-between;gap:8px}.coe-transform-head strong,.coe-transform-head .coe-muted{display:block}.coe-transform-fields{display:grid;grid-template-columns:repeat(4,minmax(70px,1fr));gap:6px;margin-top:7px}.coe-transform-fields label{display:flex;flex-direction:column;color:#333;font-size:10px}.coe-transform-fields input{margin-top:3px;width:100%;min-width:0;border:1px solid #967a45;border-radius:4px;background:#fff;color:#111;padding:5px}.coe-transform-head select{max-width:190px;border:1px solid #967a45;border-radius:4px;padding:5px;background:#fff;color:#111}.coe-divider{height:1px;background:#888;margin:10px 0}.coe-layer-list{display:flex;flex-direction:column;gap:7px}.coe-layer{border:1px solid #777;border-radius:6px;padding:8px;background:#fafafa}.coe-layer.coe-hidden{opacity:.55}.coe-layer.coe-recycled{opacity:.7;border-style:dashed}.coe-layer-top{display:flex;gap:6px;align-items:center;margin-bottom:7px}.coe-drag-handle{color:#667;cursor:grab}.coe-layer-name{font-weight:700;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.coe-layer-top .coe-btn{padding:4px 6px;font-size:11px}.coe-controls{display:grid;grid-template-columns:repeat(4,minmax(52px,1fr)) minmax(90px,1.4fr) repeat(2,minmax(52px,1fr));gap:4px;overflow-x:auto}.coe-controls label{display:flex;min-width:0;flex-direction:column;color:#333;font-size:10px}.coe-controls input{margin-top:2px;width:100%;min-width:0;height:27px;border:1px solid #777;border-radius:4px;background:#fff;color:#111;padding:3px 4px}.coe-color-choice{display:flex;align-items:center;gap:5px;margin-top:3px;width:100%;min-width:0;height:29px;padding:3px 5px;border:1px solid #667;border-radius:4px;background:#fff;color:#111;cursor:pointer}.coe-color-choice:hover{border-color:#168cca;background:#eaf7ff}.coe-color-choice:disabled{cursor:not-allowed;opacity:.55}.coe-color-swatch{width:18px;height:18px;flex:none;border:1px solid #555;border-radius:3px;background-color:#fff;background-image:linear-gradient(45deg,#ccc 25%,transparent 25%),linear-gradient(-45deg,#ccc 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#ccc 75%),linear-gradient(-45deg,transparent 75%,#ccc 75%);background-size:8px 8px;background-position:0 0,0 4px,4px -4px,-4px 0}.coe-color-swatch::after{display:block;width:100%;height:100%;border-radius:2px;background:var(--coe-color,#fff);content:""}.coe-color-choice code{min-width:0;overflow:hidden;color:inherit;font:700 10px/1.2 ui-monospace,Consolas,monospace;text-overflow:ellipsis;white-space:nowrap}.coe-material-editor{border:2px solid #666;border-radius:7px;background:#e4e4e4;overflow:hidden}.coe-material-editor+.coe-material-editor{margin-top:9px}.coe-material-editor.coe-hidden{opacity:.58}.coe-material-editor.coe-recycled{border-style:dashed}.coe-material-editor-head{display:flex;align-items:center;gap:7px;padding:8px;background:#d0d0d0;border-bottom:1px solid #777}.coe-material-identity{display:flex;flex:1;min-width:0;flex-direction:column}.coe-material-identity strong{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.coe-material-identity .coe-muted{font-size:10px}.coe-collapse{width:25px;height:25px;border:0;background:transparent;cursor:pointer}.coe-overall-color{display:flex;align-items:center;gap:5px;font-size:11px;font-weight:700}.coe-overall-color .coe-color-choice{width:auto;max-width:104px;margin-top:0}.coe-material-editor-layers{display:flex;flex-direction:column;gap:7px;padding:7px}.coe-material-editor.coe-collapsed .coe-material-editor-head{border-bottom:0}.coe-recycle-row{display:flex;align-items:center;gap:8px;padding:5px 7px;border:1px solid #888;border-radius:5px;background:#fafafa}.coe-recycle-row span{flex:1}
+.coe-material-picker{display:block;min-height:100%}.coe-material-toolbar{position:sticky;top:-9px;z-index:3;padding:0 0 9px;background:#ededed}.coe-search{width:100%}.coe-materials{display:flex;flex-direction:column;gap:7px;min-height:0}.coe-material-group-title{position:sticky;top:38px;z-index:2;margin:0 0 6px;border-radius:4px;background:#c9c9c9;color:#111;font-size:13px}.coe-material-group-toggle{display:grid;grid-template-columns:16px minmax(0,1fr) auto;align-items:center;gap:5px;width:100%;border:0;background:transparent;color:inherit;padding:5px 7px;text-align:left;cursor:pointer}.coe-material-group-toggle strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.coe-material-group-toggle small{padding:1px 5px;border-radius:999px;background:#eef3f6;color:#405765}.coe-material-section.coe-collapsed .coe-material-group{display:none}.coe-material-group{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}.coe-material{display:flex;flex-direction:column;align-items:stretch;gap:4px;min-width:0;min-height:136px;border:1px solid #777;border-radius:5px;background:#fafafa;padding:6px;text-align:center;color:#111;cursor:pointer}.coe-material:hover{border-color:#168cca;background:#e2f4ff}.coe-material:disabled{cursor:not-allowed;filter:grayscale(.7);opacity:.58}.coe-material.coe-cap-safe{border-color:#268a52}.coe-material.coe-cap-limited{border-color:#c38b13}.coe-material.coe-cap-unverified,.coe-material.coe-cap-unsupported{border-color:#a34b56}.coe-material img{width:100%;height:96px;object-fit:contain;border-radius:4px;background:#eee}.coe-material strong{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:11px}.coe-material .coe-muted{font-size:10px}.coe-toast{position:fixed;left:50%;bottom:26px;transform:translate(-50%,14px);opacity:0;z-index:100010;background:#e8f4fc;color:#142331;border:2px solid #182735;border-radius:8px;padding:9px 15px;box-shadow:0 7px 22px #0009;transition:.2s;pointer-events:none}.coe-toast.coe-show{transform:translate(-50%,0);opacity:1}.coe-toast.coe-error{background:#ffd3dc}.coe-toast.coe-warn{background:#ffe4a8}
 .coe-owned-color-picker{background:linear-gradient(180deg,#f7fbfe 0,#d5e1e8 100%)!important;border:2px solid #172631!important;border-radius:8px;box-shadow:0 8px 28px #000a!important}
-@media(max-width:1250px){.coe-body{width:50%;min-width:500px}.coe-grid{grid-template-columns:1fr}.coe-material-group{grid-template-columns:repeat(3,minmax(0,1fr))}.coe-controls{grid-template-columns:repeat(3,minmax(70px,1fr))}.coe-layer-transform{grid-template-columns:repeat(2,minmax(100px,1fr))}}
+@media(max-width:1250px){.coe-body{width:50%;min-width:500px}.coe-grid{grid-template-columns:1fr}.coe-material-group{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:800px){.coe-body{width:58%;min-width:0}.coe-head{height:80px;align-items:flex-start}.coe-body{top:80px}.coe-build{display:none}.coe-material-group{grid-template-columns:repeat(2,minmax(0,1fr))}}
 `;
     document.head.appendChild(style);
@@ -1951,7 +1955,7 @@
     editingId = null;
     previewPoseMapping = null;
     transformEditTarget = null;
-    transformPointer = null;
+    expandedMaterialGroups.clear();
     setTimeout(updateEntryButton, 0);
   }
 
@@ -2222,7 +2226,7 @@
     unloadOwnedColorPicker(picker);
   }
 
-  async function openGameColorPicker({ heading, currentColor, defaultColor, onAccept }) {
+  async function openGameColorPicker({ heading, currentColor, defaultColor, onPreview, onAccept, onCancel }) {
     const init = typeof globalThis.ColorPickerInit === "function" ? globalThis.ColorPickerInit : null;
     if (!init) return false;
     if (colorPickerSession) return true;
@@ -2238,6 +2242,13 @@
       root: null,
       previousZIndex: "",
       closed: false,
+      lastPreview: initialColor,
+      preview(value) {
+        const selected = normalizePickerColor(value, null);
+        if (!selected || selected === session.lastPreview || uiMode !== "editor" || !editing) return;
+        session.lastPreview = selected;
+        try { onPreview?.(selected); } catch (error) { warn("预览颜色失败", error); }
+      },
       finish() {
         if (session.closed) return;
         session.closed = true;
@@ -2260,14 +2271,24 @@
           defaultOpacity: [1],
           editOpacity: false,
         },
-        onInput: () => null,
+        onInput: fieldset => {
+          const output = fieldset?.querySelector?.('[name="output"]');
+          session.preview(output?.value);
+        },
         onExit: ({ colors }, save) => {
           const selected = normalizePickerColor(colors?.[0], initialColor);
+          if (save) session.preview(selected);
           session.finish();
           // 原版关闭回调不会保证清理 #color-picker，主动卸载并清除残留节点。
           unloadOwnedColorPicker(session.root || document.getElementById("color-picker"));
-          if (!save || uiMode !== "editor" || !editing || typeof onAccept !== "function") return;
-          try { onAccept(selected); } catch (error) { warn("应用颜色失败", error); toast("颜色没有应用成功", "error"); }
+          if (uiMode !== "editor" || !editing) return;
+          try {
+            if (save) onAccept?.(selected);
+            else onCancel?.(initialColor);
+          } catch (error) {
+            warn(save ? "应用颜色失败" : "恢复颜色失败", error);
+            toast("颜色没有更新成功", "error");
+          }
         },
       });
       if (session.closed) {
@@ -2326,12 +2347,8 @@
   }
 
   function setTransformTarget(target) {
-    const sameTarget = transformEditTarget && target && transformEditTarget.kind === target.kind &&
-      (target.kind === "material" ? transformEditTarget.materialId === target.materialId : transformEditTarget.index === target.index);
-    if (transformPointer && !sameTarget) return;
     if (!target) {
       transformEditTarget = null;
-      transformPointer = null;
     } else if (target.kind === "material") {
       const material = target.material || editing?.materials?.find(item => item.id === target.materialId);
       transformEditTarget = material ? { kind: "material", materialId: material.id, material } : null;
@@ -2374,69 +2391,20 @@
     if (host) renderEditorTools(host);
   }
 
-  function bindTransformHandle(button, kind) {
-    if (!button) return;
-    button.addEventListener("pointerdown", event => {
-      if (!transformEditTarget || !editing) return;
-      event.preventDefault();
-      event.stopPropagation();
-      const layer = transformEditTarget.kind === "layer" ? editing.layers[transformEditTarget.index] : null;
-      const material = transformEditTarget.kind === "material" ? editing.materials.find(item => item.id === transformEditTarget.materialId) : null;
-      const overall = material ? resolveOverallTransform(editing, globalThis.Player, material) : null;
-      transformPointer = { kind, startX: event.clientX, startY: event.clientY, layer, material,
-        rotation: layer?.rotation || 0, scale: layer?.scale || 1, overallRotation: overall?.rotation || 0, overallScale: overall?.scale || 1 };
-      const move = moveEvent => {
-        if (!transformPointer) return;
-        const dx = moveEvent.clientX - transformPointer.startX;
-        const dy = moveEvent.clientY - transformPointer.startY;
-        const state = transformPointer;
-        if (state.kind === "rotate") {
-          const value = state.layer ? state.rotation + dx * Math.PI / 180 : state.overallRotation + dx * Math.PI / 180;
-          if (state.layer) setOptionalTransformValue(state.layer, "rotation", clamp(value, -Math.PI, Math.PI), 0);
-          else if (state.material) setOptionalTransformValue(state.material, "overallRotation", clamp(value, -Math.PI, Math.PI), 0);
-        } else {
-          const value = clamp((state.layer ? state.scale : state.overallScale) * Math.max(0.1, 1 - dy / 120), 0.25, 3);
-          if (state.layer) setOptionalTransformValue(state.layer, "scale", value, 1);
-          else if (state.material) setOptionalTransformValue(state.material, "overallScale", value, 1);
-        }
-        refreshPreviewLoop();
-      };
-      const done = () => {
-        transformPointer = null;
-        window.removeEventListener("pointermove", move);
-        window.removeEventListener("pointerup", done);
-        window.removeEventListener("pointercancel", done);
-      };
-      window.addEventListener("pointermove", move);
-      window.addEventListener("pointerup", done);
-      window.addEventListener("pointercancel", done);
-    });
-  }
-
   function renderTransformEditor(content) {
     const host = content.querySelector("[data-transform-editor]");
     if (!host) return;
-    const selectedIndex = transformEditTarget?.kind === "layer"
-      ? `layer:${transformEditTarget.index}`
-      : transformEditTarget?.kind === "material"
-        ? `material:${editing?.materials?.findIndex(item => item.id === transformEditTarget.materialId) ?? -1}` : "";
-    const materialOptions = (editing?.materials || []).map((material, index) => `<option value="material:${index}">${escapeHTML(`${material.label || material.sourceAsset} · 素材整体`)}</option>`);
-    const layerOptions = (editing?.layers || []).map((layer, index) => {
-      const label = layer.layerLabel || layer.sourceLayer || `图层 #${index + 1}`;
-      return `<option value="layer:${index}">${escapeHTML(`${layer.sourceAsset || "素材"} · ${label}`)}</option>`;
-    });
-    const options = materialOptions.concat(layerOptions).join("");
-    host.innerHTML = `<div class="coe-transform-head"><div><strong>变换编辑</strong><span class="coe-muted">${escapeHTML(transformTargetLabel())}</span></div><div class="coe-actions"><select data-transform-target>${options}</select>${transformEditTarget ? '<button type="button" class="coe-btn" data-transform-done>完成</button>' : ''}</div></div><p class="coe-hint">旋转和缩放使用固定默认中心；未激活的图层不会显示变换控件。</p>${transformEditTarget ? '<div class="coe-transform-pad"><button type="button" data-transform-handle="rotate">↻ 旋转</button><button type="button" data-transform-handle="scale">⤢ 缩放</button></div>' : ''}`;
+    const selectedIndex = transformEditTarget?.kind === "material"
+      ? `material:${editing?.materials?.findIndex(item => item.id === transformEditTarget.materialId) ?? -1}` : "";
+    const materialOptions = (editing?.materials || []).map((material, index) => `<option value="material:${index}">${escapeHTML(`${material.label || material.sourceAsset} · 素材整体`)}</option>`).join("");
+    host.innerHTML = `<div class="coe-transform-head"><div><strong>变换编辑</strong><span class="coe-muted">${escapeHTML(transformTargetLabel())}</span></div><div class="coe-actions"><select data-transform-target><option value="">选择素材整体</option>${materialOptions}</select>${transformEditTarget ? '<button type="button" class="coe-btn" data-transform-done>完成</button>' : ''}</div></div><p class="coe-hint">单层变换请从对应图层进入；旋转与缩放共用固定默认中心。</p>`;
     const select = host.querySelector("[data-transform-target]");
     select.value = String(selectedIndex);
     select.addEventListener("change", () => {
-      const [kind, rawIndex] = select.value.split(":");
-      if (kind === "material") setTransformTarget({ kind: "material", material: editing?.materials?.[Number(rawIndex)] });
-      else setTransformTarget({ kind: "layer", index: Number(rawIndex) });
+      const [, rawIndex] = select.value.split(":");
+      if (select.value.startsWith("material:")) setTransformTarget({ kind: "material", material: editing?.materials?.[Number(rawIndex)] });
     });
     host.querySelector("[data-transform-done]")?.addEventListener("click", () => setTransformTarget(null));
-    bindTransformHandle(host.querySelector('[data-transform-handle="rotate"]'), "rotate");
-    bindTransformHandle(host.querySelector('[data-transform-handle="scale"]'), "scale");
     if (!transformEditTarget) return;
     if (transformEditTarget.kind === "material") {
       const material = editing.materials.find(item => item.id === transformEditTarget.materialId);
@@ -2536,14 +2504,27 @@
       renderLayerList(list);
     });
     group.querySelector("[data-overall-color]").addEventListener("click", () => {
+      const originalColors = [...material.colors];
+      const originalLayerColors = layers.map(layer => layer.color);
+      const applyColor = value => {
+        const count = Math.max(1, Number(asset?.ColorableLayerCount) || colors.length);
+        material.colors = Array(count).fill(value);
+        layers.forEach(layer => { layer.color = null; });
+        updateColorChoice(group.querySelector("[data-overall-color]"), value, defaultHex, value);
+        refreshPreviewLoop();
+      };
       chooseColor({
         heading: `${material.label || asset?.Description || material.sourceAsset} · 整体颜色`,
         currentColor: overallColor,
         defaultColor: "Default",
+        onPreview: applyColor,
         onAccept: value => {
-          const count = Math.max(1, Number(asset?.ColorableLayerCount) || colors.length);
-          material.colors = Array(count).fill(value);
-          layers.forEach(layer => { layer.color = null; });
+          applyColor(value);
+          renderLayerList(list);
+        },
+        onCancel: () => {
+          material.colors = originalColors;
+          layers.forEach((layer, index) => { layer.color = originalLayerColors[index]; });
           refreshPreviewLoop();
           renderLayerList(list);
         },
@@ -2584,6 +2565,17 @@
     return group;
   }
 
+  function nextCopyLayerLabel(layer, composition = editing) {
+    const current = layer?.layerLabel || getLayerLabelByRef(layer) || layer?.sourceLayer || "默认图层";
+    const base = current.replace(/(?:_copy)+$/i, "").replace(/_副本\d+$/, "");
+    const labels = new Set([...(composition?.layers || []), ...(composition?.recycle || [])]
+      .filter(item => !layer?.materialId || item.materialId === layer.materialId)
+      .map(item => item.layerLabel || getLayerLabelByRef(item) || item.sourceLayer || "默认图层"));
+    let suffix = 1;
+    while (labels.has(`${base}_副本${suffix}`)) suffix++;
+    return `${base}_副本${suffix}`;
+  }
+
   function renderMaterialLayerCards(host, material, layers, asset, list) {
     layers.forEach((layer, layerIndex) => {
       const sourceLayer = resolveSourceLayer(asset, layer);
@@ -2595,7 +2587,7 @@
       card.className = `coe-layer${layer.hidden ? " coe-hidden" : ""}`;
       var layerRotDeg = Math.round(((layer.rotation || 0) * 180 / Math.PI) * 100) / 100;
       var layerScaleVal = typeof layer.scale === "number" ? layer.scale : 1;
-      card.innerHTML = `<div class="coe-layer-top"><span class="coe-layer-name" title="${escapeHTML(`${layer.sourceGroup}/${layer.sourceAsset}/${layerName}`)}">${escapeHTML(layerName)}</span>${sourceLayer?.ColorGroup ? `<span class="coe-badge">颜色组：${escapeHTML(sourceLayer.ColorGroup)}</span>` : ""}<button type="button" class="coe-btn" data-edit-transform>调整变换</button><button type="button" class="coe-btn" data-hide>${layer.hidden ? "显示" : "隐藏"}</button><button type="button" class="coe-btn" data-copy>复制</button><button type="button" class="coe-btn" data-reset>本层默认</button><button type="button" class="coe-btn coe-danger" data-remove>清除</button></div><div class="coe-controls"><label>图层位置<input type="number" min="-99" max="99" step="1" data-key="priority" value="${layer.priority}"></label><label>偏移 X<input type="number" min="-1200" max="1200" step="1" data-key="offsetX" value="${layer.offsetX}"></label><label>偏移 Y<input type="number" min="-1200" max="1200" step="1" data-key="offsetY" value="${layer.offsetY}"></label><label>透明度<input type="number" min="0" max="1" step="0.05" data-key="opacity" value="${layer.opacity}"></label><label>图层颜色<button type="button" class="coe-color-choice" data-layer-color="${layerIndex}" ${canColor ? "" : "disabled"} title="${canColor ? `使用游戏原版颜色选择器编辑颜色槽 ${colorIndex}` : "原版将此图层标记为不可着色"}"><span class="coe-color-swatch"></span><code>${escapeHTML(material.colors[colorIndex] || "Default")}</code></button></label></div><div class="coe-layer-transform"><label>旋转<input type="number" step="1" min="-180" max="180" data-layer-transform="rotation" value="${layerRotDeg}">°</label><label>缩放<input type="number" step="0.05" min="0.25" max="3" data-layer-transform="scale" value="${layerScaleVal}"></label></div>`;
+      card.innerHTML = `<div class="coe-layer-top"><span class="coe-layer-name" title="${escapeHTML(`${layer.sourceGroup}/${layer.sourceAsset}/${layerName}`)}">${escapeHTML(layerName)}</span>${sourceLayer?.ColorGroup ? `<span class="coe-badge">颜色组：${escapeHTML(sourceLayer.ColorGroup)}</span>` : ""}<button type="button" class="coe-btn" data-edit-transform>调整变换</button><button type="button" class="coe-btn" data-hide>${layer.hidden ? "显示" : "隐藏"}</button><button type="button" class="coe-btn" data-copy>复制</button><button type="button" class="coe-btn" data-reset>本层默认</button><button type="button" class="coe-btn coe-danger" data-remove>清除</button></div><div class="coe-controls"><label>层级<input type="number" min="-99" max="99" step="1" data-key="priority" value="${layer.priority}"></label><label>偏移 X<input type="number" min="-1200" max="1200" step="1" data-key="offsetX" value="${layer.offsetX}"></label><label>偏移 Y<input type="number" min="-1200" max="1200" step="1" data-key="offsetY" value="${layer.offsetY}"></label><label>透明度<input type="number" min="0" max="1" step="0.05" data-key="opacity" value="${layer.opacity}"></label><label>颜色<button type="button" class="coe-color-choice" data-layer-color="${layerIndex}" ${canColor ? "" : "disabled"} title="${canColor ? `使用游戏原版颜色选择器编辑颜色槽 ${colorIndex}` : "原版将此图层标记为不可着色"}"><span class="coe-color-swatch"></span><code>${escapeHTML(material.colors[colorIndex] || "Default")}</code></button></label><label>旋转<input type="number" step="1" min="-180" max="180" data-layer-transform="rotation" value="${layerRotDeg}"></label><label>缩放<input type="number" step="0.05" min="0.25" max="3" data-layer-transform="scale" value="${layerScaleVal}"></label></div>`;
       updateColorChoice(card.querySelector("[data-layer-color]"), material.colors[colorIndex] || "Default", colorValue);
       card.querySelector("[data-edit-transform]").addEventListener("click", () => setTransformTarget({ kind: "layer", index: editing.layers.indexOf(layer), layer }));
       card.querySelector("[data-hide]").addEventListener("click", () => {
@@ -2618,7 +2610,7 @@
       });
       card.querySelector("[data-copy]").addEventListener("click", () => {
         var copy = Object.assign({}, layer);
-        copy.layerLabel = (layer.layerLabel || getLayerLabelByRef(layer) || layer.sourceLayer || "默认图层") + "_copy";
+        copy.layerLabel = nextCopyLayerLabel(layer);
         var idx = editing.layers.indexOf(layer);
         editing.layers.splice(idx + 1, 0, copy);
         refreshPreviewLoop();
@@ -2660,13 +2652,26 @@
       const colorButton = card.querySelector("[data-layer-color]");
       colorButton?.addEventListener("click", () => {
         if (!canColor) return;
+        const originalColor = material.colors[colorIndex];
+        const originalLayerColor = layer.color;
+        const applyColor = value => {
+          material.colors[colorIndex] = value;
+          layer.color = null;
+          updateColorChoice(colorButton, value, colorValue, value);
+          refreshPreviewLoop();
+        };
         chooseColor({
           heading: `${material.label || asset?.Description || material.sourceAsset} · ${layerName}`,
           currentColor: material.colors[colorIndex] || "Default",
           defaultColor: material.defaultColors?.[colorIndex] || asset?.DefaultColor?.[colorIndex] || "Default",
+          onPreview: applyColor,
           onAccept: value => {
-            material.colors[colorIndex] = value;
-            layer.color = null;
+            applyColor(value);
+            renderLayerList(list);
+          },
+          onCancel: () => {
+            material.colors[colorIndex] = originalColor;
+            layer.color = originalLayerColor;
             refreshPreviewLoop();
             renderLayerList(list);
           },
@@ -2703,10 +2708,18 @@
       if (!groups.has(groupName)) groups.set(groupName, []);
       groups.get(groupName).push(asset);
     }
+    const searching = typeof query === "string" && query.trim().length > 0;
     for (const [groupName, groupAssets] of groups) {
       const section = document.createElement("section");
-      section.className = "coe-material-section";
-      section.innerHTML = `<h3 class="coe-material-group-title">${escapeHTML(groupName)}</h3>`;
+      const collapsed = !searching && !expandedMaterialGroups.has(groupName);
+      section.className = `coe-material-section${collapsed ? " coe-collapsed" : ""}`;
+      section.innerHTML = `<h3 class="coe-material-group-title"><button type="button" class="coe-material-group-toggle" aria-expanded="${!collapsed}"><span>${collapsed ? "▶" : "▼"}</span><strong>${escapeHTML(groupName)}</strong><small>${groupAssets.length}</small></button></h3>`;
+      section.querySelector(".coe-material-group-toggle").addEventListener("click", () => {
+        if (searching) return;
+        if (expandedMaterialGroups.has(groupName)) expandedMaterialGroups.delete(groupName);
+        else expandedMaterialGroups.add(groupName);
+        renderMaterials(list, query);
+      });
       const grid = document.createElement("div");
       grid.className = "coe-material-group";
       for (const asset of groupAssets) {
@@ -2809,14 +2822,26 @@
     refreshPreviewLoop();
   }
 
+  function localizedPoseLabel(pose) {
+    const labels = {
+      BaseUpper: "自然上身", BackBoxTie: "背后箱式缚", BackCuffs: "背后并手", BackElbowTouch: "背后合肘",
+      OverTheHead: "双手过头", Yoked: "双手平举", TapedHands: "双手并拢",
+      BaseLower: "自然站立", Kneel: "跪姿", KneelingSpread: "跪姿张腿", LegsClosed: "双腿并拢",
+      LegsOpen: "双腿分开", Spread: "双腿张开", Hogtied: "四肢反绑", AllFours: "四肢着地", Suspension: "悬吊",
+    };
+    if (labels[pose?.Name]) return labels[pose.Name];
+    if (typeof pose?.Description === "string" && /[\u3400-\u9fff]/.test(pose.Description)) return pose.Description;
+    return pose?.Description || pose?.Name || "姿势";
+  }
+
   function renderPoseControls(host) {
     host.innerHTML = "";
     const poseTable = typeof PoseFemale3DCG !== "undefined" ? PoseFemale3DCG : globalThis.PoseFemale3DCG;
     const poses = Array.isArray(poseTable)
       ? poseTable.filter(pose => pose.AllowMenu || pose.AllowMenuTransient)
       : [];
-    const categories = ["BodyFull", "BodyLower", "BodyUpper", "BodyHands"];
-    const labels = { BodyFull: "整体姿势", BodyLower: "腿部姿势", BodyUpper: "上身姿势", BodyHands: "手部姿势" };
+    const categories = ["BodyFull", "BodyLower", "BodyUpper", "BodyHands", "BodyAddon"];
+    const labels = { BodyFull: "整体", BodyLower: "腿部", BodyUpper: "上身", BodyHands: "手部", BodyAddon: "附加" };
     for (const category of categories) {
       const available = poses.filter(pose => pose.Category === category);
       if (!available.length) continue;
@@ -2827,8 +2852,8 @@
       for (const pose of available) {
         const button = document.createElement("button");
         button.className = "coe-btn";
-        button.textContent = pose.Description || pose.Name;
-        button.title = pose.Name;
+        button.textContent = localizedPoseLabel(pose);
+        button.title = `${localizedPoseLabel(pose)} (${pose.Name})`;
         if (previewPoseMapping?.[category] === pose.Name) button.classList.add("coe-active");
         button.addEventListener("click", () => {
           setPreviewPose(pose.Name);
@@ -3812,7 +3837,7 @@
       computeDefaultOverallCenter, resolveOverallTransform, resolveNumericOrigin, transformPointAroundOverallPivot,
       stableInsertSyntheticLayers, coeAssetLayerSort: stableInsertSyntheticLayers, analyzeSourceAsset, sanitizePlainRecord,
       scanAlphaBounds, contentBoundsFromBounds, contentPivotFromBounds, resolveTextureContentPivot, resolveTextureContentBounds, cacheOverallLayerGeometry, cachedOverallCenter, buildSyntheticItems, buildLocalSyntheticItems, buildRemoteSyntheticItems, makeSyntheticLayers, statusSnapshot,
-      isDrawableLayer, normalizedMaterialColors, normalizePickerColor, validateRemoteSnapshot, canonicalRemoteSnapshot, sha256Base64Url,
+      isDrawableLayer, normalizedMaterialColors, normalizePickerColor, nextCopyLayerLabel, localizedPoseLabel, validateRemoteSnapshot, canonicalRemoteSnapshot, sha256Base64Url,
       parseRemoteContent, serializeRemoteEnvelope, encodeRemoteText, decodeRemoteText, splitRemoteData,
       createRemoteStore, setRemotePeer, setPendingRequest, pendingRequestFor, addRemoteChunk, expireRemoteAssemblies,
       acceptRemoteSnapshot, clearRemoteMember, onRemoteMessage, handleRemoteEnvelope, buildLocalRemoteSnapshot, updateLocalRemoteSnapshot,

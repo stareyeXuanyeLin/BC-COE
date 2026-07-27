@@ -76,7 +76,7 @@
     unloadOwnedColorPicker(picker);
   }
 
-  async function openGameColorPicker({ heading, currentColor, defaultColor, onAccept }) {
+  async function openGameColorPicker({ heading, currentColor, defaultColor, onPreview, onAccept, onCancel }) {
     const init = typeof globalThis.ColorPickerInit === "function" ? globalThis.ColorPickerInit : null;
     if (!init) return false;
     if (colorPickerSession) return true;
@@ -92,6 +92,13 @@
       root: null,
       previousZIndex: "",
       closed: false,
+      lastPreview: initialColor,
+      preview(value) {
+        const selected = normalizePickerColor(value, null);
+        if (!selected || selected === session.lastPreview || uiMode !== "editor" || !editing) return;
+        session.lastPreview = selected;
+        try { onPreview?.(selected); } catch (error) { warn("预览颜色失败", error); }
+      },
       finish() {
         if (session.closed) return;
         session.closed = true;
@@ -114,14 +121,24 @@
           defaultOpacity: [1],
           editOpacity: false,
         },
-        onInput: () => null,
+        onInput: fieldset => {
+          const output = fieldset?.querySelector?.('[name="output"]');
+          session.preview(output?.value);
+        },
         onExit: ({ colors }, save) => {
           const selected = normalizePickerColor(colors?.[0], initialColor);
+          if (save) session.preview(selected);
           session.finish();
           // 原版关闭回调不会保证清理 #color-picker，主动卸载并清除残留节点。
           unloadOwnedColorPicker(session.root || document.getElementById("color-picker"));
-          if (!save || uiMode !== "editor" || !editing || typeof onAccept !== "function") return;
-          try { onAccept(selected); } catch (error) { warn("应用颜色失败", error); toast("颜色没有应用成功", "error"); }
+          if (uiMode !== "editor" || !editing) return;
+          try {
+            if (save) onAccept?.(selected);
+            else onCancel?.(initialColor);
+          } catch (error) {
+            warn(save ? "应用颜色失败" : "恢复颜色失败", error);
+            toast("颜色没有更新成功", "error");
+          }
         },
       });
       if (session.closed) {
@@ -180,12 +197,8 @@
   }
 
   function setTransformTarget(target) {
-    const sameTarget = transformEditTarget && target && transformEditTarget.kind === target.kind &&
-      (target.kind === "material" ? transformEditTarget.materialId === target.materialId : transformEditTarget.index === target.index);
-    if (transformPointer && !sameTarget) return;
     if (!target) {
       transformEditTarget = null;
-      transformPointer = null;
     } else if (target.kind === "material") {
       const material = target.material || editing?.materials?.find(item => item.id === target.materialId);
       transformEditTarget = material ? { kind: "material", materialId: material.id, material } : null;
@@ -228,69 +241,20 @@
     if (host) renderEditorTools(host);
   }
 
-  function bindTransformHandle(button, kind) {
-    if (!button) return;
-    button.addEventListener("pointerdown", event => {
-      if (!transformEditTarget || !editing) return;
-      event.preventDefault();
-      event.stopPropagation();
-      const layer = transformEditTarget.kind === "layer" ? editing.layers[transformEditTarget.index] : null;
-      const material = transformEditTarget.kind === "material" ? editing.materials.find(item => item.id === transformEditTarget.materialId) : null;
-      const overall = material ? resolveOverallTransform(editing, globalThis.Player, material) : null;
-      transformPointer = { kind, startX: event.clientX, startY: event.clientY, layer, material,
-        rotation: layer?.rotation || 0, scale: layer?.scale || 1, overallRotation: overall?.rotation || 0, overallScale: overall?.scale || 1 };
-      const move = moveEvent => {
-        if (!transformPointer) return;
-        const dx = moveEvent.clientX - transformPointer.startX;
-        const dy = moveEvent.clientY - transformPointer.startY;
-        const state = transformPointer;
-        if (state.kind === "rotate") {
-          const value = state.layer ? state.rotation + dx * Math.PI / 180 : state.overallRotation + dx * Math.PI / 180;
-          if (state.layer) setOptionalTransformValue(state.layer, "rotation", clamp(value, -Math.PI, Math.PI), 0);
-          else if (state.material) setOptionalTransformValue(state.material, "overallRotation", clamp(value, -Math.PI, Math.PI), 0);
-        } else {
-          const value = clamp((state.layer ? state.scale : state.overallScale) * Math.max(0.1, 1 - dy / 120), 0.25, 3);
-          if (state.layer) setOptionalTransformValue(state.layer, "scale", value, 1);
-          else if (state.material) setOptionalTransformValue(state.material, "overallScale", value, 1);
-        }
-        refreshPreviewLoop();
-      };
-      const done = () => {
-        transformPointer = null;
-        window.removeEventListener("pointermove", move);
-        window.removeEventListener("pointerup", done);
-        window.removeEventListener("pointercancel", done);
-      };
-      window.addEventListener("pointermove", move);
-      window.addEventListener("pointerup", done);
-      window.addEventListener("pointercancel", done);
-    });
-  }
-
   function renderTransformEditor(content) {
     const host = content.querySelector("[data-transform-editor]");
     if (!host) return;
-    const selectedIndex = transformEditTarget?.kind === "layer"
-      ? `layer:${transformEditTarget.index}`
-      : transformEditTarget?.kind === "material"
-        ? `material:${editing?.materials?.findIndex(item => item.id === transformEditTarget.materialId) ?? -1}` : "";
-    const materialOptions = (editing?.materials || []).map((material, index) => `<option value="material:${index}">${escapeHTML(`${material.label || material.sourceAsset} · 素材整体`)}</option>`);
-    const layerOptions = (editing?.layers || []).map((layer, index) => {
-      const label = layer.layerLabel || layer.sourceLayer || `图层 #${index + 1}`;
-      return `<option value="layer:${index}">${escapeHTML(`${layer.sourceAsset || "素材"} · ${label}`)}</option>`;
-    });
-    const options = materialOptions.concat(layerOptions).join("");
-    host.innerHTML = `<div class="coe-transform-head"><div><strong>变换编辑</strong><span class="coe-muted">${escapeHTML(transformTargetLabel())}</span></div><div class="coe-actions"><select data-transform-target>${options}</select>${transformEditTarget ? '<button type="button" class="coe-btn" data-transform-done>完成</button>' : ''}</div></div><p class="coe-hint">旋转和缩放使用固定默认中心；未激活的图层不会显示变换控件。</p>${transformEditTarget ? '<div class="coe-transform-pad"><button type="button" data-transform-handle="rotate">↻ 旋转</button><button type="button" data-transform-handle="scale">⤢ 缩放</button></div>' : ''}`;
+    const selectedIndex = transformEditTarget?.kind === "material"
+      ? `material:${editing?.materials?.findIndex(item => item.id === transformEditTarget.materialId) ?? -1}` : "";
+    const materialOptions = (editing?.materials || []).map((material, index) => `<option value="material:${index}">${escapeHTML(`${material.label || material.sourceAsset} · 素材整体`)}</option>`).join("");
+    host.innerHTML = `<div class="coe-transform-head"><div><strong>变换编辑</strong><span class="coe-muted">${escapeHTML(transformTargetLabel())}</span></div><div class="coe-actions"><select data-transform-target><option value="">选择素材整体</option>${materialOptions}</select>${transformEditTarget ? '<button type="button" class="coe-btn" data-transform-done>完成</button>' : ''}</div></div><p class="coe-hint">单层变换请从对应图层进入；旋转与缩放共用固定默认中心。</p>`;
     const select = host.querySelector("[data-transform-target]");
     select.value = String(selectedIndex);
     select.addEventListener("change", () => {
-      const [kind, rawIndex] = select.value.split(":");
-      if (kind === "material") setTransformTarget({ kind: "material", material: editing?.materials?.[Number(rawIndex)] });
-      else setTransformTarget({ kind: "layer", index: Number(rawIndex) });
+      const [, rawIndex] = select.value.split(":");
+      if (select.value.startsWith("material:")) setTransformTarget({ kind: "material", material: editing?.materials?.[Number(rawIndex)] });
     });
     host.querySelector("[data-transform-done]")?.addEventListener("click", () => setTransformTarget(null));
-    bindTransformHandle(host.querySelector('[data-transform-handle="rotate"]'), "rotate");
-    bindTransformHandle(host.querySelector('[data-transform-handle="scale"]'), "scale");
     if (!transformEditTarget) return;
     if (transformEditTarget.kind === "material") {
       const material = editing.materials.find(item => item.id === transformEditTarget.materialId);
@@ -390,14 +354,27 @@
       renderLayerList(list);
     });
     group.querySelector("[data-overall-color]").addEventListener("click", () => {
+      const originalColors = [...material.colors];
+      const originalLayerColors = layers.map(layer => layer.color);
+      const applyColor = value => {
+        const count = Math.max(1, Number(asset?.ColorableLayerCount) || colors.length);
+        material.colors = Array(count).fill(value);
+        layers.forEach(layer => { layer.color = null; });
+        updateColorChoice(group.querySelector("[data-overall-color]"), value, defaultHex, value);
+        refreshPreviewLoop();
+      };
       chooseColor({
         heading: `${material.label || asset?.Description || material.sourceAsset} · 整体颜色`,
         currentColor: overallColor,
         defaultColor: "Default",
+        onPreview: applyColor,
         onAccept: value => {
-          const count = Math.max(1, Number(asset?.ColorableLayerCount) || colors.length);
-          material.colors = Array(count).fill(value);
-          layers.forEach(layer => { layer.color = null; });
+          applyColor(value);
+          renderLayerList(list);
+        },
+        onCancel: () => {
+          material.colors = originalColors;
+          layers.forEach((layer, index) => { layer.color = originalLayerColors[index]; });
           refreshPreviewLoop();
           renderLayerList(list);
         },
@@ -438,6 +415,17 @@
     return group;
   }
 
+  function nextCopyLayerLabel(layer, composition = editing) {
+    const current = layer?.layerLabel || getLayerLabelByRef(layer) || layer?.sourceLayer || "默认图层";
+    const base = current.replace(/(?:_copy)+$/i, "").replace(/_副本\d+$/, "");
+    const labels = new Set([...(composition?.layers || []), ...(composition?.recycle || [])]
+      .filter(item => !layer?.materialId || item.materialId === layer.materialId)
+      .map(item => item.layerLabel || getLayerLabelByRef(item) || item.sourceLayer || "默认图层"));
+    let suffix = 1;
+    while (labels.has(`${base}_副本${suffix}`)) suffix++;
+    return `${base}_副本${suffix}`;
+  }
+
   function renderMaterialLayerCards(host, material, layers, asset, list) {
     layers.forEach((layer, layerIndex) => {
       const sourceLayer = resolveSourceLayer(asset, layer);
@@ -449,7 +437,7 @@
       card.className = `coe-layer${layer.hidden ? " coe-hidden" : ""}`;
       var layerRotDeg = Math.round(((layer.rotation || 0) * 180 / Math.PI) * 100) / 100;
       var layerScaleVal = typeof layer.scale === "number" ? layer.scale : 1;
-      card.innerHTML = `<div class="coe-layer-top"><span class="coe-layer-name" title="${escapeHTML(`${layer.sourceGroup}/${layer.sourceAsset}/${layerName}`)}">${escapeHTML(layerName)}</span>${sourceLayer?.ColorGroup ? `<span class="coe-badge">颜色组：${escapeHTML(sourceLayer.ColorGroup)}</span>` : ""}<button type="button" class="coe-btn" data-edit-transform>调整变换</button><button type="button" class="coe-btn" data-hide>${layer.hidden ? "显示" : "隐藏"}</button><button type="button" class="coe-btn" data-copy>复制</button><button type="button" class="coe-btn" data-reset>本层默认</button><button type="button" class="coe-btn coe-danger" data-remove>清除</button></div><div class="coe-controls"><label>图层位置<input type="number" min="-99" max="99" step="1" data-key="priority" value="${layer.priority}"></label><label>偏移 X<input type="number" min="-1200" max="1200" step="1" data-key="offsetX" value="${layer.offsetX}"></label><label>偏移 Y<input type="number" min="-1200" max="1200" step="1" data-key="offsetY" value="${layer.offsetY}"></label><label>透明度<input type="number" min="0" max="1" step="0.05" data-key="opacity" value="${layer.opacity}"></label><label>图层颜色<button type="button" class="coe-color-choice" data-layer-color="${layerIndex}" ${canColor ? "" : "disabled"} title="${canColor ? `使用游戏原版颜色选择器编辑颜色槽 ${colorIndex}` : "原版将此图层标记为不可着色"}"><span class="coe-color-swatch"></span><code>${escapeHTML(material.colors[colorIndex] || "Default")}</code></button></label></div><div class="coe-layer-transform"><label>旋转<input type="number" step="1" min="-180" max="180" data-layer-transform="rotation" value="${layerRotDeg}">°</label><label>缩放<input type="number" step="0.05" min="0.25" max="3" data-layer-transform="scale" value="${layerScaleVal}"></label></div>`;
+      card.innerHTML = `<div class="coe-layer-top"><span class="coe-layer-name" title="${escapeHTML(`${layer.sourceGroup}/${layer.sourceAsset}/${layerName}`)}">${escapeHTML(layerName)}</span>${sourceLayer?.ColorGroup ? `<span class="coe-badge">颜色组：${escapeHTML(sourceLayer.ColorGroup)}</span>` : ""}<button type="button" class="coe-btn" data-edit-transform>调整变换</button><button type="button" class="coe-btn" data-hide>${layer.hidden ? "显示" : "隐藏"}</button><button type="button" class="coe-btn" data-copy>复制</button><button type="button" class="coe-btn" data-reset>本层默认</button><button type="button" class="coe-btn coe-danger" data-remove>清除</button></div><div class="coe-controls"><label>层级<input type="number" min="-99" max="99" step="1" data-key="priority" value="${layer.priority}"></label><label>偏移 X<input type="number" min="-1200" max="1200" step="1" data-key="offsetX" value="${layer.offsetX}"></label><label>偏移 Y<input type="number" min="-1200" max="1200" step="1" data-key="offsetY" value="${layer.offsetY}"></label><label>透明度<input type="number" min="0" max="1" step="0.05" data-key="opacity" value="${layer.opacity}"></label><label>颜色<button type="button" class="coe-color-choice" data-layer-color="${layerIndex}" ${canColor ? "" : "disabled"} title="${canColor ? `使用游戏原版颜色选择器编辑颜色槽 ${colorIndex}` : "原版将此图层标记为不可着色"}"><span class="coe-color-swatch"></span><code>${escapeHTML(material.colors[colorIndex] || "Default")}</code></button></label><label>旋转<input type="number" step="1" min="-180" max="180" data-layer-transform="rotation" value="${layerRotDeg}"></label><label>缩放<input type="number" step="0.05" min="0.25" max="3" data-layer-transform="scale" value="${layerScaleVal}"></label></div>`;
       updateColorChoice(card.querySelector("[data-layer-color]"), material.colors[colorIndex] || "Default", colorValue);
       card.querySelector("[data-edit-transform]").addEventListener("click", () => setTransformTarget({ kind: "layer", index: editing.layers.indexOf(layer), layer }));
       card.querySelector("[data-hide]").addEventListener("click", () => {
@@ -472,7 +460,7 @@
       });
       card.querySelector("[data-copy]").addEventListener("click", () => {
         var copy = Object.assign({}, layer);
-        copy.layerLabel = (layer.layerLabel || getLayerLabelByRef(layer) || layer.sourceLayer || "默认图层") + "_copy";
+        copy.layerLabel = nextCopyLayerLabel(layer);
         var idx = editing.layers.indexOf(layer);
         editing.layers.splice(idx + 1, 0, copy);
         refreshPreviewLoop();
@@ -514,13 +502,26 @@
       const colorButton = card.querySelector("[data-layer-color]");
       colorButton?.addEventListener("click", () => {
         if (!canColor) return;
+        const originalColor = material.colors[colorIndex];
+        const originalLayerColor = layer.color;
+        const applyColor = value => {
+          material.colors[colorIndex] = value;
+          layer.color = null;
+          updateColorChoice(colorButton, value, colorValue, value);
+          refreshPreviewLoop();
+        };
         chooseColor({
           heading: `${material.label || asset?.Description || material.sourceAsset} · ${layerName}`,
           currentColor: material.colors[colorIndex] || "Default",
           defaultColor: material.defaultColors?.[colorIndex] || asset?.DefaultColor?.[colorIndex] || "Default",
+          onPreview: applyColor,
           onAccept: value => {
-            material.colors[colorIndex] = value;
-            layer.color = null;
+            applyColor(value);
+            renderLayerList(list);
+          },
+          onCancel: () => {
+            material.colors[colorIndex] = originalColor;
+            layer.color = originalLayerColor;
             refreshPreviewLoop();
             renderLayerList(list);
           },
@@ -557,10 +558,18 @@
       if (!groups.has(groupName)) groups.set(groupName, []);
       groups.get(groupName).push(asset);
     }
+    const searching = typeof query === "string" && query.trim().length > 0;
     for (const [groupName, groupAssets] of groups) {
       const section = document.createElement("section");
-      section.className = "coe-material-section";
-      section.innerHTML = `<h3 class="coe-material-group-title">${escapeHTML(groupName)}</h3>`;
+      const collapsed = !searching && !expandedMaterialGroups.has(groupName);
+      section.className = `coe-material-section${collapsed ? " coe-collapsed" : ""}`;
+      section.innerHTML = `<h3 class="coe-material-group-title"><button type="button" class="coe-material-group-toggle" aria-expanded="${!collapsed}"><span>${collapsed ? "▶" : "▼"}</span><strong>${escapeHTML(groupName)}</strong><small>${groupAssets.length}</small></button></h3>`;
+      section.querySelector(".coe-material-group-toggle").addEventListener("click", () => {
+        if (searching) return;
+        if (expandedMaterialGroups.has(groupName)) expandedMaterialGroups.delete(groupName);
+        else expandedMaterialGroups.add(groupName);
+        renderMaterials(list, query);
+      });
       const grid = document.createElement("div");
       grid.className = "coe-material-group";
       for (const asset of groupAssets) {
@@ -663,14 +672,26 @@
     refreshPreviewLoop();
   }
 
+  function localizedPoseLabel(pose) {
+    const labels = {
+      BaseUpper: "自然上身", BackBoxTie: "背后箱式缚", BackCuffs: "背后并手", BackElbowTouch: "背后合肘",
+      OverTheHead: "双手过头", Yoked: "双手平举", TapedHands: "双手并拢",
+      BaseLower: "自然站立", Kneel: "跪姿", KneelingSpread: "跪姿张腿", LegsClosed: "双腿并拢",
+      LegsOpen: "双腿分开", Spread: "双腿张开", Hogtied: "四肢反绑", AllFours: "四肢着地", Suspension: "悬吊",
+    };
+    if (labels[pose?.Name]) return labels[pose.Name];
+    if (typeof pose?.Description === "string" && /[\u3400-\u9fff]/.test(pose.Description)) return pose.Description;
+    return pose?.Description || pose?.Name || "姿势";
+  }
+
   function renderPoseControls(host) {
     host.innerHTML = "";
     const poseTable = typeof PoseFemale3DCG !== "undefined" ? PoseFemale3DCG : globalThis.PoseFemale3DCG;
     const poses = Array.isArray(poseTable)
       ? poseTable.filter(pose => pose.AllowMenu || pose.AllowMenuTransient)
       : [];
-    const categories = ["BodyFull", "BodyLower", "BodyUpper", "BodyHands"];
-    const labels = { BodyFull: "整体姿势", BodyLower: "腿部姿势", BodyUpper: "上身姿势", BodyHands: "手部姿势" };
+    const categories = ["BodyFull", "BodyLower", "BodyUpper", "BodyHands", "BodyAddon"];
+    const labels = { BodyFull: "整体", BodyLower: "腿部", BodyUpper: "上身", BodyHands: "手部", BodyAddon: "附加" };
     for (const category of categories) {
       const available = poses.filter(pose => pose.Category === category);
       if (!available.length) continue;
@@ -681,8 +702,8 @@
       for (const pose of available) {
         const button = document.createElement("button");
         button.className = "coe-btn";
-        button.textContent = pose.Description || pose.Name;
-        button.title = pose.Name;
+        button.textContent = localizedPoseLabel(pose);
+        button.title = `${localizedPoseLabel(pose)} (${pose.Name})`;
         if (previewPoseMapping?.[category] === pose.Name) button.classList.add("coe-active");
         button.addEventListener("click", () => {
           setPreviewPose(pose.Name);

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bondage Club - Custom Outfit Editor
 // @namespace    https://github.com/stareyeXuanyeLin/BC-COE
-// @version      1.8.1
+// @version      1.8.2
 // @description  制作中（WIP）。仓库公开仅便于 Tampermonkey 引用，不建议使用。
 // @author       凡尘 / 佩菈
 // @match        https://www.bondageprojects.com/R*/*

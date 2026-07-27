@@ -56,6 +56,36 @@ test('texture pivot scan reuses the loaded GLDraw image and caches its result', 
   assert.equal(pivot.y, 0.375);
 });
 
+test('synthetic placeholder texture schedules a character refresh when the image finishes loading', () => {
+  const listeners = {};
+  const image = {
+    naturalWidth: 0, naturalHeight: 0, width: 0, height: 0, complete: false,
+    addEventListener(name, callback) { listeners[name] = callback; },
+  };
+  const data = alphaData(4, 4, [[0, 0], [1, 0], [0, 1], [1, 1]]);
+  const context = { clearRect() {}, drawImage() {}, getImageData() { return { data }; } };
+  let refreshes = 0;
+  const player = { AccountName: 'A', MemberNumber: 1, AssetFamily: 'Female3DCG', Appearance: [], AppearanceLayers: [], ExtensionSettings: {} };
+  const { api } = load({ player, globals: {
+    GLDrawImageCache: new Map([['pending.png', image]]),
+    CharacterRefresh(character) { if (character === player) refreshes++; },
+    document: { getElementById: () => null, createElement: tag => tag === 'canvas' ? { getContext: () => context } : {} },
+  } });
+  api.cacheOverallLayerGeometry({
+    __coeGeometryCharacter: player,
+    __coeGeometryMaterialId: 'm',
+    __coeGeometryLayerKey: '0:0',
+  }, 0, 0, 0, 1, 1, 550, 'pending.png');
+  assert.equal(api.cachedOverallCenter(player, 'm'), null);
+  assert.equal(typeof listeners.load, 'function');
+  image.naturalWidth = image.width = 4;
+  image.naturalHeight = image.height = 4;
+  image.complete = true;
+  listeners.load();
+  assert.ok(refreshes >= 1);
+  assert.ok(api.resolveTextureContentBounds('pending.png'));
+});
+
 test('overall geometry uses visible alpha bounds instead of the transparent full texture canvas', () => {
   const width = 100;
   const height = 100;

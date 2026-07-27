@@ -41,9 +41,9 @@
   let layerNameCachePromise = null;
   let colorPickerSession = null;
   let colorPickerClosing = false;
-  // Only one layer or composition-level target can own transform controls.
+  // Only one layer or material-level target can own transform controls.
   let transformEditTarget = null;
-  let transformPointer = null;
+  const expandedMaterialGroups = new Set();
 
   const log = (...args) => console.log(`[${MOD_NAME}]`, ...args);
   const warn = (...args) => console.warn(`[${MOD_NAME}]`, ...args);

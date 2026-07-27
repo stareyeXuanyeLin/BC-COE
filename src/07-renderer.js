@@ -105,8 +105,12 @@
     const character = options?.__coeGeometryCharacter;
     const materialId = options?.__coeGeometryMaterialId;
     const layerKey = options?.__coeGeometryLayerKey;
-    if (!character || materialId == null || layerKey == null || options?.__coeGeometryIsBlink === true ||
-      !(texW > 1) || !(texH > 1)) return;
+    if (!character || materialId == null || layerKey == null || options?.__coeGeometryIsBlink === true) return;
+    // BC only marks characters wearing a formal Appearance item dirty when its
+    // texture finishes loading. COE layers are synthetic, so start our own load
+    // observer before rejecting the initial 1x1 placeholder geometry.
+    if (url) resolveTextureContentBounds(url);
+    if (!(texW > 1) || !(texH > 1)) return;
     const materialMap = overallGeometryCache.get(character) || new Map();
     const layerMap = materialMap.get(materialId) || new Map();
     const off = Number.isFinite(offsetX) ? offsetX : 0;

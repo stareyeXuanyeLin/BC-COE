@@ -78,7 +78,9 @@ test('editor delegates color selection to the vanilla picker instead of browser 
   const source = fs.readFileSync(path.join(root, 'src', '10-editor.js'), 'utf8');
   assert.match(source, /globalThis\.ColorPickerInit/);
   assert.match(source, /defaultColors:\s*\[resetColor\]/);
+  assert.match(source, /onInput:\s*fieldset\s*=>/);
   assert.match(source, /onExit:\s*\(\{ colors \}, save\)/);
+  assert.match(source, /onPreview\?\.\(selected\)/);
   assert.match(source, /classList\.add\("coe-owned-color-picker"\)/);
   assert.match(source, /classList\.remove\("coe-owned-color-picker"\)/);
   assert.doesNotMatch(source, /type=["']color["']/);
@@ -92,6 +94,37 @@ test('picker color normalization accepts BC defaults and canonicalizes short or 
   assert.equal(api.normalizePickerColor('#a0F'), '#AA00FF');
   assert.equal(api.normalizePickerColor('  #aBc123  '), '#ABC123');
   assert.equal(api.normalizePickerColor('not-a-color', null), null);
+});
+
+test('copied layer labels use the next unique numeric suffix across active and recycled layers', () => {
+  const { api } = load();
+  const original = { materialId: 'm', layerLabel: '花边' };
+  const composition = {
+    layers: [original, { materialId: 'm', layerLabel: '花边_副本1' }],
+    recycle: [{ materialId: 'm', layerLabel: '花边_副本2' }, { materialId: 'other', layerLabel: '花边_副本3' }],
+  };
+  assert.equal(api.nextCopyLayerLabel(original, composition), '花边_副本3');
+  assert.equal(api.nextCopyLayerLabel({ materialId: 'm', layerLabel: '花边_副本1' }, composition), '花边_副本3');
+  assert.equal(api.nextCopyLayerLabel({ materialId: 'm', layerLabel: '花边_copy_copy' }, composition), '花边_副本3');
+});
+
+test('pose controls provide compact Chinese labels for vanilla pose names', () => {
+  const { api } = load();
+  assert.equal(api.localizedPoseLabel({ Name: 'KneelingSpread', Description: 'Kneeling spread' }), '跪姿张腿');
+  assert.equal(api.localizedPoseLabel({ Name: 'FuturePose', Description: '未来姿势' }), '未来姿势');
+});
+
+test('transform target dropdown lists material targets only and pointer transform buttons are removed', () => {
+  const source = fs.readFileSync(path.join(root, 'src', '10-editor.js'), 'utf8');
+  assert.doesNotMatch(source, /const layerOptions/);
+  assert.doesNotMatch(source, /data-transform-handle/);
+  assert.doesNotMatch(source, /function bindTransformHandle/);
+});
+
+test('material categories default to collapsed and matching search categories expand automatically', () => {
+  const source = fs.readFileSync(path.join(root, 'src', '10-editor.js'), 'utf8');
+  assert.match(source, /const searching =[^;]+query\.trim\(\)\.length > 0/);
+  assert.match(source, /const collapsed = !searching && !expandedMaterialGroups\.has\(groupName\)/);
 });
 
 test('stable insert returns the original array when there are no synthetic layers', () => {

@@ -11,6 +11,13 @@
   const MAX_MATERIAL_BYTES = 8192;
   const MAX_SCHEME_BYTES = 65536;
   const MAX_WARDROBE_BYTES = 262144;
+  // The production BC server accepts at most 180,000 bytes per incoming
+  // Socket.IO message. Keep a conservative reserve for Engine.IO/Socket.IO
+  // framing and future protocol changes; the measured AccountUpdate event must
+  // fit inside this smaller budget before server synchronization is attempted.
+  const SERVER_SOCKET_MESSAGE_MAX_BYTES = 180000;
+  const SERVER_SYNC_SAFETY_MARGIN_BYTES = 20000;
+  const MAX_SERVER_SYNC_MESSAGE_BYTES = SERVER_SOCKET_MESSAGE_MAX_BYTES - SERVER_SYNC_SAFETY_MARGIN_BYTES;
   const TAG_ASSET_NAME = "COECustomOutfit";
   const TAG_PREVIEW_EMOTICON = "⋆｡ﾟ✶°☾⋆｡ﾟ";
   // R130 vanilla appearance groups explicitly marked as clothing/underwear.

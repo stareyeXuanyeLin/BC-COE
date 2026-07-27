@@ -25,7 +25,7 @@ function snapshot() {
 function load(options = {}) {
   const assets = options.assets || [];
   const player = options.player || { AccountName: 'A', MemberNumber: 1, AssetFamily: 'Female3DCG', Appearance: [], AppearanceLayers: [], ExtensionSettings: {} };
-  const store = new Map();
+  const store = options.store || new Map();
   const sent = [];
   const sandbox = {
     __COE_TEST_MODE__: true,
@@ -35,7 +35,11 @@ function load(options = {}) {
     Player: player, ChatRoomCharacter: options.characters || [], Asset: assets,
     AssetGet: (_family, group, name) => assets.find(asset => asset.Group.Name === group && asset.Name === name) || null,
     ServerSend: (name, packet) => sent.push({ name, packet }),
-    localStorage: { getItem: key => store.get(key) ?? null, setItem: (key, value) => store.set(key, value) },
+    localStorage: {
+      getItem: key => store.get(key) ?? null,
+      setItem: (key, value) => store.set(key, value),
+      removeItem: key => store.delete(key),
+    },
     document: { getElementById: () => null, body: null, head: { appendChild() {} }, createElement: () => ({}) },
     requestAnimationFrame: fn => fn(), cancelAnimationFrame() {}, setTimeout, clearTimeout, setInterval() {}, clearInterval() {},
     window: { addEventListener() {} }, alert() {}, confirm: () => true, CharacterRefresh() {},

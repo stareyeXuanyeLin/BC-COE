@@ -43,6 +43,10 @@
         conflict: wardrobeReadState.conflict,
         serverStatus: wardrobeReadState.server?.status || null,
         localStatus: wardrobeReadState.local?.status || null,
+        syncMode: wardrobeReadState.sync?.mode || null,
+        syncReason: wardrobeReadState.sync?.reason || null,
+        requestBytes: wardrobeReadState.sync?.requestBytes ?? null,
+        maxRequestBytes: MAX_SERVER_SYNC_MESSAGE_BYTES,
         persistenceBlocked,
       },
     });
@@ -144,6 +148,7 @@
   if (globalThis.__COE_TEST_MODE__) {
     globalThis.__COE_TEST_API__ = {
       normalizeWardrobe, normalizeComposition, normalizeLayerTransform, compactWardrobeForStorage, compactCompositionForStorage, compactLayerForStorage, packWardrobe, unpackWardrobeDetailed,
+      serverSyncMessageBytes, storageFingerprint, loadWardrobe, persistWardrobe,
       computeDefaultOverallCenter, resolveOverallTransform, resolveRenderableOverallTransform, resolveNumericOrigin, transformPointAroundOverallPivot,
       stableInsertSyntheticLayers, coeAssetLayerSort: stableInsertSyntheticLayers, analyzeSourceAsset, sanitizePlainRecord,
       scanAlphaBounds, contentBoundsFromBounds, contentPivotFromBounds, resolveTextureContentPivot, resolveTextureContentBounds, cacheOverallLayerGeometry, cachedOverallCenter, buildSyntheticItems, buildLocalSyntheticItems, buildRemoteSyntheticItems, makeSyntheticLayers, syncLocalSyntheticRuntime, requestCharacterRefresh, statusSnapshot,

@@ -37,6 +37,13 @@
   const MAX_MATERIAL_BYTES = 8192;
   const MAX_SCHEME_BYTES = 65536;
   const MAX_WARDROBE_BYTES = 262144;
+  // The production BC server accepts at most 180,000 bytes per incoming
+  // Socket.IO message. Keep a conservative reserve for Engine.IO/Socket.IO
+  // framing and future protocol changes; the measured AccountUpdate event must
+  // fit inside this smaller budget before server synchronization is attempted.
+  const SERVER_SOCKET_MESSAGE_MAX_BYTES = 180000;
+  const SERVER_SYNC_SAFETY_MARGIN_BYTES = 20000;
+  const MAX_SERVER_SYNC_MESSAGE_BYTES = SERVER_SOCKET_MESSAGE_MAX_BYTES - SERVER_SYNC_SAFETY_MARGIN_BYTES;
   const TAG_ASSET_NAME = "COECustomOutfit";
   const TAG_PREVIEW_EMOTICON = "⋆｡ﾟ✶°☾⋆｡ﾟ";
   // R130 vanilla appearance groups explicitly marked as clothing/underwear.
@@ -679,6 +686,54 @@
     return `${STORAGE_KEY}.${accountId}`;
   }
 
+  function localSyncMarkerKey() {
+    return `${accountStorageKey()}.sync`;
+  }
+
+  function storageFingerprint(value) {
+    const text = String(value ?? "");
+    let hash = 0x811c9dc5;
+    for (let index = 0; index < text.length; index++) {
+      const code = text.charCodeAt(index);
+      hash = Math.imul(hash ^ (code & 0xff), 0x01000193);
+      hash = Math.imul(hash ^ (code >>> 8), 0x01000193);
+    }
+    return `${text.length}:${(hash >>> 0).toString(16).padStart(8, "0")}`;
+  }
+
+  function serverSyncMessageBytes(packed) {
+    const update = { [`ExtensionSettings.${SETTINGS_KEY}`]: packed };
+    // Engine.IO message packet "4" + Socket.IO event packet "2" + JSON event.
+    return utf8Bytes(`42${JSON.stringify(["AccountUpdate", update])}`);
+  }
+
+  function readLocalSyncMarker() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(localSyncMarkerKey()) || "null");
+      if (!parsed || parsed.version !== 1 || parsed.mode !== "local-only" || typeof parsed.fingerprint !== "string") return null;
+      return parsed;
+    } catch (_) { return null; }
+  }
+
+  function writeLocalSyncMarker(packed, reason, requestBytes) {
+    const marker = {
+      version: 1,
+      mode: "local-only",
+      reason: String(reason || "unknown").slice(0, 80),
+      fingerprint: storageFingerprint(packed),
+      requestBytes: Number.isFinite(requestBytes) ? requestBytes : null,
+      maxRequestBytes: MAX_SERVER_SYNC_MESSAGE_BYTES,
+    };
+    try { localStorage.setItem(localSyncMarkerKey(), JSON.stringify(marker)); }
+    catch (_) { /* privacy mode */ }
+    return marker;
+  }
+
+  function clearLocalSyncMarker() {
+    try { localStorage.removeItem(localSyncMarkerKey()); }
+    catch (_) { /* privacy mode */ }
+  }
+
   function readLocalWardrobeRaw() {
     try { return localStorage.getItem(accountStorageKey()); }
     catch (_) { return null; }
@@ -689,18 +744,25 @@
     const localRaw = readLocalWardrobeRaw();
     const server = unpackWardrobeDetailed(serverRaw);
     const local = unpackWardrobeDetailed(localRaw);
+    const marker = readLocalSyncMarker();
+    const markerMatchesLocal = local.status === "ok" && marker?.fingerprint === storageFingerprint(localRaw);
     const failures = [server, local].filter(result => ["deferred", "corrupt", "unsupported"].includes(result.status));
-    const conflict = server.status === "ok" && local.status === "ok" && JSON.stringify(compactWardrobeForStorage(server.data)) !== JSON.stringify(compactWardrobeForStorage(local.data));
+    const contentsDiffer = server.status === "ok" && local.status === "ok" && JSON.stringify(compactWardrobeForStorage(server.data)) !== JSON.stringify(compactWardrobeForStorage(local.data));
+    const localOnly = markerMatchesLocal && (contentsDiffer || server.status !== "ok");
+    const conflict = contentsDiffer && !localOnly;
+    if (!contentsDiffer && marker) clearLocalSyncMarker();
     persistenceBlocked = failures.length > 0 || conflict;
     let selected = null;
     let source = null;
-    if (server.status === "ok") { selected = server.data; source = "server"; }
+    if (localOnly) { selected = local.data; source = "local"; }
+    else if (server.status === "ok") { selected = server.data; source = "server"; }
     else if (local.status === "ok") { selected = local.data; source = "local"; }
     else if (server.status === "absent" && local.status === "absent") { selected = normalizeWardrobe(null); source = "empty"; }
     wardrobeReadState = {
-      status: failures[0]?.status || (conflict ? "conflict" : selected ? "ok" : "absent"),
+      status: failures[0]?.status || (conflict ? "conflict" : localOnly ? "local-only" : selected ? "ok" : "absent"),
       source, server: { status: server.status, error: server.error, raw: server.raw },
       local: { status: local.status, error: local.error, raw: local.raw }, conflict,
+      sync: localOnly ? { mode: "local-only", reason: marker.reason, requestBytes: marker.requestBytes, maxRequestBytes: MAX_SERVER_SYNC_MESSAGE_BYTES } : null,
     };
     if (selected) wardrobe = selected;
     if (persistenceBlocked) {
@@ -711,20 +773,71 @@
     return wardrobeReadState;
   }
 
+  function setLocalOnlyState(packed, serverState, localState, reason, requestBytes) {
+    const marker = writeLocalSyncMarker(packed, reason, requestBytes);
+    wardrobeReadState = {
+      status: "local-only",
+      source: "local",
+      server: serverState,
+      local: localState,
+      conflict: false,
+      sync: { mode: marker.mode, reason: marker.reason, requestBytes: marker.requestBytes, maxRequestBytes: marker.maxRequestBytes },
+    };
+  }
+
   function persistWardrobe(options = {}) {
     if (persistenceBlocked && options.force !== true) throw new Error(`wardrobe-write-blocked:${wardrobeReadState.status}`);
     const normalized = normalizeWardrobe(wardrobe);
     const packed = packWardrobe(normalized);
+    const requestBytes = serverSyncMessageBytes(packed);
     wardrobe = normalized;
-    try { localStorage.setItem(accountStorageKey(), packed); } catch (_) { /* privacy mode */ }
+
+    let localError = null;
+    try { localStorage.setItem(accountStorageKey(), packed); }
+    catch (error) { localError = String(error?.message || error); }
+    const localState = localError
+      ? { status: "error", error: localError, raw: null }
+      : { status: "ok", error: null, raw: packed };
+    const previousServerRaw = globalThis.Player?.ExtensionSettings?.[SETTINGS_KEY] ?? null;
+    const previousServer = unpackWardrobeDetailed(previousServerRaw);
+    const serverState = { status: previousServer.status, error: previousServer.error, raw: previousServer.raw };
+
+    if (requestBytes > MAX_SERVER_SYNC_MESSAGE_BYTES) {
+      if (localError) throw new Error(`wardrobe-storage-unavailable:${localError}`);
+      setLocalOnlyState(packed, serverState, localState, "server-byte-budget", requestBytes);
+      const message = `衣柜同步请求 ${requestBytes} 字节，超过安全上限 ${MAX_SERVER_SYNC_MESSAGE_BYTES} 字节；已仅保存到本机`;
+      if (!diagnostics.lastWarnings.includes(message)) diagnostics.lastWarnings.push(message);
+      warn(message);
+      toast(message, "warn");
+      return packed;
+    }
+
+    if (!globalThis.Player || typeof globalThis.ServerPlayerExtensionSettingsSync !== "function") {
+      if (localError) throw new Error(`wardrobe-storage-unavailable:${localError}`);
+      setLocalOnlyState(packed, serverState, localState, "server-sync-unavailable", requestBytes);
+      toast("服务器同步暂不可用，已保存到本机", "warn");
+      return packed;
+    }
+
+    Player.ExtensionSettings ||= {};
+    const hadPreviousServerValue = Object.prototype.hasOwnProperty.call(Player.ExtensionSettings, SETTINGS_KEY);
     try {
-      if (globalThis.Player) {
-        Player.ExtensionSettings ||= {};
-        Player.ExtensionSettings[SETTINGS_KEY] = packed;
-        wardrobeReadState = { status: "ok", source: "user-save", server: { status: "ok", raw: packed }, local: { status: "ok", raw: packed }, conflict: false };
-        if (typeof globalThis.ServerPlayerExtensionSettingsSync === "function") ServerPlayerExtensionSettingsSync(SETTINGS_KEY);
-      }
+      Player.ExtensionSettings[SETTINGS_KEY] = packed;
+      ServerPlayerExtensionSettingsSync(SETTINGS_KEY);
+      clearLocalSyncMarker();
+      wardrobeReadState = {
+        status: "sync-sent",
+        source: "user-save",
+        server: { status: "sent", error: null, raw: packed },
+        local: localState,
+        conflict: false,
+        sync: { mode: "server", reason: null, requestBytes, maxRequestBytes: MAX_SERVER_SYNC_MESSAGE_BYTES },
+      };
     } catch (error) {
+      if (hadPreviousServerValue) Player.ExtensionSettings[SETTINGS_KEY] = previousServerRaw;
+      else delete Player.ExtensionSettings[SETTINGS_KEY];
+      if (localError) throw error;
+      setLocalOnlyState(packed, serverState, localState, "server-sync-error", requestBytes);
       warn("服务器衣柜同步失败；本地副本已保存", error);
       toast("服务器同步失败，已保存到本机", "warn");
     }
@@ -3958,6 +4071,10 @@
         conflict: wardrobeReadState.conflict,
         serverStatus: wardrobeReadState.server?.status || null,
         localStatus: wardrobeReadState.local?.status || null,
+        syncMode: wardrobeReadState.sync?.mode || null,
+        syncReason: wardrobeReadState.sync?.reason || null,
+        requestBytes: wardrobeReadState.sync?.requestBytes ?? null,
+        maxRequestBytes: MAX_SERVER_SYNC_MESSAGE_BYTES,
         persistenceBlocked,
       },
     });
@@ -4059,6 +4176,7 @@
   if (globalThis.__COE_TEST_MODE__) {
     globalThis.__COE_TEST_API__ = {
       normalizeWardrobe, normalizeComposition, normalizeLayerTransform, compactWardrobeForStorage, compactCompositionForStorage, compactLayerForStorage, packWardrobe, unpackWardrobeDetailed,
+      serverSyncMessageBytes, storageFingerprint, loadWardrobe, persistWardrobe,
       computeDefaultOverallCenter, resolveOverallTransform, resolveRenderableOverallTransform, resolveNumericOrigin, transformPointAroundOverallPivot,
       stableInsertSyntheticLayers, coeAssetLayerSort: stableInsertSyntheticLayers, analyzeSourceAsset, sanitizePlainRecord,
       scanAlphaBounds, contentBoundsFromBounds, contentPivotFromBounds, resolveTextureContentPivot, resolveTextureContentBounds, cacheOverallLayerGeometry, cachedOverallCenter, buildSyntheticItems, buildLocalSyntheticItems, buildRemoteSyntheticItems, makeSyntheticLayers, syncLocalSyntheticRuntime, requestCharacterRefresh, statusSnapshot,

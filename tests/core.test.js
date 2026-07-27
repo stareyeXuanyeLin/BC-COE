@@ -27,7 +27,7 @@ function makeAsset(group = 'Cloth', name = 'Dress', extra = {}) {
 function load(options = {}) {
   const assets = options.assets || [];
   const player = options.player || { AccountName: 'A', MemberNumber: 1, AssetFamily: 'Female3DCG', Appearance: [], AppearanceLayers: [], ExtensionSettings: {} };
-  const store = new Map();
+  const store = options.store || new Map();
   const sandbox = {
     __COE_TEST_MODE__: true,
     console: { log() {}, info() {}, warn() {}, error() {} },
@@ -38,7 +38,11 @@ function load(options = {}) {
     Player: player,
     Asset: assets,
     AssetGet: (_family, group, name) => assets.find(a => a.Group.Name === group && a.Name === name) || null,
-    localStorage: { getItem: key => store.get(key) ?? null, setItem: (key, value) => store.set(key, value) },
+    localStorage: {
+      getItem: key => store.get(key) ?? null,
+      setItem: (key, value) => store.set(key, value),
+      removeItem: key => store.delete(key),
+    },
     document: { getElementById: () => null, body: null, head: { appendChild() {} }, createElement: () => ({}) },
     requestAnimationFrame: fn => fn(), cancelAnimationFrame() {}, setTimeout() {}, clearTimeout() {}, setInterval() {}, clearInterval() {},
     window: { addEventListener() {} }, alert() {}, confirm: () => true,
@@ -389,6 +393,64 @@ test('packWardrobe normalizes then compacts without restoring omitted defaults',
   assert.ok(packed.startsWith('json:'));
   assert.equal(packed.includes('updatedAt'), false);
   assert.equal(packed.includes('defaultOffsetX'), false);
+});
+
+test('server sync capacity measures the complete Socket.IO AccountUpdate message in UTF-8 bytes', () => {
+  const { api } = load();
+  const packed = 'json:{"name":"衣柜"}';
+  const expected = new TextEncoder().encode(`42${JSON.stringify(['AccountUpdate', { 'ExtensionSettings.CustomOutfitEditor': packed }])}`).length;
+  assert.equal(api.serverSyncMessageBytes(packed), expected);
+});
+
+test('successful wardrobe save reports a sent server request instead of an unverified server success', () => {
+  const syncCalls = [];
+  const env = load({ globals: { ServerPlayerExtensionSettingsSync: key => syncCalls.push(key) } });
+  env.api.setWardrobeForTest({ version: 6, schemes: [], equippedIds: [] });
+  env.api.persistWardrobe();
+  const status = env.api.statusSnapshot().wardrobeRead;
+  assert.deepEqual(syncCalls, ['CustomOutfitEditor']);
+  assert.equal(status.status, 'sync-sent');
+  assert.equal(status.serverStatus, 'sent');
+  assert.equal(status.syncMode, 'server');
+  assert.ok(status.requestBytes > 0);
+  assert.equal(status.maxRequestBytes, 160000);
+});
+
+test('oversized wardrobe remains local, skips server sync, and wins intentional divergence after reload', () => {
+  const store = new Map();
+  const oldServer = 'json:{"version":6,"schemes":[],"equippedIds":[]}';
+  const player = { AccountName: 'A', MemberNumber: 1, AssetFamily: 'Female3DCG', Appearance: [], AppearanceLayers: [], ExtensionSettings: { CustomOutfitEditor: oldServer } };
+  const syncCalls = [];
+  let localJson = '';
+  const lz = {
+    compressToUTF16: () => 'x'.repeat(160000),
+    decompressFromUTF16: () => localJson,
+  };
+  const first = load({ player, store, globals: { LZString: lz, ServerPlayerExtensionSettingsSync: key => syncCalls.push(key) } });
+  const localWardrobe = {
+    version: 6,
+    schemes: [{ id: 'local-scheme', composition: { version: 5, name: '仅本机', slotGroup: 'Cloth', materials: [], layers: [], recycle: [] } }],
+    equippedIds: [],
+  };
+  localJson = JSON.stringify(first.api.compactWardrobeForStorage(localWardrobe));
+  first.api.setWardrobeForTest(localWardrobe);
+  first.api.persistWardrobe();
+
+  const firstStatus = first.api.statusSnapshot().wardrobeRead;
+  assert.equal(syncCalls.length, 0);
+  assert.equal(player.ExtensionSettings.CustomOutfitEditor, oldServer);
+  assert.equal(firstStatus.status, 'local-only');
+  assert.equal(firstStatus.syncReason, 'server-byte-budget');
+  assert.ok(firstStatus.requestBytes > firstStatus.maxRequestBytes);
+  assert.ok(store.has('BC.CustomOutfitEditor.v1.1.sync'));
+
+  const reloadedPlayer = { ...player, Appearance: [], AppearanceLayers: [], ExtensionSettings: { CustomOutfitEditor: oldServer } };
+  const second = load({ player: reloadedPlayer, store, globals: { LZString: lz } });
+  const readState = second.api.loadWardrobe();
+  assert.equal(readState.status, 'local-only');
+  assert.equal(readState.source, 'local');
+  assert.equal(readState.conflict, false);
+  assert.equal(second.api.getWardrobeForTest().schemes[0].id, 'local-scheme');
 });
 
 test('formal same-Asset conflict skips synthetic material', () => {

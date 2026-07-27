@@ -14,7 +14,7 @@ test('content length and namespace are rejected before JSON parsing', () => {
   const { api } = load();
   assert.throws(() => api.parseRemoteContent('x'.repeat(1801)), /remote-content/);
   assert.throws(() => api.parseRemoteContent('OTHER|{'), /remote-content/);
-  assert.throws(() => api.parseRemoteContent('COE_RVS/3|{'), /remote-json/);
+  assert.throws(() => api.parseRemoteContent('COE_RVS/4|{'), /remote-json/);
 });
 
 test('snapshot validator rejects pollution keys, non-finite values and illegal Property', () => {

@@ -49,6 +49,7 @@
       const material = composition.materials[materialOrder];
       const refs = groupedRefs.get(material.id) || [];
       if (!refs.length || material.hidden) continue;
+      if (material.wearGroup && uiMode !== "editor" && !isTagEquipped(character, material.wearGroup)) continue;
       let sourceAsset = null;
       let analysis = null;
       try {
@@ -599,8 +600,8 @@
     for (let materialOrder = 0; materialOrder < (snapshot.m || []).length; materialOrder++) {
       const compact = snapshot.m[materialOrder];
       const refs = refsByMaterial.get(materialOrder) || [];
-      if (!refs.length) continue;
-      const material = { id: `remote:${memberNumber}:${materialOrder}`, sourceGroup: compact.g, sourceAsset: compact.a, colors: compact.c, sourceProperty: compact.p || {}, overallRotation: compact.r, overallScale: compact.s, overallOffsetX: compact.x, overallOffsetY: compact.y, hidden: false };
+      if (!refs.length || (compact.w && !isTagEquipped(character, compact.w))) continue;
+      const material = { id: `remote:${memberNumber}:${materialOrder}`, sourceGroup: compact.g, sourceAsset: compact.a, colors: compact.c, sourceProperty: compact.p || {}, wearGroup: compact.w || null, overallRotation: compact.r, overallScale: compact.s, overallOffsetX: compact.x, overallOffsetY: compact.y, hidden: false };
       let analysis = null;
       try {
         const sourceAsset = AssetGet(character.AssetFamily || "Female3DCG", compact.g, compact.a);

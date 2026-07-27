@@ -94,8 +94,12 @@
   }
 
   function renderEditor(body) {
-    body.innerHTML = `<div class="coe-editor"><aside class="coe-editor-tools"><div class="coe-scheme-bar"><div class="coe-field"><label for="coe-name">方案</label><input id="coe-name" class="coe-title-input" maxlength="60" value="${escapeHTML(editing.name)}"></div></div><nav class="coe-tool-tabs"><button class="coe-btn coe-primary" data-tool="layers">图层与姿势</button><button class="coe-btn" data-tool="materials">＋ 添加素材</button></nav><div class="coe-tool-content"></div></aside></div>`;
+    const slots = clothingSlotGroups();
+    if (!slots.some(group => group.Name === editing.slotGroup)) editing.slotGroup = defaultClothingSlotGroup();
+    const slotOptions = slots.map(group => `<option value="${escapeHTML(group.Name)}" ${group.Name === editing.slotGroup ? "selected" : ""}>${escapeHTML(group.Description || group.Name)}</option>`).join("");
+    body.innerHTML = `<div class="coe-editor"><aside class="coe-editor-tools"><div class="coe-scheme-bar"><div class="coe-field"><label for="coe-name">方案</label><input id="coe-name" class="coe-title-input" maxlength="60" value="${escapeHTML(editing.name)}"><label for="coe-slot">服装部位</label><select id="coe-slot">${slotOptions}</select></div></div><nav class="coe-tool-tabs"><button class="coe-btn coe-primary" data-tool="layers">图层与姿势</button><button class="coe-btn" data-tool="materials">＋ 添加素材</button></nav><div class="coe-tool-content"></div></aside></div>`;
     body.querySelector("#coe-name").addEventListener("input", event => { editing.name = event.target.value.slice(0, 60); });
+    body.querySelector("#coe-slot").addEventListener("change", event => { editing.slotGroup = event.target.value; });
     const tools = body.querySelector(".coe-editor-tools");
     tools.querySelector('[data-tool="layers"]').addEventListener("click", () => renderEditorTools(tools));
     tools.querySelector('[data-tool="materials"]').addEventListener("click", openMaterialPicker);

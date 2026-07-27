@@ -1,5 +1,5 @@
   const MOD_NAME = "CustomOutfitEditor";
-  const VERSION = "1.8.2";
+  const VERSION = "1.9.0";
   console.info(`[${MOD_NAME}] userscript injected`, location.href);
   const SETTINGS_KEY = "CustomOutfitEditor";
   const STORAGE_KEY = "BC.CustomOutfitEditor.v1";
@@ -11,6 +11,18 @@
   const MAX_MATERIAL_BYTES = 8192;
   const MAX_SCHEME_BYTES = 65536;
   const MAX_WARDROBE_BYTES = 262144;
+  const TAG_ASSET_NAME = "COECustomOutfit";
+  const TAG_PREVIEW_EMOTICON = "⋆｡ﾟ✶°☾⋆｡ﾟ";
+  // R130 vanilla appearance groups explicitly marked as clothing/underwear.
+  // Body decals and eye shadow are intentionally omitted because they are
+  // cosmetic body features rather than removable clothing slots.
+  const VANILLA_CLOTHING_SLOT_GROUPS = Object.freeze(new Set([
+    "ClothOuter", "Cloth", "ClothAccessory", "Necklace", "Suit", "SuitLower", "ClothLower",
+    "Bra", "Corset", "Panties", "Socks", "SocksRight", "SocksLeft", "AnkletRight", "AnkletLeft",
+    "Garters", "Shoes", "Hat", "HairAccessory3", "HairAccessory1", "HairAccessory2", "Gloves",
+    "HandAccessoryLeft", "HandAccessoryRight", "Bracelet", "Glasses", "Jewelry", "Mask",
+    "TailStraps", "Wings",
+  ]));
 
   let modApi = null;
   let runtimeInstalled = false;
@@ -19,7 +31,7 @@
   let editing = null;
   let editingId = null;
   let syntheticByCharacter = new WeakMap();
-  let wardrobe = { version: 5, schemes: [], equippedIds: [] };
+  let wardrobe = { version: 6, schemes: [], equippedIds: [] };
   let wardrobeReadState = { status: "absent", source: null, server: null, local: null, conflict: false };
   let persistenceBlocked = false;
   let duplicateInstance = false;

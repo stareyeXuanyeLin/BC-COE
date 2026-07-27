@@ -1,5 +1,5 @@
-  const COMPOSITION_VERSION = 4;
-  const WARDROBE_VERSION = 5;
+  const COMPOSITION_VERSION = 5;
+  const WARDROBE_VERSION = 6;
 
   function materialKey(group, asset) {
     return `${group}\u0000${asset}`;
@@ -78,6 +78,7 @@
       defaultColors: sanitizeColorArray(raw.defaultColors),
       sourceColor: sanitizeColor(raw.sourceColor),
       sourceProperty: sanitizeSourceProperty(raw.sourceProperty),
+      wearGroup: typeof raw.wearGroup === "string" && raw.wearGroup.length <= 64 ? raw.wearGroup : null,
       // These values belong to one source Asset and transform all of its image
       // layers together. They intentionally live on the material, never on the
       // composition, so two materials can be rotated independently.
@@ -164,6 +165,7 @@
     return {
       version: COMPOSITION_VERSION,
       name: String(raw?.name || "未命名方案").slice(0, 60),
+      slotGroup: typeof raw?.slotGroup === "string" && raw.slotGroup.length <= 64 ? raw.slotGroup : "Cloth",
       materials: usedMaterials,
       layers,
       recycle,
@@ -410,13 +412,21 @@
       composition: normalizeComposition(entry?.composition, options),
     }));
     const validIds = new Set(schemes.map(entry => entry.id));
-    const equippedIds = Array.isArray(raw?.equippedIds)
-      ? raw.equippedIds.filter(id => typeof id === "string" && validIds.has(id))
+    const schemeById = new Map(schemes.map(entry => [entry.id, entry]));
+    const candidateIds = Array.isArray(raw?.equippedIds)
+      ? [...new Set(raw.equippedIds.filter(id => typeof id === "string" && validIds.has(id)))]
       : [];
+    const occupiedSlots = new Set();
+    const equippedIds = candidateIds.filter(id => {
+      const slotGroup = schemeById.get(id)?.composition?.slotGroup || "Cloth";
+      if (occupiedSlots.has(slotGroup)) return false;
+      occupiedSlots.add(slotGroup);
+      return true;
+    });
     return {
       version: WARDROBE_VERSION,
       schemes,
-      equippedIds: [...new Set(equippedIds)],
+      equippedIds,
     };
   }
 
@@ -485,6 +495,7 @@
     const compact = {
       version: COMPOSITION_VERSION,
       name: normalized.name,
+      slotGroup: normalized.slotGroup,
       materials: normalized.materials.map(compactMaterialForStorage),
       layers: normalized.layers.map(compactLayerForStorage),
     };

@@ -63,12 +63,13 @@
     const materialIndexes = new Map();
     const layers = [];
     for (const material of composition.materials) {
-      if (material.hidden) continue;
+      if (material.hidden || (material.wearGroup && !isTagEquipped(globalThis.Player, material.wearGroup))) continue;
       const refs = composition.layers.filter(ref => ref.materialId === material.id && !ref.hidden);
       if (!refs.length) continue;
       const index = visibleMaterials.length;
       materialIndexes.set(material.id, index);
       const compact = { g: material.sourceGroup, a: material.sourceAsset, c: sanitizeColorArray(material.colors) };
+      if (material.wearGroup) compact.w = material.wearGroup;
       if (typeof material.overallRotation === "number") compact.r = material.overallRotation;
       if (typeof material.overallScale === "number") compact.s = material.overallScale;
       if (typeof material.overallOffsetX === "number") compact.x = material.overallOffsetX;
@@ -282,6 +283,11 @@
     });
     for (const name of ["ChatRoomLeave", "ServerDisconnect"]) modApi.hookFunction(name, 1000, (args, next) => { cancelRemoteTransport(); resetRemoteRoom(); return next(args); });
     modApi.hookFunction("CharacterLoadOnline", 1000, (args, next) => { const result = next(args); syntheticByCharacter = new WeakMap(); return result; });
+    modApi.hookFunction("CharacterRefresh", 1000, (args, next) => {
+      const result = next(args);
+      if (args[0] === globalThis.Player && activeComposition) scheduleLocalRemoteBuild();
+      return result;
+    });
   }
 
   function initializeRemoteController() {

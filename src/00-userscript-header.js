@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Bondage Club - Custom Outfit Editor
 // @namespace    https://github.com/stareyeXuanyeLin/BC-COE
-// @version      1.8.2
-// @description  制作中（WIP）。仓库公开仅便于 Tampermonkey 引用，不建议使用。
-// @author       凡尘 / 佩菈
+// @version      1.0.0
+// @description  COE Echo Mirror 正式版，基于 Echo Mirror 的自定义服装编辑器。
+// @author       林宣夜 ＆ 佩菈
 // @match        https://www.bondageprojects.com/R*/*
 // @match        https://bondageprojects.com/R*/*
 // @match        https://www.bondageprojects.elementfx.com/R*/*

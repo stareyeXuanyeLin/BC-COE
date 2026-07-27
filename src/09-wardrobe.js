@@ -10,6 +10,29 @@
     return wardrobe.equippedIds;
   }
 
+  function schemeSlotGroup(scheme) {
+    return scheme?.composition?.slotGroup || defaultClothingSlotGroup();
+  }
+
+  function activateScheme(scheme, autoEquipTag = true) {
+    if (!scheme) return false;
+    const slotGroup = schemeSlotGroup(scheme);
+    if (!clothingSlotGroup(slotGroup)) {
+      toast(`服装格子「${slotGroup}」当前不可用`, "error");
+      return false;
+    }
+    if (autoEquipTag && !equipTagForGroup(slotGroup)) {
+      toast(`无法自动装备「自定义${clothingSlotLabel(slotGroup)}」`, "error");
+      return false;
+    }
+    const sameSlotIds = new Set(wardrobe.schemes
+      .filter(entry => entry.id !== scheme.id && schemeSlotGroup(entry) === slotGroup)
+      .map(entry => entry.id));
+    wardrobe.equippedIds = ensureEquippedIds().filter(id => !sameSlotIds.has(id));
+    if (!wardrobe.equippedIds.includes(scheme.id)) wardrobe.equippedIds.push(scheme.id);
+    return true;
+  }
+
   function combinedEquippedComposition() {
     const equipped = new Set(ensureEquippedIds());
     const selected = wardrobe.schemes.filter(scheme => equipped.has(scheme.id));
@@ -21,7 +44,7 @@
       for (const material of composition.materials) {
         const nextId = `${scheme.id}:${material.id}`;
         idMap.set(material.id, nextId);
-        materials.push({ ...cloneJSON(material), id: nextId });
+        materials.push({ ...cloneJSON(material), id: nextId, wearGroup: composition.slotGroup });
       }
       for (const layer of composition.layers) {
         if (layers.length >= MAX_LAYERS) break;
@@ -102,8 +125,8 @@
     summary.textContent = persistenceBlocked
       ? `衣柜处于只读保护：${wardrobeReadState.status}。请先通过诊断 API 导出原始数据，当前不会覆盖存储。`
       : equipped.size
-      ? `当前在本地显示 ${equipped.size} 套方案。每套方案都可以独立启用或停用，不会写入角色 Appearance。`
-      : "当前没有启用自定义方案。方案只在本地显示，不会上传到账号或聊天室 Appearance。";
+      ? `当前启用 ${equipped.size} 套方案。只有对应格子穿着插件标签服装时才会显示。`
+      : "当前没有启用自定义方案。启用服装时会自动穿上对应格子的透明标签服装。";
     body.appendChild(summary);
     renderRemotePreferences(body);
     if (!wardrobe.schemes.length) {
@@ -117,11 +140,13 @@
       const isEquipped = equipped.has(scheme.id);
       const card = document.createElement("article");
       card.className = `coe-card${isEquipped ? " coe-equipped" : ""}`;
-      card.innerHTML = `<div class="coe-card-title"><h3>${escapeHTML(scheme.composition.name)}</h3><span class="coe-equipped-badge">${isEquipped ? "已装备" : "未装备"}</span></div><p class="coe-muted">图层 ${stats.layers} · 素材 ${stats.assets} 件</p><div class="coe-actions"><button class="coe-btn ${isEquipped ? "coe-danger" : "coe-primary"}" data-toggle>${isEquipped ? "停用" : "启用"}</button><button class="coe-btn" data-edit>编辑</button><button class="coe-btn coe-danger" data-delete>删除</button></div>`;
+      const slotLabel = clothingSlotLabel(schemeSlotGroup(scheme));
+      const tagWorn = isTagEquipped(globalThis.Player, schemeSlotGroup(scheme));
+      card.innerHTML = `<div class="coe-card-title"><h3>${escapeHTML(scheme.composition.name)}</h3><span class="coe-equipped-badge">${isEquipped ? (tagWorn ? "已穿着" : "已启用") : "未启用"}</span></div><p class="coe-muted">部位 ${escapeHTML(slotLabel)} · 图层 ${stats.layers} · 素材 ${stats.assets} 件</p><div class="coe-actions"><button class="coe-btn ${isEquipped ? "coe-danger" : "coe-primary"}" data-toggle>${isEquipped ? "停用" : "启用"}</button><button class="coe-btn" data-edit>编辑</button><button class="coe-btn coe-danger" data-delete>删除</button></div>`;
       card.querySelector("[data-toggle]").addEventListener("click", () => {
         if (!ensureWardrobeWritable()) return;
         if (isEquipped) wardrobe.equippedIds = wardrobe.equippedIds.filter(id => id !== scheme.id);
-        else wardrobe.equippedIds.push(scheme.id);
+        else if (!activateScheme(scheme, true)) return;
         syncEquippedSchemes();
         persistWardrobe();
         renderWardrobe(body);

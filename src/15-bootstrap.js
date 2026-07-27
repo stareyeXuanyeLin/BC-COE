@@ -116,6 +116,8 @@
       if (detectDuplicateInstance()) return;
       try {
         modApi = bcModSdk.registerMod({ name: MOD_NAME, fullName: "自定义服装编辑器 Echo Remote", version: VERSION }, { allowReplace: false });
+        registerTagAssets();
+        installTagAssetPreviewHook();
         installRenderHooks();
         installRemoteLifecycleHooks();
         injectStyle();
@@ -150,7 +152,7 @@
       computeDefaultOverallCenter, resolveOverallTransform, resolveNumericOrigin, transformPointAroundOverallPivot,
       stableInsertSyntheticLayers, coeAssetLayerSort: stableInsertSyntheticLayers, analyzeSourceAsset, sanitizePlainRecord,
       scanAlphaBounds, contentBoundsFromBounds, contentPivotFromBounds, resolveTextureContentPivot, resolveTextureContentBounds, cacheOverallLayerGeometry, cachedOverallCenter, buildSyntheticItems, buildLocalSyntheticItems, buildRemoteSyntheticItems, makeSyntheticLayers, statusSnapshot,
-      isDrawableLayer, normalizedMaterialColors, normalizePickerColor, nextCopyLayerLabel, localizedPoseLabel, validateRemoteSnapshot, canonicalRemoteSnapshot, sha256Base64Url,
+      isDrawableLayer, normalizedMaterialColors, normalizePickerColor, nextCopyLayerLabel, localizedPoseLabel, clothingSlotGroups, registerTagAssets, isTagEquipped, equipTagForGroup, activateScheme, combinedEquippedComposition, validateRemoteSnapshot, canonicalRemoteSnapshot, sha256Base64Url,
       parseRemoteContent, serializeRemoteEnvelope, encodeRemoteText, decodeRemoteText, splitRemoteData,
       createRemoteStore, setRemotePeer, setPendingRequest, pendingRequestFor, addRemoteChunk, expireRemoteAssemblies,
       acceptRemoteSnapshot, clearRemoteMember, onRemoteMessage, handleRemoteEnvelope, buildLocalRemoteSnapshot, updateLocalRemoteSnapshot,
@@ -160,6 +162,8 @@
       setRemotePrefsForTest: value => { remotePrefs = { sharingEnabled: value?.sharingEnabled === true, receivingEnabled: value?.receivingEnabled === true }; },
       setLocalRemoteStateForTest: value => { localPeerSessionId = value.session; localRemoteRevision = value.revision; localRemoteHash = value.hash; localRemoteCanonical = value.canonical; localRemoteSnapshot = value.snapshot; localRemoteBuildToken = value.buildToken ?? localRemoteBuildToken; },
       setActiveCompositionForTest: value => { activeComposition = value; },
+      setWardrobeForTest: value => { wardrobe = normalizeWardrobe(value, { validateReferences: false }); },
+      getWardrobeForTest: () => cloneJSON(wardrobe),
       setEditingForTest: value => { editing = value; uiMode = value ? "editor" : null; },
       applyOverallTransformField,
       installHooksForTest: api => { modApi = api; installRenderHooks(); },

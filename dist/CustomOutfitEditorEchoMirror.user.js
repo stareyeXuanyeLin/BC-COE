@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Bondage Club - Custom Outfit Editor
 // @namespace    https://github.com/stareyeXuanyeLin/BC-COE
-// @version      1.8.2
-// @description  制作中（WIP）。仓库公开仅便于 Tampermonkey 引用，不建议使用。
-// @author       凡尘 / 佩菈
+// @version      1.0.0
+// @description  COE Echo Mirror 正式版，基于 Echo Mirror 的自定义服装编辑器。
+// @author       林宣夜 ＆ 佩菈
 // @match        https://www.bondageprojects.com/R*/*
 // @match        https://bondageprojects.com/R*/*
 // @match        https://www.bondageprojects.elementfx.com/R*/*
@@ -25,7 +25,7 @@
 
 
   const MOD_NAME = "CustomOutfitEditor";
-  const VERSION = "1.8.2";
+  const VERSION = "1.9.0";
   console.info(`[${MOD_NAME}] userscript injected`, location.href);
   const SETTINGS_KEY = "CustomOutfitEditor";
   const STORAGE_KEY = "BC.CustomOutfitEditor.v1";
@@ -37,6 +37,18 @@
   const MAX_MATERIAL_BYTES = 8192;
   const MAX_SCHEME_BYTES = 65536;
   const MAX_WARDROBE_BYTES = 262144;
+  const TAG_ASSET_NAME = "COECustomOutfit";
+  const TAG_PREVIEW_EMOTICON = "⋆｡ﾟ✶°☾⋆｡ﾟ";
+  // R130 vanilla appearance groups explicitly marked as clothing/underwear.
+  // Body decals and eye shadow are intentionally omitted because they are
+  // cosmetic body features rather than removable clothing slots.
+  const VANILLA_CLOTHING_SLOT_GROUPS = Object.freeze(new Set([
+    "ClothOuter", "Cloth", "ClothAccessory", "Necklace", "Suit", "SuitLower", "ClothLower",
+    "Bra", "Corset", "Panties", "Socks", "SocksRight", "SocksLeft", "AnkletRight", "AnkletLeft",
+    "Garters", "Shoes", "Hat", "HairAccessory3", "HairAccessory1", "HairAccessory2", "Gloves",
+    "HandAccessoryLeft", "HandAccessoryRight", "Bracelet", "Glasses", "Jewelry", "Mask",
+    "TailStraps", "Wings",
+  ]));
 
   let modApi = null;
   let runtimeInstalled = false;
@@ -45,7 +57,7 @@
   let editing = null;
   let editingId = null;
   let syntheticByCharacter = new WeakMap();
-  let wardrobe = { version: 5, schemes: [], equippedIds: [] };
+  let wardrobe = { version: 6, schemes: [], equippedIds: [] };
   let wardrobeReadState = { status: "absent", source: null, server: null, local: null, conflict: false };
   let persistenceBlocked = false;
   let duplicateInstance = false;
@@ -98,8 +110,8 @@
 
 
 
-  const COMPOSITION_VERSION = 4;
-  const WARDROBE_VERSION = 5;
+  const COMPOSITION_VERSION = 5;
+  const WARDROBE_VERSION = 6;
 
   function materialKey(group, asset) {
     return `${group}\u0000${asset}`;
@@ -178,6 +190,7 @@
       defaultColors: sanitizeColorArray(raw.defaultColors),
       sourceColor: sanitizeColor(raw.sourceColor),
       sourceProperty: sanitizeSourceProperty(raw.sourceProperty),
+      wearGroup: typeof raw.wearGroup === "string" && raw.wearGroup.length <= 64 ? raw.wearGroup : null,
       // These values belong to one source Asset and transform all of its image
       // layers together. They intentionally live on the material, never on the
       // composition, so two materials can be rotated independently.
@@ -264,6 +277,7 @@
     return {
       version: COMPOSITION_VERSION,
       name: String(raw?.name || "未命名方案").slice(0, 60),
+      slotGroup: typeof raw?.slotGroup === "string" && raw.slotGroup.length <= 64 ? raw.slotGroup : "Cloth",
       materials: usedMaterials,
       layers,
       recycle,
@@ -510,13 +524,21 @@
       composition: normalizeComposition(entry?.composition, options),
     }));
     const validIds = new Set(schemes.map(entry => entry.id));
-    const equippedIds = Array.isArray(raw?.equippedIds)
-      ? raw.equippedIds.filter(id => typeof id === "string" && validIds.has(id))
+    const schemeById = new Map(schemes.map(entry => [entry.id, entry]));
+    const candidateIds = Array.isArray(raw?.equippedIds)
+      ? [...new Set(raw.equippedIds.filter(id => typeof id === "string" && validIds.has(id)))]
       : [];
+    const occupiedSlots = new Set();
+    const equippedIds = candidateIds.filter(id => {
+      const slotGroup = schemeById.get(id)?.composition?.slotGroup || "Cloth";
+      if (occupiedSlots.has(slotGroup)) return false;
+      occupiedSlots.add(slotGroup);
+      return true;
+    });
     return {
       version: WARDROBE_VERSION,
       schemes,
-      equippedIds: [...new Set(equippedIds)],
+      equippedIds,
     };
   }
 
@@ -585,6 +607,7 @@
     const compact = {
       version: COMPOSITION_VERSION,
       name: normalized.name,
+      slotGroup: normalized.slotGroup,
       materials: normalized.materials.map(compactMaterialForStorage),
       layers: normalized.layers.map(compactLayerForStorage),
     };
@@ -637,7 +660,7 @@
     try {
       const parsed = JSON.parse(json);
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("root-not-object");
-      if (parsed.version != null && Number(parsed.version) > 5) return { status: "unsupported", raw: value, data: null, error: "newer-schema" };
+      if (parsed.version != null && Number(parsed.version) > 6) return { status: "unsupported", raw: value, data: null, error: "newer-schema" };
       return { status: "ok", raw: value, data: normalizeWardrobe(parsed), error: null };
     } catch (error) {
       return { status: "corrupt", raw: value, data: null, error: String(error?.message || error) };
@@ -750,11 +773,121 @@
   function getMaterialAssets(query = "") {
     const q = query.trim().toLowerCase();
     return (globalThis.Asset || []).filter(asset => {
-      if (!asset?.Wear || asset.IsLock) return false;
+      if (!asset?.Wear || asset.IsLock || asset.Name === TAG_ASSET_NAME) return false;
       if (!asset.Layer?.some(isDrawableLayer)) return false;
       const text = `${asset.Group?.Name || ""} ${asset.Name || ""} ${asset.Description || ""}`.toLowerCase();
       return !q || text.includes(q);
     }).slice(0, 800);
+  }
+
+  function clothingSlotGroups() {
+    const runtimeGroups = Array.isArray(globalThis.AssetGroup) ? globalThis.AssetGroup : [];
+    const assetGroups = (globalThis.Asset || []).map(asset => asset?.Group).filter(Boolean);
+    const unique = new Map();
+    for (const group of [...runtimeGroups, ...assetGroups]) {
+      if (!group?.Name || unique.has(group.Name)) continue;
+      unique.set(group.Name, group);
+    }
+    return [...unique.values()]
+      .filter(group => VANILLA_CLOTHING_SLOT_GROUPS.has(group.Name)
+        && group.Category === "Appearance" && group.AllowNone === true
+        && group.BodyCosplay !== true && (group.Clothing === true || group.Underwear === true))
+      .sort((left, right) => String(left.Description || left.Name).localeCompare(String(right.Description || right.Name), "zh-CN"));
+  }
+
+  function clothingSlotGroup(groupName) {
+    return clothingSlotGroups().find(group => group.Name === groupName) || null;
+  }
+
+  function clothingSlotLabel(groupName) {
+    const group = clothingSlotGroup(groupName)
+      || (globalThis.Asset || []).find(asset => asset?.Group?.Name === groupName)?.Group;
+    return group?.Description || groupName || "服装";
+  }
+
+  function defaultClothingSlotGroup() {
+    const groups = clothingSlotGroups();
+    return groups.find(group => group.Name === "Cloth")?.Name || groups[0]?.Name || "Cloth";
+  }
+
+  function registerTagAssets() {
+    if (typeof globalThis.AssetAdd !== "function" || typeof globalThis.AssetGet !== "function") return false;
+    let registered = 0;
+    for (const group of clothingSlotGroups()) {
+      if (AssetGet("Female3DCG", group.Name, TAG_ASSET_NAME)) continue;
+      const groupDef = globalThis.AssetFemale3DCG?.find(definition => definition?.Group === group.Name);
+      if (!groupDef) {
+        warn(`无法注册 ${group.Name} 标签服装：缺少原版格子定义`);
+        continue;
+      }
+      const description = `自定义${clothingSlotLabel(group.Name)}`;
+      AssetAdd(group, {
+        Name: TAG_ASSET_NAME,
+        Description: description,
+        Value: 0,
+        Wear: true,
+        Visible: true,
+        Random: false,
+        AllowLock: false,
+        DefaultColor: ["Default"],
+        DynamicDescription: () => description,
+        DynamicName: () => description,
+        Layer: [{ Name: "Tag", HasImage: false, AllowColorize: false }],
+      }, null, groupDef);
+      const asset = AssetGet("Female3DCG", group.Name, TAG_ASSET_NAME);
+      if (asset) {
+        asset.Description = description;
+        asset.DynamicDescription = () => description;
+        asset.DynamicName = () => description;
+        asset.__coeTagAsset = true;
+        registered++;
+      }
+    }
+    return registered > 0;
+  }
+
+  function tagItem(character, groupName) {
+    if (!character || !groupName) return null;
+    const item = typeof globalThis.InventoryGet === "function"
+      ? InventoryGet(character, groupName)
+      : character.Appearance?.find(entry => entry?.Asset?.Group?.Name === groupName) || null;
+    return item?.Asset?.Name === TAG_ASSET_NAME ? item : null;
+  }
+
+  function isTagEquipped(character, groupName) {
+    return !!tagItem(character, groupName);
+  }
+
+  function equipTagForGroup(groupName) {
+    if (!globalThis.Player || !clothingSlotGroup(groupName)) return false;
+    if (isTagEquipped(Player, groupName)) return true;
+    if (!AssetGet(Player.AssetFamily || "Female3DCG", groupName, TAG_ASSET_NAME)) registerTagAssets();
+    if (typeof globalThis.InventoryWear !== "function") return false;
+    try {
+      return !!InventoryWear(Player, TAG_ASSET_NAME, groupName, "Default", null, Player.MemberNumber, null, true);
+    } catch (error) {
+      warn(`自动装备「自定义${clothingSlotLabel(groupName)}」失败`, error);
+      return false;
+    }
+  }
+
+  function installTagAssetPreviewHook() {
+    modApi.hookFunction("DrawAssetPreview", 0, (args, next) => {
+      const [x, y, asset, options = {}] = args;
+      if (asset?.Name !== TAG_ASSET_NAME || asset?.Group?.Category !== "Appearance") return next(args);
+      const width = options.Width || globalThis.DrawAssetPreviewDefaultWidth || 225;
+      const height = options.Height || globalThis.DrawAssetPreviewDefaultHeight || 275;
+      const description = options.Description ?? asset.DynamicDescription?.(options.C) ?? asset.Description;
+      if (typeof globalThis.DrawPreviewBox === "function") {
+        DrawPreviewBox(x, y, "", description, options);
+        if (typeof globalThis.DrawTextFit === "function") {
+          const gutter = description ? 44 : 0;
+          DrawTextFit(TAG_PREVIEW_EMOTICON, x + width / 2, y + (height - gutter) / 2, width - 24, options.Foreground || "#27485f");
+        }
+        return;
+      }
+      return next(args);
+    });
   }
 
 
@@ -1075,6 +1208,7 @@
       const material = composition.materials[materialOrder];
       const refs = groupedRefs.get(material.id) || [];
       if (!refs.length || material.hidden) continue;
+      if (material.wearGroup && uiMode !== "editor" && !isTagEquipped(character, material.wearGroup)) continue;
       let sourceAsset = null;
       let analysis = null;
       try {
@@ -1625,8 +1759,8 @@
     for (let materialOrder = 0; materialOrder < (snapshot.m || []).length; materialOrder++) {
       const compact = snapshot.m[materialOrder];
       const refs = refsByMaterial.get(materialOrder) || [];
-      if (!refs.length) continue;
-      const material = { id: `remote:${memberNumber}:${materialOrder}`, sourceGroup: compact.g, sourceAsset: compact.a, colors: compact.c, sourceProperty: compact.p || {}, overallRotation: compact.r, overallScale: compact.s, overallOffsetX: compact.x, overallOffsetY: compact.y, hidden: false };
+      if (!refs.length || (compact.w && !isTagEquipped(character, compact.w))) continue;
+      const material = { id: `remote:${memberNumber}:${materialOrder}`, sourceGroup: compact.g, sourceAsset: compact.a, colors: compact.c, sourceProperty: compact.p || {}, wearGroup: compact.w || null, overallRotation: compact.r, overallScale: compact.s, overallOffsetX: compact.x, overallOffsetY: compact.y, hidden: false };
       let analysis = null;
       try {
         const sourceAsset = AssetGet(character.AssetFamily || "Female3DCG", compact.g, compact.a);
@@ -1960,8 +2094,12 @@
   }
 
   function renderEditor(body) {
-    body.innerHTML = `<div class="coe-editor"><aside class="coe-editor-tools"><div class="coe-scheme-bar"><div class="coe-field"><label for="coe-name">方案</label><input id="coe-name" class="coe-title-input" maxlength="60" value="${escapeHTML(editing.name)}"></div></div><nav class="coe-tool-tabs"><button class="coe-btn coe-primary" data-tool="layers">图层与姿势</button><button class="coe-btn" data-tool="materials">＋ 添加素材</button></nav><div class="coe-tool-content"></div></aside></div>`;
+    const slots = clothingSlotGroups();
+    if (!slots.some(group => group.Name === editing.slotGroup)) editing.slotGroup = defaultClothingSlotGroup();
+    const slotOptions = slots.map(group => `<option value="${escapeHTML(group.Name)}" ${group.Name === editing.slotGroup ? "selected" : ""}>${escapeHTML(group.Description || group.Name)}</option>`).join("");
+    body.innerHTML = `<div class="coe-editor"><aside class="coe-editor-tools"><div class="coe-scheme-bar"><div class="coe-field"><label for="coe-name">方案</label><input id="coe-name" class="coe-title-input" maxlength="60" value="${escapeHTML(editing.name)}"><label for="coe-slot">服装部位</label><select id="coe-slot">${slotOptions}</select></div></div><nav class="coe-tool-tabs"><button class="coe-btn coe-primary" data-tool="layers">图层与姿势</button><button class="coe-btn" data-tool="materials">＋ 添加素材</button></nav><div class="coe-tool-content"></div></aside></div>`;
     body.querySelector("#coe-name").addEventListener("input", event => { editing.name = event.target.value.slice(0, 60); });
+    body.querySelector("#coe-slot").addEventListener("change", event => { editing.slotGroup = event.target.value; });
     const tools = body.querySelector(".coe-editor-tools");
     tools.querySelector('[data-tool="layers"]').addEventListener("click", () => renderEditorTools(tools));
     tools.querySelector('[data-tool="materials"]').addEventListener("click", openMaterialPicker);
@@ -2007,6 +2145,29 @@
     return wardrobe.equippedIds;
   }
 
+  function schemeSlotGroup(scheme) {
+    return scheme?.composition?.slotGroup || defaultClothingSlotGroup();
+  }
+
+  function activateScheme(scheme, autoEquipTag = true) {
+    if (!scheme) return false;
+    const slotGroup = schemeSlotGroup(scheme);
+    if (!clothingSlotGroup(slotGroup)) {
+      toast(`服装格子「${slotGroup}」当前不可用`, "error");
+      return false;
+    }
+    if (autoEquipTag && !equipTagForGroup(slotGroup)) {
+      toast(`无法自动装备「自定义${clothingSlotLabel(slotGroup)}」`, "error");
+      return false;
+    }
+    const sameSlotIds = new Set(wardrobe.schemes
+      .filter(entry => entry.id !== scheme.id && schemeSlotGroup(entry) === slotGroup)
+      .map(entry => entry.id));
+    wardrobe.equippedIds = ensureEquippedIds().filter(id => !sameSlotIds.has(id));
+    if (!wardrobe.equippedIds.includes(scheme.id)) wardrobe.equippedIds.push(scheme.id);
+    return true;
+  }
+
   function combinedEquippedComposition() {
     const equipped = new Set(ensureEquippedIds());
     const selected = wardrobe.schemes.filter(scheme => equipped.has(scheme.id));
@@ -2018,7 +2179,7 @@
       for (const material of composition.materials) {
         const nextId = `${scheme.id}:${material.id}`;
         idMap.set(material.id, nextId);
-        materials.push({ ...cloneJSON(material), id: nextId });
+        materials.push({ ...cloneJSON(material), id: nextId, wearGroup: composition.slotGroup });
       }
       for (const layer of composition.layers) {
         if (layers.length >= MAX_LAYERS) break;
@@ -2099,8 +2260,8 @@
     summary.textContent = persistenceBlocked
       ? `衣柜处于只读保护：${wardrobeReadState.status}。请先通过诊断 API 导出原始数据，当前不会覆盖存储。`
       : equipped.size
-      ? `当前在本地显示 ${equipped.size} 套方案。每套方案都可以独立启用或停用，不会写入角色 Appearance。`
-      : "当前没有启用自定义方案。方案只在本地显示，不会上传到账号或聊天室 Appearance。";
+      ? `当前启用 ${equipped.size} 套方案。只有对应格子穿着插件标签服装时才会显示。`
+      : "当前没有启用自定义方案。启用服装时会自动穿上对应格子的透明标签服装。";
     body.appendChild(summary);
     renderRemotePreferences(body);
     if (!wardrobe.schemes.length) {
@@ -2114,11 +2275,13 @@
       const isEquipped = equipped.has(scheme.id);
       const card = document.createElement("article");
       card.className = `coe-card${isEquipped ? " coe-equipped" : ""}`;
-      card.innerHTML = `<div class="coe-card-title"><h3>${escapeHTML(scheme.composition.name)}</h3><span class="coe-equipped-badge">${isEquipped ? "已装备" : "未装备"}</span></div><p class="coe-muted">图层 ${stats.layers} · 素材 ${stats.assets} 件</p><div class="coe-actions"><button class="coe-btn ${isEquipped ? "coe-danger" : "coe-primary"}" data-toggle>${isEquipped ? "停用" : "启用"}</button><button class="coe-btn" data-edit>编辑</button><button class="coe-btn coe-danger" data-delete>删除</button></div>`;
+      const slotLabel = clothingSlotLabel(schemeSlotGroup(scheme));
+      const tagWorn = isTagEquipped(globalThis.Player, schemeSlotGroup(scheme));
+      card.innerHTML = `<div class="coe-card-title"><h3>${escapeHTML(scheme.composition.name)}</h3><span class="coe-equipped-badge">${isEquipped ? (tagWorn ? "已穿着" : "已启用") : "未启用"}</span></div><p class="coe-muted">部位 ${escapeHTML(slotLabel)} · 图层 ${stats.layers} · 素材 ${stats.assets} 件</p><div class="coe-actions"><button class="coe-btn ${isEquipped ? "coe-danger" : "coe-primary"}" data-toggle>${isEquipped ? "停用" : "启用"}</button><button class="coe-btn" data-edit>编辑</button><button class="coe-btn coe-danger" data-delete>删除</button></div>`;
       card.querySelector("[data-toggle]").addEventListener("click", () => {
         if (!ensureWardrobeWritable()) return;
         if (isEquipped) wardrobe.equippedIds = wardrobe.equippedIds.filter(id => id !== scheme.id);
-        else wardrobe.equippedIds.push(scheme.id);
+        else if (!activateScheme(scheme, true)) return;
         syncEquippedSchemes();
         persistWardrobe();
         renderWardrobe(body);
@@ -2786,7 +2949,7 @@
         wardrobe.schemes.unshift(entry);
         editingId = entry.id;
       }
-      wardrobe.equippedIds = [...new Set([...(wardrobe.equippedIds || []), entry.id])];
+      if (!activateScheme(entry, true)) throw new Error("tag-equip-failed");
       persistWardrobe();
     } catch (error) {
       wardrobe = previousWardrobe;
@@ -2797,7 +2960,7 @@
     }
     restoreEditorAppearance();
     syncEquippedSchemes();
-    toast(`已保存「${editing.name}」并在本地启用`);
+    toast(`已保存并穿上「${editing.name}」`);
     openWardrobe();
   }
 
@@ -2879,7 +3042,7 @@
 
 
 
-  const REMOTE_PROTOCOL = "COE_RVS/3";
+  const REMOTE_PROTOCOL = "COE_RVS/4";
   const REMOTE_PREFIX = `${REMOTE_PROTOCOL}|`;
   const REMOTE_LIMITS = Object.freeze({
     content: 1800, chunkData: 1200, chunks: 32, snapshotBytes: 32768,
@@ -2966,8 +3129,9 @@
     for (const key of Object.keys(value)) if (!new Set(["v", "m", "l"]).has(key)) throw new Error("snapshot-root-key");
     const materials = value.m.map(material => {
       if (!remotePlainObject(material)) throw new Error("snapshot-material");
-      for (const key of Object.keys(material)) if (!new Set(["g", "a", "c", "p", "r", "s", "x", "y"]).has(key)) throw new Error("snapshot-material-key");
+      for (const key of Object.keys(material)) if (!new Set(["g", "a", "c", "p", "w", "r", "s", "x", "y"]).has(key)) throw new Error("snapshot-material-key");
       const output = { g: remoteString(material.g, "group"), a: remoteString(material.a, "asset") };
+      if (material.w != null) output.w = remoteString(material.w, "wear-group");
       if (!Array.isArray(material.c) || material.c.length > 40) throw new Error("snapshot-colors");
       output.c = material.c.map(color => remoteString(color, "color", REMOTE_LIMITS.color));
       const overallFields = [["r", -Math.PI, Math.PI], ["s", 0.25, 3.0], ["x", -1200, 1200], ["y", -1200, 1200]];
@@ -3451,12 +3615,13 @@
     const materialIndexes = new Map();
     const layers = [];
     for (const material of composition.materials) {
-      if (material.hidden) continue;
+      if (material.hidden || (material.wearGroup && !isTagEquipped(globalThis.Player, material.wearGroup))) continue;
       const refs = composition.layers.filter(ref => ref.materialId === material.id && !ref.hidden);
       if (!refs.length) continue;
       const index = visibleMaterials.length;
       materialIndexes.set(material.id, index);
       const compact = { g: material.sourceGroup, a: material.sourceAsset, c: sanitizeColorArray(material.colors) };
+      if (material.wearGroup) compact.w = material.wearGroup;
       if (typeof material.overallRotation === "number") compact.r = material.overallRotation;
       if (typeof material.overallScale === "number") compact.s = material.overallScale;
       if (typeof material.overallOffsetX === "number") compact.x = material.overallOffsetX;
@@ -3670,6 +3835,11 @@
     });
     for (const name of ["ChatRoomLeave", "ServerDisconnect"]) modApi.hookFunction(name, 1000, (args, next) => { cancelRemoteTransport(); resetRemoteRoom(); return next(args); });
     modApi.hookFunction("CharacterLoadOnline", 1000, (args, next) => { const result = next(args); syntheticByCharacter = new WeakMap(); return result; });
+    modApi.hookFunction("CharacterRefresh", 1000, (args, next) => {
+      const result = next(args);
+      if (args[0] === globalThis.Player && activeComposition) scheduleLocalRemoteBuild();
+      return result;
+    });
   }
 
   function initializeRemoteController() {
@@ -3803,6 +3973,8 @@
       if (detectDuplicateInstance()) return;
       try {
         modApi = bcModSdk.registerMod({ name: MOD_NAME, fullName: "自定义服装编辑器 Echo Remote", version: VERSION }, { allowReplace: false });
+        registerTagAssets();
+        installTagAssetPreviewHook();
         installRenderHooks();
         installRemoteLifecycleHooks();
         injectStyle();
@@ -3837,7 +4009,7 @@
       computeDefaultOverallCenter, resolveOverallTransform, resolveNumericOrigin, transformPointAroundOverallPivot,
       stableInsertSyntheticLayers, coeAssetLayerSort: stableInsertSyntheticLayers, analyzeSourceAsset, sanitizePlainRecord,
       scanAlphaBounds, contentBoundsFromBounds, contentPivotFromBounds, resolveTextureContentPivot, resolveTextureContentBounds, cacheOverallLayerGeometry, cachedOverallCenter, buildSyntheticItems, buildLocalSyntheticItems, buildRemoteSyntheticItems, makeSyntheticLayers, statusSnapshot,
-      isDrawableLayer, normalizedMaterialColors, normalizePickerColor, nextCopyLayerLabel, localizedPoseLabel, validateRemoteSnapshot, canonicalRemoteSnapshot, sha256Base64Url,
+      isDrawableLayer, normalizedMaterialColors, normalizePickerColor, nextCopyLayerLabel, localizedPoseLabel, clothingSlotGroups, registerTagAssets, isTagEquipped, equipTagForGroup, activateScheme, combinedEquippedComposition, validateRemoteSnapshot, canonicalRemoteSnapshot, sha256Base64Url,
       parseRemoteContent, serializeRemoteEnvelope, encodeRemoteText, decodeRemoteText, splitRemoteData,
       createRemoteStore, setRemotePeer, setPendingRequest, pendingRequestFor, addRemoteChunk, expireRemoteAssemblies,
       acceptRemoteSnapshot, clearRemoteMember, onRemoteMessage, handleRemoteEnvelope, buildLocalRemoteSnapshot, updateLocalRemoteSnapshot,
@@ -3847,6 +4019,8 @@
       setRemotePrefsForTest: value => { remotePrefs = { sharingEnabled: value?.sharingEnabled === true, receivingEnabled: value?.receivingEnabled === true }; },
       setLocalRemoteStateForTest: value => { localPeerSessionId = value.session; localRemoteRevision = value.revision; localRemoteHash = value.hash; localRemoteCanonical = value.canonical; localRemoteSnapshot = value.snapshot; localRemoteBuildToken = value.buildToken ?? localRemoteBuildToken; },
       setActiveCompositionForTest: value => { activeComposition = value; },
+      setWardrobeForTest: value => { wardrobe = normalizeWardrobe(value, { validateReferences: false }); },
+      getWardrobeForTest: () => cloneJSON(wardrobe),
       setEditingForTest: value => { editing = value; uiMode = value ? "editor" : null; },
       applyOverallTransformField,
       installHooksForTest: api => { modApi = api; installRenderHooks(); },

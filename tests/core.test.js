@@ -127,6 +127,104 @@ test('material categories default to collapsed and matching search categories ex
   assert.match(source, /const collapsed = !searching && !expandedMaterialGroups\.has\(groupName\)/);
 });
 
+test('editor exposes only clothing or underwear appearance slots and stores the selected slot', () => {
+  const cloth = makeAsset('Cloth', 'Dress');
+  cloth.Group.Clothing = true;
+  cloth.Group.Description = '衣服';
+  const eyes = makeAsset('Eyes', 'Blue');
+  eyes.Group.AllowNone = false;
+  const echoBurger = makeAsset('EchoBurgerCloth', 'BurgerTag');
+  echoBurger.Group.Clothing = true;
+  echoBurger.Group.Description = '🍔 Echo服装格';
+  const { api } = load({ assets: [cloth, eyes, echoBurger] });
+  assert.deepEqual(Array.from(api.clothingSlotGroups(), group => group.Name), ['Cloth']);
+  assert.equal(api.clothingSlotGroups().some(group => group.Name === 'EchoBurgerCloth'), false);
+  const normalized = api.normalizeComposition({ name: '星裙', slotGroup: 'Cloth', materials: [], layers: [] }, { validateReferences: false });
+  assert.equal(normalized.slotGroup, 'Cloth');
+  assert.equal(api.compactCompositionForStorage(normalized).slotGroup, 'Cloth');
+  const shellSource = fs.readFileSync(path.join(root, 'src', '08-ui-shell.js'), 'utf8');
+  assert.match(shellSource, /id="coe-slot"/);
+});
+
+test('tag assets register as transparent clothing and enabling can replace the current slot item', () => {
+  const dress = makeAsset('Cloth', 'Dress');
+  dress.Group.Clothing = true;
+  dress.Group.Description = '衣服';
+  const burger = makeAsset('EchoBurgerCloth', 'BurgerDress');
+  burger.Group.Clothing = true;
+  burger.Group.Description = '🍔 Echo服装格';
+  const assets = [dress, burger];
+  const player = { AccountName: 'A', MemberNumber: 1, AssetFamily: 'Female3DCG', Appearance: [{ Asset: dress }], AppearanceLayers: [], ExtensionSettings: {} };
+  const globals = {
+    AssetGroup: [dress.Group, burger.Group],
+    AssetFemale3DCG: [{ Group: 'Cloth', Clothing: true, AllowNone: true }, { Group: 'EchoBurgerCloth', Clothing: true, AllowNone: true }],
+    AssetAdd: (group, definition) => {
+      const asset = { Name: definition.Name, Wear: true, Group: group, Layer: definition.Layer, Description: definition.Description, DynamicDescription: definition.DynamicDescription, DynamicName: definition.DynamicName, DefaultColor: [] };
+      group.Asset ||= [];
+      group.Asset.push(asset);
+      assets.push(asset);
+    },
+    InventoryWear: (character, assetName, groupName) => {
+      const asset = assets.find(entry => entry.Name === assetName && entry.Group.Name === groupName);
+      if (!asset) return null;
+      character.Appearance = character.Appearance.filter(item => item.Asset.Group.Name !== groupName);
+      const item = { Asset: asset, Color: 'Default', Property: {} };
+      character.Appearance.push(item);
+      return item;
+    },
+  };
+  const { api } = load({ assets, player, globals });
+  assert.equal(api.registerTagAssets(), true);
+  const tag = assets.find(asset => asset.Name === 'COECustomOutfit');
+  assert.equal(tag.Layer[0].HasImage, false);
+  assert.equal(assets.some(asset => asset.Name === 'COECustomOutfit' && asset.Group.Name === 'EchoBurgerCloth'), false);
+  assert.equal(tag.DynamicDescription(), '自定义衣服');
+  assert.equal(api.equipTagForGroup('Cloth'), true);
+  assert.equal(player.Appearance.length, 1);
+  assert.equal(player.Appearance[0].Asset, tag);
+});
+
+test('local custom visuals require both an enabled material and its equipped tag asset', () => {
+  const source = makeAsset('Cloth', 'StarDress');
+  source.Group.Clothing = true;
+  const tag = makeAsset('Cloth', 'COECustomOutfit', { layer: { HasImage: false } });
+  tag.Group.Clothing = true;
+  const { api, player } = load({ assets: [source, tag] });
+  const composition = compositionFor(source);
+  composition.materials[0].wearGroup = 'Cloth';
+  api.setActiveCompositionForTest(composition);
+  assert.equal(api.buildSyntheticItems(player).length, 0);
+  player.Appearance.push({ Asset: tag, Color: 'Default', Property: {} });
+  assert.equal(api.buildSyntheticItems(player).length, 1);
+  player.Appearance.length = 0;
+  assert.equal(api.buildSyntheticItems(player).length, 0);
+});
+
+test('activating a scheme disables only the other enabled scheme in the same clothing slot', () => {
+  const cloth = makeAsset('Cloth', 'Dress');
+  cloth.Group.Clothing = true;
+  const outer = makeAsset('ClothOuter', 'Coat');
+  outer.Group.Clothing = true;
+  const { api } = load({ assets: [cloth, outer] });
+  const scheme = (id, slotGroup) => ({ id, composition: { name: id, slotGroup, materials: [], layers: [] } });
+  api.setWardrobeForTest({ version: 6, schemes: [scheme('cloth-a', 'Cloth'), scheme('cloth-b', 'Cloth'), scheme('outer', 'ClothOuter')], equippedIds: ['cloth-a', 'outer'] });
+  const wardrobe = api.getWardrobeForTest();
+  assert.equal(api.activateScheme(wardrobe.schemes.find(entry => entry.id === 'cloth-b'), false), true);
+  assert.deepEqual(Array.from(api.getWardrobeForTest().equippedIds).sort(), ['cloth-b', 'outer']);
+});
+
+test('remote snapshot wear-group field is validated and preserved', () => {
+  const { api } = load();
+  const snapshot = api.validateRemoteSnapshot({ v: 1, m: [{ g: 'Cloth', a: 'Dress', c: ['Default'], w: 'Cloth' }], l: [{ m: 0, n: 'Base', i: 0, p: 10, x: 0, y: 0, o: 1 }] });
+  assert.equal(snapshot.m[0].w, 'Cloth');
+});
+
+test('tag clothing preview is replaced with a night-sky emoticon', () => {
+  const runtimeSource = parts.map(name => fs.readFileSync(path.join(root, 'src', name), 'utf8')).join('\n');
+  assert.match(runtimeSource, /TAG_PREVIEW_EMOTICON/);
+  assert.match(runtimeSource, /DrawPreviewBox\(x, y, "", description, options\)/);
+});
+
 test('stable insert returns the original array when there are no synthetic layers', () => {
   const { api } = load();
   const base = [{ Priority: 1 }, { Priority: 2 }];

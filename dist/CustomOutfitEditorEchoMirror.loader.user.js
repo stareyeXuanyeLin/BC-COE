@@ -5,7 +5,7 @@
 // @version      1.2.4
 // @description  Loads the latest Custom Outfit Editor from the CDN on every page load.
 // @description:zh-CN 每次进入页面时从 CDN 拉取最新的自定义服装编辑器。
-// @author       凡尘 / 佩菈
+// @author       林宣夜 ＆ 佩菈
 // @match        https://www.bondageprojects.com/R*/BondageClub*
 // @match        https://bondageprojects.com/R*/BondageClub*
 // @match        https://www.bondageprojects.elementfx.com/R*/BondageClub*

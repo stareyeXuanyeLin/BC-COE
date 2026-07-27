@@ -1,4 +1,4 @@
-  const REMOTE_PROTOCOL = "COE_RVS/3";
+  const REMOTE_PROTOCOL = "COE_RVS/4";
   const REMOTE_PREFIX = `${REMOTE_PROTOCOL}|`;
   const REMOTE_LIMITS = Object.freeze({
     content: 1800, chunkData: 1200, chunks: 32, snapshotBytes: 32768,
@@ -85,8 +85,9 @@
     for (const key of Object.keys(value)) if (!new Set(["v", "m", "l"]).has(key)) throw new Error("snapshot-root-key");
     const materials = value.m.map(material => {
       if (!remotePlainObject(material)) throw new Error("snapshot-material");
-      for (const key of Object.keys(material)) if (!new Set(["g", "a", "c", "p", "r", "s", "x", "y"]).has(key)) throw new Error("snapshot-material-key");
+      for (const key of Object.keys(material)) if (!new Set(["g", "a", "c", "p", "w", "r", "s", "x", "y"]).has(key)) throw new Error("snapshot-material-key");
       const output = { g: remoteString(material.g, "group"), a: remoteString(material.a, "asset") };
+      if (material.w != null) output.w = remoteString(material.w, "wear-group");
       if (!Array.isArray(material.c) || material.c.length > 40) throw new Error("snapshot-colors");
       output.c = material.c.map(color => remoteString(color, "color", REMOTE_LIMITS.color));
       const overallFields = [["r", -Math.PI, Math.PI], ["s", 0.25, 3.0], ["x", -1200, 1200], ["y", -1200, 1200]];

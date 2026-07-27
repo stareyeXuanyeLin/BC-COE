@@ -636,7 +636,7 @@
         wardrobe.schemes.unshift(entry);
         editingId = entry.id;
       }
-      wardrobe.equippedIds = [...new Set([...(wardrobe.equippedIds || []), entry.id])];
+      if (!activateScheme(entry, true)) throw new Error("tag-equip-failed");
       persistWardrobe();
     } catch (error) {
       wardrobe = previousWardrobe;
@@ -647,7 +647,7 @@
     }
     restoreEditorAppearance();
     syncEquippedSchemes();
-    toast(`已保存「${editing.name}」并在本地启用`);
+    toast(`已保存并穿上「${editing.name}」`);
     openWardrobe();
   }
 

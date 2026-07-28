@@ -128,6 +128,7 @@
         registerTagAssets();
         installTagAssetPreviewHook();
         installRenderHooks();
+        installAppearanceWorkspaceHooks();
         installRemoteLifecycleHooks();
         injectStyle();
         runtimeInstalled = true;
@@ -177,9 +178,12 @@
       setWardrobeForTest: value => { wardrobe = normalizeWardrobe(value, { validateReferences: false }); },
       getWardrobeForTest: () => cloneJSON(wardrobe),
       setEditingForTest: value => { editing = value; uiMode = value ? "editor" : null; },
+      setUIModeForTest: value => { uiMode = value; },
+      isAppearanceRootMode, isAppearanceWorkspaceActive, drawAppearanceWorkspaceCharacters,
       applyOverallTransformField, closeUI,
       installHooksForTest: api => { modApi = api; installRenderHooks(); },
-      installAllHooksForTest: api => { modApi = api; installRenderHooks(); installRemoteLifecycleHooks(); },
+      installWorkspaceHooksForTest: api => { modApi = api; installAppearanceWorkspaceHooks(); },
+      installAllHooksForTest: api => { modApi = api; installRenderHooks(); installAppearanceWorkspaceHooks(); installRemoteLifecycleHooks(); },
     };
   } else {
     const initTimer = setInterval(() => {

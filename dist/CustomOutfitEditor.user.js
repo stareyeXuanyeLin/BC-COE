@@ -2585,10 +2585,22 @@
     document.head.appendChild(style);
   }
 
+  function isAppearanceRootMode() {
+    const mode = globalThis.CharacterAppearanceMode ?? "";
+    const extendedItemOpen = globalThis.DialogFocusItem != null;
+    let layeringActive = false;
+    try { layeringActive = globalThis.Layering?.IsActive?.() === true; } catch (_) { layeringActive = true; }
+    return mode === "" && !extendedItemOpen && !layeringActive;
+  }
+
+  function isAppearanceWorkspaceActive() {
+    return globalThis.CurrentScreen === "Appearance" && (uiMode === "wardrobe" || uiMode === "editor");
+  }
+
   function updateEntryButton() {
     if (!initialized || !document.body) return;
     const isEditingSelf = !globalThis.CharacterAppearanceSelection || globalThis.CharacterAppearanceSelection === globalThis.Player;
-    const shouldShow = globalThis.CurrentScreen === "Appearance" && !document.getElementById(ROOT_ID) && isEditingSelf;
+    const shouldShow = globalThis.CurrentScreen === "Appearance" && isAppearanceRootMode() && !document.getElementById(ROOT_ID) && isEditingSelf;
     let button = document.getElementById(BUTTON_ID);
     if (shouldShow && !button) {
       button = document.createElement("button");
@@ -2608,8 +2620,8 @@
     root.id = ROOT_ID;
     root.dataset.coeVersion = VERSION;
     root.innerHTML = `<section class="coe-panel"><header class="coe-head"><div class="coe-brand"><span class="coe-brand-mark">✦</span><div><h2>${escapeHTML(title)}</h2><span class="coe-build">${MOD_NAME} v${escapeHTML(VERSION)} · Appearance Workspace</span></div></div><div class="coe-actions">${actions}</div></header><main class="coe-body"></main></section>`;
-    root.addEventListener("mousedown", event => event.stopPropagation());
-    root.addEventListener("mouseup", event => event.stopPropagation());
+    for (const eventName of ["mousedown", "mouseup", "pointerdown", "pointerup", "touchstart", "touchend", "wheel"])
+      root.addEventListener(eventName, event => event.stopPropagation());
     root.addEventListener("click", event => {
       event.stopPropagation();
       if (event.target.closest('[data-action="close"]')) closeUI();
@@ -2617,6 +2629,28 @@
     document.body.appendChild(root);
     updateEntryButton();
     return root.querySelector(".coe-body");
+  }
+
+  function drawAppearanceWorkspaceCharacters() {
+    const character = globalThis.CharacterAppearanceSelection;
+    if (!character || typeof globalThis.DrawCharacter !== "function") return;
+    const heightModifier = Number.isFinite(character.HeightModifier) ? character.HeightModifier : 0;
+    DrawCharacter(character, -600, -100 + 4 * heightModifier, 4, false);
+    const isPlayer = typeof character.IsPlayer === "function" ? character.IsPlayer() : character === globalThis.Player;
+    DrawCharacter(character, 660, isPlayer ? 90 : 0, isPlayer ? 0.95 : 1);
+  }
+
+  function installAppearanceWorkspaceHooks() {
+    modApi.hookFunction("AppearanceRun", 1000, (args, next) => {
+      if (!isAppearanceWorkspaceActive()) return next(args);
+      drawAppearanceWorkspaceCharacters();
+    });
+    for (const name of ["AppearanceClick", "AppearanceMouseDown", "AppearanceMouseUp", "AppearanceMouseMove", "AppearanceMouseWheel", "AppearanceKeyDown", "AppearanceKeyUp", "AppearancePaste"]) {
+      if (typeof globalThis[name] !== "function") continue;
+      modApi.hookFunction(name, 1000, (args, next) => {
+        if (!isAppearanceWorkspaceActive()) return next(args);
+      });
+    }
   }
 
   function cloneAppearanceItems(items) {
@@ -4844,6 +4878,7 @@
         registerTagAssets();
         installTagAssetPreviewHook();
         installRenderHooks();
+        installAppearanceWorkspaceHooks();
         installRemoteLifecycleHooks();
         injectStyle();
         runtimeInstalled = true;
@@ -4893,9 +4928,12 @@
       setWardrobeForTest: value => { wardrobe = normalizeWardrobe(value, { validateReferences: false }); },
       getWardrobeForTest: () => cloneJSON(wardrobe),
       setEditingForTest: value => { editing = value; uiMode = value ? "editor" : null; },
+      setUIModeForTest: value => { uiMode = value; },
+      isAppearanceRootMode, isAppearanceWorkspaceActive, drawAppearanceWorkspaceCharacters,
       applyOverallTransformField, closeUI,
       installHooksForTest: api => { modApi = api; installRenderHooks(); },
-      installAllHooksForTest: api => { modApi = api; installRenderHooks(); installRemoteLifecycleHooks(); },
+      installWorkspaceHooksForTest: api => { modApi = api; installAppearanceWorkspaceHooks(); },
+      installAllHooksForTest: api => { modApi = api; installRenderHooks(); installAppearanceWorkspaceHooks(); installRemoteLifecycleHooks(); },
     };
   } else {
     const initTimer = setInterval(() => {

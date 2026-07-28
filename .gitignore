@@ -24,7 +24,9 @@ chat-logs/
 .DS_Store
 Thumbs.db
 
-# Internal development documents
-/docs/internal/
-
 # Keep dist/ because it is the installable userscript artifact.
+
+# Development artifacts — not final deliverables
+docs/
+probes/
+scripts/

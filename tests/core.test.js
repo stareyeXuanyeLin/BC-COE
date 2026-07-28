@@ -407,6 +407,38 @@ test('legacy wardrobe data migrates to schemaVersion 1 without losing saved outf
   assert.equal(Object.hasOwn(stored, 'version'), false);
 });
 
+test('legacy single-material overall transforms migrate without overriding material-level values', () => {
+  const asset = makeAsset();
+  const { api } = load({ assets: [asset] });
+  const base = compositionFor(asset);
+  const legacy = {
+    version: 7,
+    schemes: [{
+      id: 'legacy-overall',
+      composition: {
+        ...base,
+        version: 4,
+        overallRotation: 0.75,
+        overallScale: 1.4,
+        overallOffsetX: 24,
+        overallOffsetY: -18,
+        materials: [{ ...base.materials[0], overallRotation: 0.25 }],
+      },
+    }],
+    equippedIds: ['legacy-overall'],
+  };
+  const result = api.unpackWardrobeDetailed(`json:${JSON.stringify(legacy)}`);
+  assert.equal(result.status, 'ok');
+  const material = result.data.schemes[0].composition.materials[0];
+  assert.equal(material.overallRotation, 0.25);
+  assert.equal(material.overallScale, 1.4);
+  assert.equal(material.overallOffsetX, 24);
+  assert.equal(material.overallOffsetY, -18);
+  const stored = JSON.parse(api.packWardrobe(result.data).slice(5));
+  assert.equal(stored.schemes[0].composition.materials[0].overallScale, 1.4);
+  assert.equal(Object.hasOwn(stored.schemes[0].composition, 'overallScale'), false);
+});
+
 test('current and future wardrobe schemas are distinguished before normalization', () => {
   const { api } = load();
   const current = api.unpackWardrobeDetailed('json:{"schemaVersion":1,"schemes":[],"equippedIds":[]}');

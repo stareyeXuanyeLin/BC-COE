@@ -25,6 +25,18 @@
     };
   }
 
+  function normalizeLegacyOverallTransform(raw) {
+    if (!raw || Number(raw.version) >= COMPOSITION_VERSION) return null;
+    return {
+      overallRotation: typeof raw.overallRotation === "number" && isFinite(raw.overallRotation) && raw.overallRotation !== 0
+        ? clamp(raw.overallRotation, -Math.PI, Math.PI) : undefined,
+      overallScale: typeof raw.overallScale === "number" && isFinite(raw.overallScale) && Math.abs(raw.overallScale - 1) > 0.001
+        ? clamp(raw.overallScale, 0.25, 3.0) : undefined,
+      overallOffsetX: optionalFiniteNumber(raw.overallOffsetX, -1200, 1200),
+      overallOffsetY: optionalFiniteNumber(raw.overallOffsetY, -1200, 1200),
+    };
+  }
+
   function normalizeLayer(raw) {
     if (!raw || typeof raw !== "object") return null;
     const sourceGroup = typeof raw.sourceGroup === "string" ? raw.sourceGroup : "";
@@ -154,6 +166,16 @@
     }
     const used = new Set([...layers, ...recycle].map(layer => layer.materialId));
     const usedMaterials = materials.filter(material => used.has(material.id));
+    // Composition schemas before v6 could carry one composition-wide transform.
+    // Preserve it only for a single-material outfit, and never overwrite the
+    // authoritative material-level value written by newer builds.
+    const legacyOverall = normalizeLegacyOverallTransform(raw);
+    if (legacyOverall && usedMaterials.length === 1) {
+      const material = usedMaterials[0];
+      for (const [key, value] of Object.entries(legacyOverall)) {
+        if (typeof value === "number" && typeof material[key] !== "number") material[key] = value;
+      }
+    }
     return {
       version: COMPOSITION_VERSION,
       name: String(raw?.name || "未命名方案").slice(0, 60),

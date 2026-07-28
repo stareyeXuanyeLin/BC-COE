@@ -29,7 +29,7 @@
     try {
       const parsed = JSON.parse(json);
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("root-not-object");
-      if (parsed.version != null && Number(parsed.version) > 6) return { status: "unsupported", raw: value, data: null, error: "newer-schema" };
+      if (parsed.version != null && Number(parsed.version) > WARDROBE_VERSION) return { status: "unsupported", raw: value, data: null, error: "newer-schema" };
       return { status: "ok", raw: value, data: normalizeWardrobe(parsed), error: null };
     } catch (error) {
       return { status: "corrupt", raw: value, data: null, error: String(error?.message || error) };

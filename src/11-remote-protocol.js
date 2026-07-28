@@ -85,7 +85,7 @@
     for (const key of Object.keys(value)) if (!new Set(["v", "m", "l"]).has(key)) throw new Error("snapshot-root-key");
     const materials = value.m.map(material => {
       if (!remotePlainObject(material)) throw new Error("snapshot-material");
-      for (const key of Object.keys(material)) if (!new Set(["g", "a", "c", "p", "w", "r", "s", "x", "y"]).has(key)) throw new Error("snapshot-material-key");
+      for (const key of Object.keys(material)) if (!new Set(["g", "a", "c", "p", "w", "r", "s", "x", "y", "h", "v"]).has(key)) throw new Error("snapshot-material-key");
       const output = { g: remoteString(material.g, "group"), a: remoteString(material.a, "asset") };
       if (material.w != null) output.w = remoteString(material.w, "wear-group");
       if (!Array.isArray(material.c) || material.c.length > 40) throw new Error("snapshot-colors");
@@ -96,13 +96,18 @@
         if (typeof material[key] !== "number" || !Number.isFinite(material[key])) throw new Error(`snapshot-material-${key}`);
         output[key] = normalizeRemoteNumber(material[key], min, max);
       }
+      for (const key of ["h", "v"]) {
+        if (material[key] == null) continue;
+        if (typeof material[key] !== "boolean") throw new Error(`snapshot-material-${key}`);
+        if (material[key]) output[key] = true;
+      }
       const property = validateRemoteProperty(material.p);
       if (property) output.p = property;
       return output;
     });
     const layers = value.l.map(layer => {
       if (!remotePlainObject(layer)) throw new Error("snapshot-layer");
-      for (const key of Object.keys(layer)) if (!new Set(["m", "n", "i", "p", "x", "y", "o", "r", "s"]).has(key)) throw new Error("snapshot-layer-key");
+      for (const key of Object.keys(layer)) if (!new Set(["m", "n", "i", "p", "x", "y", "o", "r", "s", "h", "v"]).has(key)) throw new Error("snapshot-layer-key");
       const output = {
         m: remoteInteger(layer.m, "material-index", 0, Math.max(0, materials.length - 1)),
         n: layer.n == null ? null : remoteString(layer.n, "layer-name"),
@@ -119,6 +124,11 @@
       if (layer.s != null) {
         if (typeof layer.s !== "number" || !Number.isFinite(layer.s)) throw new Error("snapshot-layer-scale");
         output.s = normalizeRemoteNumber(layer.s, 0.25, 3.0);
+      }
+      for (const key of ["h", "v"]) {
+        if (layer[key] == null) continue;
+        if (typeof layer[key] !== "boolean") throw new Error(`snapshot-layer-${key}`);
+        if (layer[key]) output[key] = true;
       }
       return output;
     });

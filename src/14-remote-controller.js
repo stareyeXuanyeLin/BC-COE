@@ -74,6 +74,8 @@
       if (typeof material.overallScale === "number") compact.s = material.overallScale;
       if (typeof material.overallOffsetX === "number") compact.x = material.overallOffsetX;
       if (typeof material.overallOffsetY === "number") compact.y = material.overallOffsetY;
+      if (material.overallMirrorX === true) compact.h = true;
+      if (material.overallMirrorY === true) compact.v = true;
       const property = sanitizeSourceProperty(material.sourceProperty);
       if (Object.keys(property).length) compact.p = property;
       visibleMaterials.push(compact);
@@ -81,6 +83,8 @@
         var snapshotLayer = { m: index, n: ref.sourceLayer == null ? null : ref.sourceLayer, i: Number.isInteger(ref.sourceLayerIndex) ? ref.sourceLayerIndex : 0, p: ref.priority, x: ref.offsetX, y: ref.offsetY, o: ref.opacity };
         if (typeof ref.rotation === "number" && ref.rotation !== 0) snapshotLayer.r = ref.rotation;
         if (typeof ref.scale === "number" && Math.abs(ref.scale - 1) > 0.001) snapshotLayer.s = ref.scale;
+        if (ref.mirrorX === true) snapshotLayer.h = true;
+        if (ref.mirrorY === true) snapshotLayer.v = true;
         layers.push(snapshotLayer);
       }
     }

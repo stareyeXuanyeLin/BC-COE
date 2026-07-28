@@ -215,6 +215,13 @@
     else object[key] = value;
   }
 
+  function toggleMirrorTransform(object, key) {
+    if (!object) return false;
+    if (object[key] === true) delete object[key];
+    else object[key] = true;
+    return object[key] === true;
+  }
+
   function applyOverallTransformField(materialId, field, rawValue) {
     const material = editing?.materials?.find(item => item.id === materialId);
     if (!material || !Number.isFinite(rawValue)) return false;
@@ -234,7 +241,7 @@
 
   function resetMaterialOverallTransform(material) {
     if (!material) return;
-    for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY"]) delete material[key];
+    for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY", "overallMirrorX", "overallMirrorY"]) delete material[key];
     transformEditTarget = { kind: "material", materialId: material.id, material };
     refreshPreviewLoop();
     const host = document.querySelector(`#${ROOT_ID} .coe-editor-tools`);
@@ -247,7 +254,7 @@
     const selectedIndex = transformEditTarget?.kind === "material"
       ? `material:${editing?.materials?.findIndex(item => item.id === transformEditTarget.materialId) ?? -1}` : "";
     const materialOptions = (editing?.materials || []).map((material, index) => `<option value="material:${index}">${escapeHTML(`${material.label || material.sourceAsset} · 素材整体`)}</option>`).join("");
-    host.innerHTML = `<div class="coe-transform-head"><div><strong>变换编辑</strong><span class="coe-muted">${escapeHTML(transformTargetLabel())}</span></div><div class="coe-actions"><select data-transform-target><option value="">选择素材整体</option>${materialOptions}</select>${transformEditTarget ? '<button type="button" class="coe-btn" data-transform-done>完成</button>' : ''}</div></div><p class="coe-hint">单层变换请从对应图层进入；旋转与缩放共用固定默认中心。</p>`;
+    host.innerHTML = `<div class="coe-transform-head"><div><strong>变换编辑</strong><span class="coe-muted">${escapeHTML(transformTargetLabel())}</span></div><div class="coe-actions"><select data-transform-target><option value="">选择素材整体</option>${materialOptions}</select>${transformEditTarget ? '<button type="button" class="coe-btn" data-transform-done>完成</button>' : ''}</div></div><p class="coe-hint">单层变换请从对应图层进入；旋转、缩放与镜像共用自动中心。素材镜像会同时翻转图层内容与相对位置。</p>`;
     const select = host.querySelector("[data-transform-target]");
     select.value = String(selectedIndex);
     select.addEventListener("change", () => {
@@ -261,7 +268,7 @@
       transformEditTarget.material = material;
       if (!material) return;
       const overall = resolveOverallTransform(editing, globalThis.Player, material);
-      host.insertAdjacentHTML("beforeend", `<div class="coe-transform-fields"><label>旋转<input type="number" step="1" data-overall-field="rotation" value="${Math.round(overall.rotation * 180 / Math.PI * 100) / 100}">°</label><label>缩放<input type="number" step="0.05" min="0.25" max="3" data-overall-field="scale" value="${overall.scale}"></label><label>偏移 X<input type="number" step="1" data-overall-field="offsetX" value="${overall.offsetX}"></label><label>偏移 Y<input type="number" step="1" data-overall-field="offsetY" value="${overall.offsetY}"></label></div><div class="coe-actions"><button type="button" class="coe-btn" data-reset-overall>重置素材整体变换</button></div>`);
+      host.insertAdjacentHTML("beforeend", `<div class="coe-transform-fields"><label>旋转<input type="number" step="1" data-overall-field="rotation" value="${Math.round(overall.rotation * 180 / Math.PI * 100) / 100}">°</label><label>缩放<input type="number" step="0.05" min="0.25" max="3" data-overall-field="scale" value="${overall.scale}"></label><label>偏移 X<input type="number" step="1" data-overall-field="offsetX" value="${overall.offsetX}"></label><label>偏移 Y<input type="number" step="1" data-overall-field="offsetY" value="${overall.offsetY}"></label></div><div class="coe-actions"><button type="button" class="coe-btn ${material.overallMirrorX === true ? "coe-primary" : ""}" aria-pressed="${material.overallMirrorX === true}" data-overall-mirror="overallMirrorX">水平镜像</button><button type="button" class="coe-btn ${material.overallMirrorY === true ? "coe-primary" : ""}" aria-pressed="${material.overallMirrorY === true}" data-overall-mirror="overallMirrorY">垂直镜像</button><button type="button" class="coe-btn" data-reset-overall>重置素材整体变换</button></div>`);
       const materialId = material.id;
       host.querySelectorAll("[data-overall-field]").forEach(input => input.addEventListener("input", () => {
         const field = input.dataset.overallField;
@@ -269,18 +276,30 @@
         if (!applyOverallTransformField(materialId, field, value)) return;
         refreshPreviewLoop();
       }));
+      host.querySelectorAll("[data-overall-mirror]").forEach(button => button.addEventListener("click", () => {
+        const active = toggleMirrorTransform(material, button.dataset.overallMirror);
+        button.classList.toggle("coe-primary", active);
+        button.setAttribute("aria-pressed", String(active));
+        refreshPreviewLoop();
+      }));
       host.querySelector("[data-reset-overall]")?.addEventListener("click", () => resetMaterialOverallTransform(material));
     } else {
       const layer = editing.layers[transformEditTarget.index];
       transformEditTarget.layer = layer;
       if (!layer) return;
-      host.insertAdjacentHTML("beforeend", `<div class="coe-transform-fields"><label>旋转<input type="number" step="1" data-layer-advanced="rotation" value="${Math.round((layer.rotation || 0) * 180 / Math.PI * 100) / 100}">°</label><label>缩放<input type="number" step="0.05" min="0.25" max="3" data-layer-advanced="scale" value="${layer.scale || 1}"></label></div>`);
+      host.insertAdjacentHTML("beforeend", `<div class="coe-transform-fields"><label>旋转<input type="number" step="1" data-layer-advanced="rotation" value="${Math.round((layer.rotation || 0) * 180 / Math.PI * 100) / 100}">°</label><label>缩放<input type="number" step="0.05" min="0.25" max="3" data-layer-advanced="scale" value="${layer.scale || 1}"></label></div><div class="coe-actions"><button type="button" class="coe-btn ${layer.mirrorX === true ? "coe-primary" : ""}" aria-pressed="${layer.mirrorX === true}" data-layer-mirror="mirrorX">水平镜像</button><button type="button" class="coe-btn ${layer.mirrorY === true ? "coe-primary" : ""}" aria-pressed="${layer.mirrorY === true}" data-layer-mirror="mirrorY">垂直镜像</button></div>`);
       host.querySelectorAll("[data-layer-advanced]").forEach(input => input.addEventListener("input", () => {
         const field = input.dataset.layerAdvanced;
         let value = Number(input.value);
         if (!Number.isFinite(value)) return;
         if (field === "rotation") { value = clamp(value, -180, 180) * Math.PI / 180; setOptionalTransformValue(layer, "rotation", value, 0); }
         else if (field === "scale") { value = clamp(value, 0.25, 3); setOptionalTransformValue(layer, "scale", value, 1); }
+        refreshPreviewLoop();
+      }));
+      host.querySelectorAll("[data-layer-mirror]").forEach(button => button.addEventListener("click", () => {
+        const active = toggleMirrorTransform(layer, button.dataset.layerMirror);
+        button.classList.toggle("coe-primary", active);
+        button.setAttribute("aria-pressed", String(active));
         refreshPreviewLoop();
       }));
     }
@@ -395,8 +414,10 @@
         layer.hidden = false;
         layer.rotation = layer.defaultRotation;
         layer.scale = layer.defaultScale;
+        delete layer.mirrorX;
+        delete layer.mirrorY;
       });
-      for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY"]) delete material[key];
+      for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY", "overallMirrorX", "overallMirrorY"]) delete material[key];
       refreshPreviewLoop("structure");
       renderLayerList(list);
     });
@@ -453,6 +474,8 @@
         layer.color = null;
         layer.rotation = layer.defaultRotation;
         layer.scale = layer.defaultScale;
+        delete layer.mirrorX;
+        delete layer.mirrorY;
         if (canColor) material.colors[colorIndex] = material.defaultColors?.[colorIndex] || asset?.DefaultColor?.[colorIndex] || "Default";
         refreshPreviewLoop("structure");
         renderLayerList(list);

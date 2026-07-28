@@ -35,7 +35,7 @@ Hidden Content
   → Store<MemberNumber, validated snapshot>
   → CharacterRefresh(character, false, false)
 
-变换数据分为两个层级：图层保存 `rotation/scale/offsetX/offsetY`，material 保存 `overallRotation/overallScale/overallOffsetX/overallOffsetY`。素材整体变换只作用于同一 source Asset 的全部图片层，不会旋转整个自定义方案。GL 绘制按 `素材整体 × 单图层 × 原始图片` 组合，图层变换优先围绕纹理 Alpha 有效内容包围盒中心，扫描未完成或失败时回退到纹理中点，素材整体变换使用该 material 最大可见图层的自动中心；编辑器按素材提供整体旋转、缩放和偏移控件。
+变换数据分为两个层级：图层保存 `rotation/scale/mirrorX/mirrorY/offsetX/offsetY`，material 保存 `overallRotation/overallScale/overallMirrorX/overallMirrorY/overallOffsetX/overallOffsetY`。镜像采用原地语义，单图层围绕纹理 Alpha 有效内容中心翻转，素材整体围绕同一 material 全部可见图层的联合包围盒中心翻转；素材镜像会同时改变各图层内容及其相对位置。GL 绘制严格按 `素材整体 × 单图层 × 原始图片` 组合，镜像会改变坐标系手性，因此两级旋转与带符号缩放保持独立矩阵阶段，不再合并角度。Alpha 扫描未完成或失败时单图层回退到纹理中点，素材整体中心由真实绘制几何缓存计算；编辑器按图层和素材分别提供水平、垂直镜像操作。
 ```
 
 网络对象不会进入 `normalizeComposition()`；AssetGet 只发生在 validated snapshot 已进入 Store 后的绘制解析阶段。编辑器重绘使用非破坏性的字段规范化，素材/图层身份过滤只在衣柜加载、导入和持久化边界执行，避免临时解析失败时从正在编辑的对象中静默删层。

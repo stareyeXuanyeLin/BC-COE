@@ -108,12 +108,16 @@
         perLayerProperty.Rotation = clamp(ref.rotation, -Math.PI, Math.PI);
       if (typeof ref.scale === "number" && isFinite(ref.scale) && Math.abs(ref.scale - 1) > 0.001)
         perLayerProperty.Scale = clamp(ref.scale, 0.25, 3.0);
+      if (ref.mirrorX === true) perLayerProperty.MirrorX = true;
+      if (ref.mirrorY === true) perLayerProperty.MirrorY = true;
       // 素材服装组整体变换参数注入
       if (overall) {
         if (typeof overall.rotation === "number" && overall.rotation !== 0)
           perLayerProperty.OverallRotation = clamp(overall.rotation, -Math.PI, Math.PI);
         if (typeof overall.scale === "number" && Math.abs(overall.scale - 1) > 0.001)
           perLayerProperty.OverallScale = clamp(overall.scale, 0.25, 3.0);
+        if (overall.mirrorX === true) perLayerProperty.OverallMirrorX = true;
+        if (overall.mirrorY === true) perLayerProperty.OverallMirrorY = true;
         if (typeof overall.offsetX === "number" && overall.offsetX !== 0)
           perLayerProperty.OverallOffsetX = clamp(overall.offsetX, -1200, 1200);
         if (typeof overall.offsetY === "number" && overall.offsetY !== 0)

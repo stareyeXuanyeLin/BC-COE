@@ -130,17 +130,19 @@
     ];
     const localRotation = typeof options.Rotation === "number" ? options.Rotation : 0;
     const localScale = clamp(typeof options.Scale === "number" ? options.Scale : 1, 0.25, 3);
-    if (localRotation || Math.abs(localScale - 1) > 0.001) {
+    const localScaleX = localScale * (options.MirrorX === true ? -1 : 1);
+    const localScaleY = localScale * (options.MirrorY === true ? -1 : 1);
+    if (localRotation || Math.abs(localScale - 1) > 0.001 || options.MirrorX === true || options.MirrorY === true) {
       const pivot = contentState?.pivot || { x: 0.5, y: 0.5 };
       const pivotX = drawX + pivot.x * signedW;
       const pivotY = drawY + pivot.y * signedH;
       const cos = Math.cos(localRotation);
       const sin = Math.sin(localRotation);
       for (const corner of corners) {
-        const dx = corner.x - pivotX;
-        const dy = corner.y - pivotY;
-        corner.x = pivotX + localScale * (cos * dx - sin * dy);
-        corner.y = pivotY + localScale * (sin * dx + cos * dy);
+        const dx = localScaleX * (corner.x - pivotX);
+        const dy = localScaleY * (corner.y - pivotY);
+        corner.x = pivotX + cos * dx - sin * dy;
+        corner.y = pivotY + sin * dx + cos * dy;
       }
     }
     const rect = {
@@ -162,7 +164,8 @@
     // center; otherwise the current draw already contains the final local result.
     const needsOverallCenter = options.__coeNeedsOverallCenter === true ||
       (typeof options.OverallRotation === "number" && options.OverallRotation !== 0) ||
-      (typeof options.OverallScale === "number" && Math.abs(options.OverallScale - 1) > 0.001);
+      (typeof options.OverallScale === "number" && Math.abs(options.OverallScale - 1) > 0.001) ||
+      options.OverallMirrorX === true || options.OverallMirrorY === true;
     if (changed && needsOverallCenter) scheduleContentPivotRefresh();
   }
 
@@ -202,7 +205,9 @@
     const scale = typeof material?.overallScale === "number" ? material.overallScale : 1;
     const offsetX = typeof material?.overallOffsetX === "number" ? material.overallOffsetX : 0;
     const offsetY = typeof material?.overallOffsetY === "number" ? material.overallOffsetY : 0;
-    const needsCenter = rotation !== 0 || Math.abs(scale - 1) > 0.001;
+    const mirrorX = material?.overallMirrorX === true;
+    const mirrorY = material?.overallMirrorY === true;
+    const needsCenter = rotation !== 0 || Math.abs(scale - 1) > 0.001 || mirrorX || mirrorY;
     const runtimeCenter = cachedOverallCenter(character, material?.id);
     const center = runtimeCenter || (needsCenter
       ? computeDefaultOverallCenter(composition, character, material?.id)
@@ -213,6 +218,8 @@
     return {
       rotation: needsCenter && !runtimeCenter ? 0 : rotation,
       scale: needsCenter && !runtimeCenter ? 1 : scale,
+      mirrorX: needsCenter && !runtimeCenter ? false : mirrorX,
+      mirrorY: needsCenter && !runtimeCenter ? false : mirrorY,
       offsetX, offsetY, centerX: center.x, centerY: center.y,
       pendingCenter: needsCenter && !runtimeCenter,
     };
@@ -427,15 +434,26 @@
   // Keeping this as a pure helper makes the invariant explicit: the pivot
   // itself may only receive the requested overall offset, never rotation or
   // scale drift.
-  function transformPointAroundOverallPivot(x, y, pivotX, pivotY, rotation, scale, offsetX = 0, offsetY = 0) {
-    const dx = x - pivotX;
-    const dy = y - pivotY;
+  function transformPointAroundOverallPivotAxes(x, y, pivotX, pivotY, rotation, scaleX, scaleY, offsetX = 0, offsetY = 0) {
+    const dx = scaleX * (x - pivotX);
+    const dy = scaleY * (y - pivotY);
     const cos = Math.cos(rotation || 0);
     const sin = Math.sin(rotation || 0);
     return {
-      x: pivotX + offsetX + scale * (cos * dx - sin * dy),
-      y: pivotY + offsetY + scale * (sin * dx + cos * dy),
+      x: pivotX + offsetX + cos * dx - sin * dy,
+      y: pivotY + offsetY + sin * dx + cos * dy,
     };
+  }
+
+  function transformPointAroundOverallPivot(x, y, pivotX, pivotY, rotation, scale, offsetX = 0, offsetY = 0) {
+    return transformPointAroundOverallPivotAxes(x, y, pivotX, pivotY, rotation, scale, scale, offsetX, offsetY);
+  }
+
+  function rotateTransformMatrix(matrix, angle) {
+    if (!angle) return matrix;
+    return typeof m4.zRotate === "function"
+      ? m4.zRotate(matrix, angle)
+      : m4.multiply(matrix, m4.zRotation(angle));
   }
 
   // 合成图层的变换参数渲染穿线
@@ -454,9 +472,13 @@
           // 只传递非缺省值，保持 drawOptions 精简
           if (typeof p.Rotation === "number" && p.Rotation !== 0) base.Rotation = p.Rotation;
           if (typeof p.Scale === "number" && Math.abs(p.Scale - 1) > 0.001) base.Scale = p.Scale;
+          if (p.MirrorX === true) base.MirrorX = true;
+          if (p.MirrorY === true) base.MirrorY = true;
           // 素材服装组整体变换参数
           if (typeof p.OverallRotation === "number" && p.OverallRotation !== 0) base.OverallRotation = p.OverallRotation;
           if (typeof p.OverallScale === "number" && Math.abs(p.OverallScale - 1) > 0.001) base.OverallScale = p.OverallScale;
+          if (p.OverallMirrorX === true) base.OverallMirrorX = true;
+          if (p.OverallMirrorY === true) base.OverallMirrorY = true;
           if (typeof p.OverallOffsetX === "number") base.OverallOffsetX = p.OverallOffsetX;
           if (typeof p.OverallOffsetY === "number") base.OverallOffsetY = p.OverallOffsetY;
           if (typeof p.OverallCenterX === "number") base.OverallCenterX = p.OverallCenterX;
@@ -492,8 +514,13 @@
         var overallScale = typeof opts.OverallScale === "number" ? opts.OverallScale : 1;
         var overallOffsetX = typeof opts.OverallOffsetX === "number" ? opts.OverallOffsetX : 0;
         var overallOffsetY = typeof opts.OverallOffsetY === "number" ? opts.OverallOffsetY : 0;
+        var mirrorX = opts.MirrorX === true;
+        var mirrorY = opts.MirrorY === true;
+        var overallMirrorX = opts.OverallMirrorX === true;
+        var overallMirrorY = opts.OverallMirrorY === true;
         // 无变换时直接走原始函数，保持零开销。
-        if (!rotation && Math.abs(scale - 1) <= 0.001 && !overallRotation && Math.abs(overallScale - 1) <= 0.001 &&
+        if (!rotation && Math.abs(scale - 1) <= 0.001 && !mirrorX && !mirrorY &&
+          !overallRotation && Math.abs(overallScale - 1) <= 0.001 && !overallMirrorX && !overallMirrorY &&
           !overallOffsetX && !overallOffsetY) {
           const result = drawOriginal();
           const textureInfo = typeof GLDrawLoadImage === "function" ? GLDrawLoadImage(gl, url) : null;
@@ -527,6 +554,10 @@
         cacheOverallLayerGeometry(opts, dstX, dstY, offsetX, texW, texH, gl.canvas.height, url);
         var uniformScale = clamp(scale, 0.25, 3.0);
         var groupScale = clamp(overallScale, 0.25, 3.0);
+        var localScaleX = uniformScale * (mirrorX ? -1 : 1);
+        var localScaleY = uniformScale * (mirrorY ? -1 : 1);
+        var groupScaleX = groupScale * (overallMirrorX ? -1 : 1);
+        var groupScaleY = groupScale * (overallMirrorY ? -1 : 1);
         var off = typeof offsetX === "number" ? offsetX : 0;
         var mirror = opts.Mirror === true;
         var invert = opts.Invert === true;
@@ -540,7 +571,7 @@
         var signedH = (invert ? -1 : 1) * texH;
         // Alpha 扫描异步完成前使用纹理中点；完成后使用有效内容包围盒中心。
         // 使用归一化局部坐标乘以 signedW/signedH，Mirror / Invert 会自然反映到屏幕坐标。
-        var contentPivot = (rotation || Math.abs(scale - 1) > 0.001) ? resolveTextureContentPivot(url) : null;
+        var contentPivot = (rotation || Math.abs(scale - 1) > 0.001 || mirrorX || mirrorY) ? resolveTextureContentPivot(url) : null;
         var localPivotX = contentPivot?.x ?? 0.5;
         var localPivotY = contentPivot?.y ?? 0.5;
         var localCenterScreenX = drawX + localPivotX * signedW;
@@ -565,27 +596,25 @@
         // This avoids relying on a long chain of nested screen-space translates
         // and makes it impossible for local rotation/scale to move the shared
         // material pivot accidentally.
-        const transformedLocalCenter = transformPointAroundOverallPivot(
+        const transformedLocalCenter = transformPointAroundOverallPivotAxes(
           localCenterScreenX,
           localCenterScreenY,
           overallCenterX,
           overallCenterY,
           overallRotation,
-          groupScale,
+          groupScaleX,
+          groupScaleY,
           overallOffsetX,
           overallOffsetY,
         );
         var matrix = m4.orthographic(0, gl.canvas.width, gl.canvas.height, 0, -1, 1);
-        // Vertices remain a unit square. Local and overall uniform transforms can
-        // be combined into one rotation/scale around the transformed local pivot.
+        // 镜像使坐标系改变手性，两级旋转不能再相加。严格保留
+        // material × layer × source 的层级顺序，所有变换围绕各自自动中心。
         matrix = m4.translate(matrix, transformedLocalCenter.x, transformedLocalCenter.y, 0);
-        const combinedRotation = overallRotation + rotation;
-        if (combinedRotation) {
-          matrix = typeof m4.zRotate === "function"
-            ? m4.zRotate(matrix, combinedRotation)
-            : m4.multiply(matrix, m4.zRotation(combinedRotation));
-        }
-        matrix = m4.scale(matrix, groupScale * uniformScale, groupScale * uniformScale, 1);
+        matrix = rotateTransformMatrix(matrix, overallRotation);
+        matrix = m4.scale(matrix, groupScaleX, groupScaleY, 1);
+        matrix = rotateTransformMatrix(matrix, rotation);
+        matrix = m4.scale(matrix, localScaleX, localScaleY, 1);
         matrix = m4.translate(matrix, -localCenterScreenX, -localCenterScreenY, 0);
         matrix = m4.translate(matrix, drawX, drawY, 0);
         matrix = m4.scale(matrix, signedW, signedH, 1);
@@ -644,6 +673,8 @@
       };
       if (typeof layer.r === "number" && layer.r !== 0) remoteRef.rotation = layer.r;
       if (typeof layer.s === "number" && Math.abs(layer.s - 1) > 0.001) remoteRef.scale = layer.s;
+      if (layer.h === true) remoteRef.mirrorX = true;
+      if (layer.v === true) remoteRef.mirrorY = true;
       refsByMaterial.get(layer.m).push(remoteRef);
     }
     const groups = [];
@@ -651,7 +682,7 @@
       const compact = snapshot.m[materialOrder];
       const refs = refsByMaterial.get(materialOrder) || [];
       if (!refs.length || (compact.w && !isTagEquipped(character, compact.w))) continue;
-      const material = { id: `remote:${memberNumber}:${materialOrder}`, sourceGroup: compact.g, sourceAsset: compact.a, colors: compact.c, sourceProperty: compact.p || {}, wearGroup: compact.w || null, overallRotation: compact.r, overallScale: compact.s, overallOffsetX: compact.x, overallOffsetY: compact.y, hidden: false };
+      const material = { id: `remote:${memberNumber}:${materialOrder}`, sourceGroup: compact.g, sourceAsset: compact.a, colors: compact.c, sourceProperty: compact.p || {}, wearGroup: compact.w || null, overallRotation: compact.r, overallScale: compact.s, overallOffsetX: compact.x, overallOffsetY: compact.y, overallMirrorX: compact.h === true, overallMirrorY: compact.v === true, hidden: false };
       let analysis = null;
       try {
         const sourceAsset = AssetGet(character.AssetFamily || "Female3DCG", compact.g, compact.a);
@@ -845,10 +876,14 @@
                 transformed.Rotation = clamp(ref.rotation, -Math.PI, Math.PI);
               if (typeof ref.scale === "number" && isFinite(ref.scale) && Math.abs(ref.scale - 1) > 0.001)
                 transformed.Scale = clamp(ref.scale, 0.25, 3.0);
+              if (ref.mirrorX === true) transformed.MirrorX = true;
+              if (ref.mirrorY === true) transformed.MirrorY = true;
               const overall = marker.overall;
               if (overall) {
                 transformed.OverallRotation = clamp(overall.rotation, -Math.PI, Math.PI);
                 transformed.OverallScale = clamp(overall.scale, 0.25, 3.0);
+                if (overall.mirrorX === true) transformed.OverallMirrorX = true;
+                if (overall.mirrorY === true) transformed.OverallMirrorY = true;
                 transformed.OverallOffsetX = clamp(overall.offsetX, -1200, 1200);
                 transformed.OverallOffsetY = clamp(overall.offsetY, -1200, 1200);
                 transformed.OverallCenterX = overall.centerX;

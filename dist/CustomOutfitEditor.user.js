@@ -125,8 +125,8 @@
 
 
 
-  const COMPOSITION_VERSION = 5;
-  const WARDROBE_VERSION = 6;
+  const COMPOSITION_VERSION = 6;
+  const WARDROBE_VERSION = 7;
 
   function materialKey(group, asset) {
     return `${group}\u0000${asset}`;
@@ -143,18 +143,11 @@
     const scale = typeof raw.scale === "number" && isFinite(raw.scale) && Math.abs(raw.scale - 1) > 0.001
       ? clamp(raw.scale, 0.25, 3.0)
       : undefined;
-    return { rotation, scale };
-  }
-
-  function normalizeOverallTransform(raw) {
-    raw = raw && typeof raw === "object" ? raw : {};
     return {
-      overallRotation: typeof raw.overallRotation === "number" && isFinite(raw.overallRotation) && raw.overallRotation !== 0
-        ? clamp(raw.overallRotation, -Math.PI, Math.PI) : undefined,
-      overallScale: typeof raw.overallScale === "number" && isFinite(raw.overallScale) && Math.abs(raw.overallScale - 1) > 0.001
-        ? clamp(raw.overallScale, 0.25, 3.0) : undefined,
-      overallOffsetX: optionalFiniteNumber(raw.overallOffsetX, -1200, 1200),
-      overallOffsetY: optionalFiniteNumber(raw.overallOffsetY, -1200, 1200),
+      rotation,
+      scale,
+      mirrorX: raw.mirrorX === true ? true : undefined,
+      mirrorY: raw.mirrorY === true ? true : undefined,
     };
   }
 
@@ -188,6 +181,8 @@
       defaultRotation: undefined,
       scale: transform.scale,
       defaultScale: undefined,
+      mirrorX: transform.mirrorX,
+      mirrorY: transform.mirrorY,
     };
   }
 
@@ -215,6 +210,8 @@
         ? clamp(raw.overallScale, 0.25, 3.0) : undefined,
       overallOffsetX: optionalFiniteNumber(raw.overallOffsetX, -1200, 1200),
       overallOffsetY: optionalFiniteNumber(raw.overallOffsetY, -1200, 1200),
+      overallMirrorX: raw.overallMirrorX === true ? true : undefined,
+      overallMirrorY: raw.overallMirrorY === true ? true : undefined,
       hidden: raw.hidden === true,
       collapsed: raw.collapsed === true,
     };
@@ -283,12 +280,6 @@
     }
     const used = new Set([...layers, ...recycle].map(layer => layer.materialId));
     const usedMaterials = materials.filter(material => used.has(material.id));
-    // Older rebuild snapshots stored one composition-wide transform. Preserve it
-    // only when the old composition contains one material; with multiple materials
-    // applying it would recreate the very bug this schema removes.
-    const legacyOverall = normalizeOverallTransform(raw);
-    const hasLegacyOverall = Object.values(legacyOverall).some(value => typeof value === "number");
-    if (hasLegacyOverall && usedMaterials.length === 1) Object.assign(usedMaterials[0], legacyOverall);
     return {
       version: COMPOSITION_VERSION,
       name: String(raw?.name || "未命名方案").slice(0, 60),
@@ -527,6 +518,8 @@
       scale: typeof source?.overallScale === "number" ? source.overallScale : 1,
       offsetX: typeof source?.overallOffsetX === "number" ? source.overallOffsetX : 0,
       offsetY: typeof source?.overallOffsetY === "number" ? source.overallOffsetY : 0,
+      mirrorX: source?.overallMirrorX === true,
+      mirrorY: source?.overallMirrorY === true,
       centerX: center.x,
       centerY: center.y,
     };
@@ -597,6 +590,8 @@
     if (layer.color) output.color = layer.color;
     if (typeof layer.rotation === "number" && layer.rotation !== 0) output.rotation = layer.rotation;
     if (typeof layer.scale === "number" && Math.abs(layer.scale - 1) > 0.001) output.scale = layer.scale;
+    if (layer.mirrorX === true) output.mirrorX = true;
+    if (layer.mirrorY === true) output.mirrorY = true;
     return output;
   }
 
@@ -611,6 +606,8 @@
     for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY"]) {
       if (typeof material[key] === "number") output[key] = material[key];
     }
+    if (material.overallMirrorX === true) output.overallMirrorX = true;
+    if (material.overallMirrorY === true) output.overallMirrorY = true;
     if (material.hidden) output.hidden = true;
     const property = sanitizeSourceProperty(material.sourceProperty);
     if (Object.keys(property).length) output.sourceProperty = property;
@@ -679,7 +676,7 @@
     try {
       const parsed = JSON.parse(json);
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("root-not-object");
-      if (parsed.version != null && Number(parsed.version) > 6) return { status: "unsupported", raw: value, data: null, error: "newer-schema" };
+      if (parsed.version != null && Number(parsed.version) > WARDROBE_VERSION) return { status: "unsupported", raw: value, data: null, error: "newer-schema" };
       return { status: "ok", raw: value, data: normalizeWardrobe(parsed), error: null };
     } catch (error) {
       return { status: "corrupt", raw: value, data: null, error: String(error?.message || error) };
@@ -1410,12 +1407,16 @@
         perLayerProperty.Rotation = clamp(ref.rotation, -Math.PI, Math.PI);
       if (typeof ref.scale === "number" && isFinite(ref.scale) && Math.abs(ref.scale - 1) > 0.001)
         perLayerProperty.Scale = clamp(ref.scale, 0.25, 3.0);
+      if (ref.mirrorX === true) perLayerProperty.MirrorX = true;
+      if (ref.mirrorY === true) perLayerProperty.MirrorY = true;
       // 素材服装组整体变换参数注入
       if (overall) {
         if (typeof overall.rotation === "number" && overall.rotation !== 0)
           perLayerProperty.OverallRotation = clamp(overall.rotation, -Math.PI, Math.PI);
         if (typeof overall.scale === "number" && Math.abs(overall.scale - 1) > 0.001)
           perLayerProperty.OverallScale = clamp(overall.scale, 0.25, 3.0);
+        if (overall.mirrorX === true) perLayerProperty.OverallMirrorX = true;
+        if (overall.mirrorY === true) perLayerProperty.OverallMirrorY = true;
         if (typeof overall.offsetX === "number" && overall.offsetX !== 0)
           perLayerProperty.OverallOffsetX = clamp(overall.offsetX, -1200, 1200);
         if (typeof overall.offsetY === "number" && overall.offsetY !== 0)
@@ -1568,17 +1569,19 @@
     ];
     const localRotation = typeof options.Rotation === "number" ? options.Rotation : 0;
     const localScale = clamp(typeof options.Scale === "number" ? options.Scale : 1, 0.25, 3);
-    if (localRotation || Math.abs(localScale - 1) > 0.001) {
+    const localScaleX = localScale * (options.MirrorX === true ? -1 : 1);
+    const localScaleY = localScale * (options.MirrorY === true ? -1 : 1);
+    if (localRotation || Math.abs(localScale - 1) > 0.001 || options.MirrorX === true || options.MirrorY === true) {
       const pivot = contentState?.pivot || { x: 0.5, y: 0.5 };
       const pivotX = drawX + pivot.x * signedW;
       const pivotY = drawY + pivot.y * signedH;
       const cos = Math.cos(localRotation);
       const sin = Math.sin(localRotation);
       for (const corner of corners) {
-        const dx = corner.x - pivotX;
-        const dy = corner.y - pivotY;
-        corner.x = pivotX + localScale * (cos * dx - sin * dy);
-        corner.y = pivotY + localScale * (sin * dx + cos * dy);
+        const dx = localScaleX * (corner.x - pivotX);
+        const dy = localScaleY * (corner.y - pivotY);
+        corner.x = pivotX + cos * dx - sin * dy;
+        corner.y = pivotY + sin * dx + cos * dy;
       }
     }
     const rect = {
@@ -1600,7 +1603,8 @@
     // center; otherwise the current draw already contains the final local result.
     const needsOverallCenter = options.__coeNeedsOverallCenter === true ||
       (typeof options.OverallRotation === "number" && options.OverallRotation !== 0) ||
-      (typeof options.OverallScale === "number" && Math.abs(options.OverallScale - 1) > 0.001);
+      (typeof options.OverallScale === "number" && Math.abs(options.OverallScale - 1) > 0.001) ||
+      options.OverallMirrorX === true || options.OverallMirrorY === true;
     if (changed && needsOverallCenter) scheduleContentPivotRefresh();
   }
 
@@ -1640,7 +1644,9 @@
     const scale = typeof material?.overallScale === "number" ? material.overallScale : 1;
     const offsetX = typeof material?.overallOffsetX === "number" ? material.overallOffsetX : 0;
     const offsetY = typeof material?.overallOffsetY === "number" ? material.overallOffsetY : 0;
-    const needsCenter = rotation !== 0 || Math.abs(scale - 1) > 0.001;
+    const mirrorX = material?.overallMirrorX === true;
+    const mirrorY = material?.overallMirrorY === true;
+    const needsCenter = rotation !== 0 || Math.abs(scale - 1) > 0.001 || mirrorX || mirrorY;
     const runtimeCenter = cachedOverallCenter(character, material?.id);
     const center = runtimeCenter || (needsCenter
       ? computeDefaultOverallCenter(composition, character, material?.id)
@@ -1651,6 +1657,8 @@
     return {
       rotation: needsCenter && !runtimeCenter ? 0 : rotation,
       scale: needsCenter && !runtimeCenter ? 1 : scale,
+      mirrorX: needsCenter && !runtimeCenter ? false : mirrorX,
+      mirrorY: needsCenter && !runtimeCenter ? false : mirrorY,
       offsetX, offsetY, centerX: center.x, centerY: center.y,
       pendingCenter: needsCenter && !runtimeCenter,
     };
@@ -1865,15 +1873,26 @@
   // Keeping this as a pure helper makes the invariant explicit: the pivot
   // itself may only receive the requested overall offset, never rotation or
   // scale drift.
-  function transformPointAroundOverallPivot(x, y, pivotX, pivotY, rotation, scale, offsetX = 0, offsetY = 0) {
-    const dx = x - pivotX;
-    const dy = y - pivotY;
+  function transformPointAroundOverallPivotAxes(x, y, pivotX, pivotY, rotation, scaleX, scaleY, offsetX = 0, offsetY = 0) {
+    const dx = scaleX * (x - pivotX);
+    const dy = scaleY * (y - pivotY);
     const cos = Math.cos(rotation || 0);
     const sin = Math.sin(rotation || 0);
     return {
-      x: pivotX + offsetX + scale * (cos * dx - sin * dy),
-      y: pivotY + offsetY + scale * (sin * dx + cos * dy),
+      x: pivotX + offsetX + cos * dx - sin * dy,
+      y: pivotY + offsetY + sin * dx + cos * dy,
     };
+  }
+
+  function transformPointAroundOverallPivot(x, y, pivotX, pivotY, rotation, scale, offsetX = 0, offsetY = 0) {
+    return transformPointAroundOverallPivotAxes(x, y, pivotX, pivotY, rotation, scale, scale, offsetX, offsetY);
+  }
+
+  function rotateTransformMatrix(matrix, angle) {
+    if (!angle) return matrix;
+    return typeof m4.zRotate === "function"
+      ? m4.zRotate(matrix, angle)
+      : m4.multiply(matrix, m4.zRotation(angle));
   }
 
   // 合成图层的变换参数渲染穿线
@@ -1892,9 +1911,13 @@
           // 只传递非缺省值，保持 drawOptions 精简
           if (typeof p.Rotation === "number" && p.Rotation !== 0) base.Rotation = p.Rotation;
           if (typeof p.Scale === "number" && Math.abs(p.Scale - 1) > 0.001) base.Scale = p.Scale;
+          if (p.MirrorX === true) base.MirrorX = true;
+          if (p.MirrorY === true) base.MirrorY = true;
           // 素材服装组整体变换参数
           if (typeof p.OverallRotation === "number" && p.OverallRotation !== 0) base.OverallRotation = p.OverallRotation;
           if (typeof p.OverallScale === "number" && Math.abs(p.OverallScale - 1) > 0.001) base.OverallScale = p.OverallScale;
+          if (p.OverallMirrorX === true) base.OverallMirrorX = true;
+          if (p.OverallMirrorY === true) base.OverallMirrorY = true;
           if (typeof p.OverallOffsetX === "number") base.OverallOffsetX = p.OverallOffsetX;
           if (typeof p.OverallOffsetY === "number") base.OverallOffsetY = p.OverallOffsetY;
           if (typeof p.OverallCenterX === "number") base.OverallCenterX = p.OverallCenterX;
@@ -1930,8 +1953,13 @@
         var overallScale = typeof opts.OverallScale === "number" ? opts.OverallScale : 1;
         var overallOffsetX = typeof opts.OverallOffsetX === "number" ? opts.OverallOffsetX : 0;
         var overallOffsetY = typeof opts.OverallOffsetY === "number" ? opts.OverallOffsetY : 0;
+        var mirrorX = opts.MirrorX === true;
+        var mirrorY = opts.MirrorY === true;
+        var overallMirrorX = opts.OverallMirrorX === true;
+        var overallMirrorY = opts.OverallMirrorY === true;
         // 无变换时直接走原始函数，保持零开销。
-        if (!rotation && Math.abs(scale - 1) <= 0.001 && !overallRotation && Math.abs(overallScale - 1) <= 0.001 &&
+        if (!rotation && Math.abs(scale - 1) <= 0.001 && !mirrorX && !mirrorY &&
+          !overallRotation && Math.abs(overallScale - 1) <= 0.001 && !overallMirrorX && !overallMirrorY &&
           !overallOffsetX && !overallOffsetY) {
           const result = drawOriginal();
           const textureInfo = typeof GLDrawLoadImage === "function" ? GLDrawLoadImage(gl, url) : null;
@@ -1965,6 +1993,10 @@
         cacheOverallLayerGeometry(opts, dstX, dstY, offsetX, texW, texH, gl.canvas.height, url);
         var uniformScale = clamp(scale, 0.25, 3.0);
         var groupScale = clamp(overallScale, 0.25, 3.0);
+        var localScaleX = uniformScale * (mirrorX ? -1 : 1);
+        var localScaleY = uniformScale * (mirrorY ? -1 : 1);
+        var groupScaleX = groupScale * (overallMirrorX ? -1 : 1);
+        var groupScaleY = groupScale * (overallMirrorY ? -1 : 1);
         var off = typeof offsetX === "number" ? offsetX : 0;
         var mirror = opts.Mirror === true;
         var invert = opts.Invert === true;
@@ -1978,7 +2010,7 @@
         var signedH = (invert ? -1 : 1) * texH;
         // Alpha 扫描异步完成前使用纹理中点；完成后使用有效内容包围盒中心。
         // 使用归一化局部坐标乘以 signedW/signedH，Mirror / Invert 会自然反映到屏幕坐标。
-        var contentPivot = (rotation || Math.abs(scale - 1) > 0.001) ? resolveTextureContentPivot(url) : null;
+        var contentPivot = (rotation || Math.abs(scale - 1) > 0.001 || mirrorX || mirrorY) ? resolveTextureContentPivot(url) : null;
         var localPivotX = contentPivot?.x ?? 0.5;
         var localPivotY = contentPivot?.y ?? 0.5;
         var localCenterScreenX = drawX + localPivotX * signedW;
@@ -2003,27 +2035,25 @@
         // This avoids relying on a long chain of nested screen-space translates
         // and makes it impossible for local rotation/scale to move the shared
         // material pivot accidentally.
-        const transformedLocalCenter = transformPointAroundOverallPivot(
+        const transformedLocalCenter = transformPointAroundOverallPivotAxes(
           localCenterScreenX,
           localCenterScreenY,
           overallCenterX,
           overallCenterY,
           overallRotation,
-          groupScale,
+          groupScaleX,
+          groupScaleY,
           overallOffsetX,
           overallOffsetY,
         );
         var matrix = m4.orthographic(0, gl.canvas.width, gl.canvas.height, 0, -1, 1);
-        // Vertices remain a unit square. Local and overall uniform transforms can
-        // be combined into one rotation/scale around the transformed local pivot.
+        // 镜像使坐标系改变手性，两级旋转不能再相加。严格保留
+        // material × layer × source 的层级顺序，所有变换围绕各自自动中心。
         matrix = m4.translate(matrix, transformedLocalCenter.x, transformedLocalCenter.y, 0);
-        const combinedRotation = overallRotation + rotation;
-        if (combinedRotation) {
-          matrix = typeof m4.zRotate === "function"
-            ? m4.zRotate(matrix, combinedRotation)
-            : m4.multiply(matrix, m4.zRotation(combinedRotation));
-        }
-        matrix = m4.scale(matrix, groupScale * uniformScale, groupScale * uniformScale, 1);
+        matrix = rotateTransformMatrix(matrix, overallRotation);
+        matrix = m4.scale(matrix, groupScaleX, groupScaleY, 1);
+        matrix = rotateTransformMatrix(matrix, rotation);
+        matrix = m4.scale(matrix, localScaleX, localScaleY, 1);
         matrix = m4.translate(matrix, -localCenterScreenX, -localCenterScreenY, 0);
         matrix = m4.translate(matrix, drawX, drawY, 0);
         matrix = m4.scale(matrix, signedW, signedH, 1);
@@ -2082,6 +2112,8 @@
       };
       if (typeof layer.r === "number" && layer.r !== 0) remoteRef.rotation = layer.r;
       if (typeof layer.s === "number" && Math.abs(layer.s - 1) > 0.001) remoteRef.scale = layer.s;
+      if (layer.h === true) remoteRef.mirrorX = true;
+      if (layer.v === true) remoteRef.mirrorY = true;
       refsByMaterial.get(layer.m).push(remoteRef);
     }
     const groups = [];
@@ -2089,7 +2121,7 @@
       const compact = snapshot.m[materialOrder];
       const refs = refsByMaterial.get(materialOrder) || [];
       if (!refs.length || (compact.w && !isTagEquipped(character, compact.w))) continue;
-      const material = { id: `remote:${memberNumber}:${materialOrder}`, sourceGroup: compact.g, sourceAsset: compact.a, colors: compact.c, sourceProperty: compact.p || {}, wearGroup: compact.w || null, overallRotation: compact.r, overallScale: compact.s, overallOffsetX: compact.x, overallOffsetY: compact.y, hidden: false };
+      const material = { id: `remote:${memberNumber}:${materialOrder}`, sourceGroup: compact.g, sourceAsset: compact.a, colors: compact.c, sourceProperty: compact.p || {}, wearGroup: compact.w || null, overallRotation: compact.r, overallScale: compact.s, overallOffsetX: compact.x, overallOffsetY: compact.y, overallMirrorX: compact.h === true, overallMirrorY: compact.v === true, hidden: false };
       let analysis = null;
       try {
         const sourceAsset = AssetGet(character.AssetFamily || "Female3DCG", compact.g, compact.a);
@@ -2283,10 +2315,14 @@
                 transformed.Rotation = clamp(ref.rotation, -Math.PI, Math.PI);
               if (typeof ref.scale === "number" && isFinite(ref.scale) && Math.abs(ref.scale - 1) > 0.001)
                 transformed.Scale = clamp(ref.scale, 0.25, 3.0);
+              if (ref.mirrorX === true) transformed.MirrorX = true;
+              if (ref.mirrorY === true) transformed.MirrorY = true;
               const overall = marker.overall;
               if (overall) {
                 transformed.OverallRotation = clamp(overall.rotation, -Math.PI, Math.PI);
                 transformed.OverallScale = clamp(overall.scale, 0.25, 3.0);
+                if (overall.mirrorX === true) transformed.OverallMirrorX = true;
+                if (overall.mirrorY === true) transformed.OverallMirrorY = true;
                 transformed.OverallOffsetX = clamp(overall.offsetX, -1200, 1200);
                 transformed.OverallOffsetY = clamp(overall.offsetY, -1200, 1200);
                 transformed.OverallCenterX = overall.centerX;
@@ -3089,6 +3125,13 @@
     else object[key] = value;
   }
 
+  function toggleMirrorTransform(object, key) {
+    if (!object) return false;
+    if (object[key] === true) delete object[key];
+    else object[key] = true;
+    return object[key] === true;
+  }
+
   function applyOverallTransformField(materialId, field, rawValue) {
     const material = editing?.materials?.find(item => item.id === materialId);
     if (!material || !Number.isFinite(rawValue)) return false;
@@ -3108,7 +3151,7 @@
 
   function resetMaterialOverallTransform(material) {
     if (!material) return;
-    for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY"]) delete material[key];
+    for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY", "overallMirrorX", "overallMirrorY"]) delete material[key];
     transformEditTarget = { kind: "material", materialId: material.id, material };
     refreshPreviewLoop();
     const host = document.querySelector(`#${ROOT_ID} .coe-editor-tools`);
@@ -3121,7 +3164,7 @@
     const selectedIndex = transformEditTarget?.kind === "material"
       ? `material:${editing?.materials?.findIndex(item => item.id === transformEditTarget.materialId) ?? -1}` : "";
     const materialOptions = (editing?.materials || []).map((material, index) => `<option value="material:${index}">${escapeHTML(`${material.label || material.sourceAsset} · 素材整体`)}</option>`).join("");
-    host.innerHTML = `<div class="coe-transform-head"><div><strong>变换编辑</strong><span class="coe-muted">${escapeHTML(transformTargetLabel())}</span></div><div class="coe-actions"><select data-transform-target><option value="">选择素材整体</option>${materialOptions}</select>${transformEditTarget ? '<button type="button" class="coe-btn" data-transform-done>完成</button>' : ''}</div></div><p class="coe-hint">单层变换请从对应图层进入；旋转与缩放共用固定默认中心。</p>`;
+    host.innerHTML = `<div class="coe-transform-head"><div><strong>变换编辑</strong><span class="coe-muted">${escapeHTML(transformTargetLabel())}</span></div><div class="coe-actions"><select data-transform-target><option value="">选择素材整体</option>${materialOptions}</select>${transformEditTarget ? '<button type="button" class="coe-btn" data-transform-done>完成</button>' : ''}</div></div><p class="coe-hint">单层变换请从对应图层进入；旋转、缩放与镜像共用自动中心。素材镜像会同时翻转图层内容与相对位置。</p>`;
     const select = host.querySelector("[data-transform-target]");
     select.value = String(selectedIndex);
     select.addEventListener("change", () => {
@@ -3135,7 +3178,7 @@
       transformEditTarget.material = material;
       if (!material) return;
       const overall = resolveOverallTransform(editing, globalThis.Player, material);
-      host.insertAdjacentHTML("beforeend", `<div class="coe-transform-fields"><label>旋转<input type="number" step="1" data-overall-field="rotation" value="${Math.round(overall.rotation * 180 / Math.PI * 100) / 100}">°</label><label>缩放<input type="number" step="0.05" min="0.25" max="3" data-overall-field="scale" value="${overall.scale}"></label><label>偏移 X<input type="number" step="1" data-overall-field="offsetX" value="${overall.offsetX}"></label><label>偏移 Y<input type="number" step="1" data-overall-field="offsetY" value="${overall.offsetY}"></label></div><div class="coe-actions"><button type="button" class="coe-btn" data-reset-overall>重置素材整体变换</button></div>`);
+      host.insertAdjacentHTML("beforeend", `<div class="coe-transform-fields"><label>旋转<input type="number" step="1" data-overall-field="rotation" value="${Math.round(overall.rotation * 180 / Math.PI * 100) / 100}">°</label><label>缩放<input type="number" step="0.05" min="0.25" max="3" data-overall-field="scale" value="${overall.scale}"></label><label>偏移 X<input type="number" step="1" data-overall-field="offsetX" value="${overall.offsetX}"></label><label>偏移 Y<input type="number" step="1" data-overall-field="offsetY" value="${overall.offsetY}"></label></div><div class="coe-actions"><button type="button" class="coe-btn ${material.overallMirrorX === true ? "coe-primary" : ""}" aria-pressed="${material.overallMirrorX === true}" data-overall-mirror="overallMirrorX">水平镜像</button><button type="button" class="coe-btn ${material.overallMirrorY === true ? "coe-primary" : ""}" aria-pressed="${material.overallMirrorY === true}" data-overall-mirror="overallMirrorY">垂直镜像</button><button type="button" class="coe-btn" data-reset-overall>重置素材整体变换</button></div>`);
       const materialId = material.id;
       host.querySelectorAll("[data-overall-field]").forEach(input => input.addEventListener("input", () => {
         const field = input.dataset.overallField;
@@ -3143,18 +3186,30 @@
         if (!applyOverallTransformField(materialId, field, value)) return;
         refreshPreviewLoop();
       }));
+      host.querySelectorAll("[data-overall-mirror]").forEach(button => button.addEventListener("click", () => {
+        const active = toggleMirrorTransform(material, button.dataset.overallMirror);
+        button.classList.toggle("coe-primary", active);
+        button.setAttribute("aria-pressed", String(active));
+        refreshPreviewLoop();
+      }));
       host.querySelector("[data-reset-overall]")?.addEventListener("click", () => resetMaterialOverallTransform(material));
     } else {
       const layer = editing.layers[transformEditTarget.index];
       transformEditTarget.layer = layer;
       if (!layer) return;
-      host.insertAdjacentHTML("beforeend", `<div class="coe-transform-fields"><label>旋转<input type="number" step="1" data-layer-advanced="rotation" value="${Math.round((layer.rotation || 0) * 180 / Math.PI * 100) / 100}">°</label><label>缩放<input type="number" step="0.05" min="0.25" max="3" data-layer-advanced="scale" value="${layer.scale || 1}"></label></div>`);
+      host.insertAdjacentHTML("beforeend", `<div class="coe-transform-fields"><label>旋转<input type="number" step="1" data-layer-advanced="rotation" value="${Math.round((layer.rotation || 0) * 180 / Math.PI * 100) / 100}">°</label><label>缩放<input type="number" step="0.05" min="0.25" max="3" data-layer-advanced="scale" value="${layer.scale || 1}"></label></div><div class="coe-actions"><button type="button" class="coe-btn ${layer.mirrorX === true ? "coe-primary" : ""}" aria-pressed="${layer.mirrorX === true}" data-layer-mirror="mirrorX">水平镜像</button><button type="button" class="coe-btn ${layer.mirrorY === true ? "coe-primary" : ""}" aria-pressed="${layer.mirrorY === true}" data-layer-mirror="mirrorY">垂直镜像</button></div>`);
       host.querySelectorAll("[data-layer-advanced]").forEach(input => input.addEventListener("input", () => {
         const field = input.dataset.layerAdvanced;
         let value = Number(input.value);
         if (!Number.isFinite(value)) return;
         if (field === "rotation") { value = clamp(value, -180, 180) * Math.PI / 180; setOptionalTransformValue(layer, "rotation", value, 0); }
         else if (field === "scale") { value = clamp(value, 0.25, 3); setOptionalTransformValue(layer, "scale", value, 1); }
+        refreshPreviewLoop();
+      }));
+      host.querySelectorAll("[data-layer-mirror]").forEach(button => button.addEventListener("click", () => {
+        const active = toggleMirrorTransform(layer, button.dataset.layerMirror);
+        button.classList.toggle("coe-primary", active);
+        button.setAttribute("aria-pressed", String(active));
         refreshPreviewLoop();
       }));
     }
@@ -3269,8 +3324,10 @@
         layer.hidden = false;
         layer.rotation = layer.defaultRotation;
         layer.scale = layer.defaultScale;
+        delete layer.mirrorX;
+        delete layer.mirrorY;
       });
-      for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY"]) delete material[key];
+      for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY", "overallMirrorX", "overallMirrorY"]) delete material[key];
       refreshPreviewLoop("structure");
       renderLayerList(list);
     });
@@ -3327,6 +3384,8 @@
         layer.color = null;
         layer.rotation = layer.defaultRotation;
         layer.scale = layer.defaultScale;
+        delete layer.mirrorX;
+        delete layer.mirrorY;
         if (canColor) material.colors[colorIndex] = material.defaultColors?.[colorIndex] || asset?.DefaultColor?.[colorIndex] || "Default";
         refreshPreviewLoop("structure");
         renderLayerList(list);
@@ -3689,7 +3748,7 @@
     for (const key of Object.keys(value)) if (!new Set(["v", "m", "l"]).has(key)) throw new Error("snapshot-root-key");
     const materials = value.m.map(material => {
       if (!remotePlainObject(material)) throw new Error("snapshot-material");
-      for (const key of Object.keys(material)) if (!new Set(["g", "a", "c", "p", "w", "r", "s", "x", "y"]).has(key)) throw new Error("snapshot-material-key");
+      for (const key of Object.keys(material)) if (!new Set(["g", "a", "c", "p", "w", "r", "s", "x", "y", "h", "v"]).has(key)) throw new Error("snapshot-material-key");
       const output = { g: remoteString(material.g, "group"), a: remoteString(material.a, "asset") };
       if (material.w != null) output.w = remoteString(material.w, "wear-group");
       if (!Array.isArray(material.c) || material.c.length > 40) throw new Error("snapshot-colors");
@@ -3700,13 +3759,18 @@
         if (typeof material[key] !== "number" || !Number.isFinite(material[key])) throw new Error(`snapshot-material-${key}`);
         output[key] = normalizeRemoteNumber(material[key], min, max);
       }
+      for (const key of ["h", "v"]) {
+        if (material[key] == null) continue;
+        if (typeof material[key] !== "boolean") throw new Error(`snapshot-material-${key}`);
+        if (material[key]) output[key] = true;
+      }
       const property = validateRemoteProperty(material.p);
       if (property) output.p = property;
       return output;
     });
     const layers = value.l.map(layer => {
       if (!remotePlainObject(layer)) throw new Error("snapshot-layer");
-      for (const key of Object.keys(layer)) if (!new Set(["m", "n", "i", "p", "x", "y", "o", "r", "s"]).has(key)) throw new Error("snapshot-layer-key");
+      for (const key of Object.keys(layer)) if (!new Set(["m", "n", "i", "p", "x", "y", "o", "r", "s", "h", "v"]).has(key)) throw new Error("snapshot-layer-key");
       const output = {
         m: remoteInteger(layer.m, "material-index", 0, Math.max(0, materials.length - 1)),
         n: layer.n == null ? null : remoteString(layer.n, "layer-name"),
@@ -3723,6 +3787,11 @@
       if (layer.s != null) {
         if (typeof layer.s !== "number" || !Number.isFinite(layer.s)) throw new Error("snapshot-layer-scale");
         output.s = normalizeRemoteNumber(layer.s, 0.25, 3.0);
+      }
+      for (const key of ["h", "v"]) {
+        if (layer[key] == null) continue;
+        if (typeof layer[key] !== "boolean") throw new Error(`snapshot-layer-${key}`);
+        if (layer[key]) output[key] = true;
       }
       return output;
     });
@@ -4186,6 +4255,8 @@
       if (typeof material.overallScale === "number") compact.s = material.overallScale;
       if (typeof material.overallOffsetX === "number") compact.x = material.overallOffsetX;
       if (typeof material.overallOffsetY === "number") compact.y = material.overallOffsetY;
+      if (material.overallMirrorX === true) compact.h = true;
+      if (material.overallMirrorY === true) compact.v = true;
       const property = sanitizeSourceProperty(material.sourceProperty);
       if (Object.keys(property).length) compact.p = property;
       visibleMaterials.push(compact);
@@ -4193,6 +4264,8 @@
         var snapshotLayer = { m: index, n: ref.sourceLayer == null ? null : ref.sourceLayer, i: Number.isInteger(ref.sourceLayerIndex) ? ref.sourceLayerIndex : 0, p: ref.priority, x: ref.offsetX, y: ref.offsetY, o: ref.opacity };
         if (typeof ref.rotation === "number" && ref.rotation !== 0) snapshotLayer.r = ref.rotation;
         if (typeof ref.scale === "number" && Math.abs(ref.scale - 1) > 0.001) snapshotLayer.s = ref.scale;
+        if (ref.mirrorX === true) snapshotLayer.h = true;
+        if (ref.mirrorY === true) snapshotLayer.v = true;
         layers.push(snapshotLayer);
       }
     }
@@ -4573,7 +4646,7 @@
       normalizeWardrobe, normalizeComposition, normalizeLayerTransform, compactWardrobeForStorage, compactCompositionForStorage, compactLayerForStorage, packWardrobe, unpackWardrobeDetailed,
       createOutfitExchangeString, parseOutfitExchangeString, createWardrobeExchangeDocument, parseWardrobeExchangeDocument, wardrobeExportFilename, localTimestamp, sanitizeFilenamePart,
       serverSyncMessageBytes, storageFingerprint, loadWardrobe, persistWardrobe,
-      computeDefaultOverallCenter, resolveOverallTransform, resolveRenderableOverallTransform, resolveNumericOrigin, transformPointAroundOverallPivot,
+      computeDefaultOverallCenter, resolveOverallTransform, resolveRenderableOverallTransform, resolveNumericOrigin, transformPointAroundOverallPivot, transformPointAroundOverallPivotAxes,
       stableInsertSyntheticLayers, coeAssetLayerSort: stableInsertSyntheticLayers, analyzeSourceAsset, sanitizePlainRecord,
       scanAlphaBounds, contentBoundsFromBounds, contentPivotFromBounds, resolveTextureContentPivot, resolveTextureContentBounds, cacheOverallLayerGeometry, cachedOverallCenter, buildSyntheticItems, buildLocalSyntheticItems, buildRemoteSyntheticItems, makeSyntheticLayers, syncLocalSyntheticRuntime, requestCharacterRefresh, statusSnapshot,
       isDrawableLayer, normalizedMaterialColors, normalizePickerColor, nextCopyLayerLabel, localizedPoseLabel, clothingSlotGroups, registerTagAssets, isTagEquipped, equipTagForGroup, activateScheme, combinedEquippedComposition, validateRemoteSnapshot, canonicalRemoteSnapshot, sha256Base64Url,

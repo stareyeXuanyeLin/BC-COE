@@ -1,5 +1,5 @@
-  const COMPOSITION_VERSION = 5;
-  const WARDROBE_VERSION = 6;
+  const COMPOSITION_VERSION = 6;
+  const WARDROBE_VERSION = 7;
 
   function materialKey(group, asset) {
     return `${group}\u0000${asset}`;
@@ -16,18 +16,11 @@
     const scale = typeof raw.scale === "number" && isFinite(raw.scale) && Math.abs(raw.scale - 1) > 0.001
       ? clamp(raw.scale, 0.25, 3.0)
       : undefined;
-    return { rotation, scale };
-  }
-
-  function normalizeOverallTransform(raw) {
-    raw = raw && typeof raw === "object" ? raw : {};
     return {
-      overallRotation: typeof raw.overallRotation === "number" && isFinite(raw.overallRotation) && raw.overallRotation !== 0
-        ? clamp(raw.overallRotation, -Math.PI, Math.PI) : undefined,
-      overallScale: typeof raw.overallScale === "number" && isFinite(raw.overallScale) && Math.abs(raw.overallScale - 1) > 0.001
-        ? clamp(raw.overallScale, 0.25, 3.0) : undefined,
-      overallOffsetX: optionalFiniteNumber(raw.overallOffsetX, -1200, 1200),
-      overallOffsetY: optionalFiniteNumber(raw.overallOffsetY, -1200, 1200),
+      rotation,
+      scale,
+      mirrorX: raw.mirrorX === true ? true : undefined,
+      mirrorY: raw.mirrorY === true ? true : undefined,
     };
   }
 
@@ -61,6 +54,8 @@
       defaultRotation: undefined,
       scale: transform.scale,
       defaultScale: undefined,
+      mirrorX: transform.mirrorX,
+      mirrorY: transform.mirrorY,
     };
   }
 
@@ -88,6 +83,8 @@
         ? clamp(raw.overallScale, 0.25, 3.0) : undefined,
       overallOffsetX: optionalFiniteNumber(raw.overallOffsetX, -1200, 1200),
       overallOffsetY: optionalFiniteNumber(raw.overallOffsetY, -1200, 1200),
+      overallMirrorX: raw.overallMirrorX === true ? true : undefined,
+      overallMirrorY: raw.overallMirrorY === true ? true : undefined,
       hidden: raw.hidden === true,
       collapsed: raw.collapsed === true,
     };
@@ -156,12 +153,6 @@
     }
     const used = new Set([...layers, ...recycle].map(layer => layer.materialId));
     const usedMaterials = materials.filter(material => used.has(material.id));
-    // Older rebuild snapshots stored one composition-wide transform. Preserve it
-    // only when the old composition contains one material; with multiple materials
-    // applying it would recreate the very bug this schema removes.
-    const legacyOverall = normalizeOverallTransform(raw);
-    const hasLegacyOverall = Object.values(legacyOverall).some(value => typeof value === "number");
-    if (hasLegacyOverall && usedMaterials.length === 1) Object.assign(usedMaterials[0], legacyOverall);
     return {
       version: COMPOSITION_VERSION,
       name: String(raw?.name || "未命名方案").slice(0, 60),
@@ -400,6 +391,8 @@
       scale: typeof source?.overallScale === "number" ? source.overallScale : 1,
       offsetX: typeof source?.overallOffsetX === "number" ? source.overallOffsetX : 0,
       offsetY: typeof source?.overallOffsetY === "number" ? source.overallOffsetY : 0,
+      mirrorX: source?.overallMirrorX === true,
+      mirrorY: source?.overallMirrorY === true,
       centerX: center.x,
       centerY: center.y,
     };
@@ -470,6 +463,8 @@
     if (layer.color) output.color = layer.color;
     if (typeof layer.rotation === "number" && layer.rotation !== 0) output.rotation = layer.rotation;
     if (typeof layer.scale === "number" && Math.abs(layer.scale - 1) > 0.001) output.scale = layer.scale;
+    if (layer.mirrorX === true) output.mirrorX = true;
+    if (layer.mirrorY === true) output.mirrorY = true;
     return output;
   }
 
@@ -484,6 +479,8 @@
     for (const key of ["overallRotation", "overallScale", "overallOffsetX", "overallOffsetY"]) {
       if (typeof material[key] === "number") output[key] = material[key];
     }
+    if (material.overallMirrorX === true) output.overallMirrorX = true;
+    if (material.overallMirrorY === true) output.overallMirrorY = true;
     if (material.hidden) output.hidden = true;
     const property = sanitizeSourceProperty(material.sourceProperty);
     if (Object.keys(property).length) output.sourceProperty = property;

@@ -1,5 +1,6 @@
   const COMPOSITION_VERSION = 6;
-  const WARDROBE_VERSION = 7;
+  const WARDROBE_SCHEMA_VERSION = 1;
+  const LEGACY_WARDROBE_VERSION = 7;
 
   function materialKey(group, asset) {
     return `${group}\u0000${asset}`;
@@ -417,7 +418,7 @@
       return true;
     });
     return {
-      version: WARDROBE_VERSION,
+      schemaVersion: WARDROBE_SCHEMA_VERSION,
       schemes,
       equippedIds,
     };
@@ -487,8 +488,8 @@
     return output;
   }
 
-  function compactCompositionForStorage(composition) {
-    const normalized = normalizeComposition(composition);
+  function compactCompositionForStorage(composition, options = {}) {
+    const normalized = normalizeComposition(composition, options);
     const compact = {
       version: COMPOSITION_VERSION,
       name: normalized.name,
@@ -505,11 +506,11 @@
     return compact;
   }
 
-  function compactWardrobeForStorage(data) {
-    const normalized = normalizeWardrobe(data);
+  function compactWardrobeForStorage(data, options = {}) {
+    const normalized = normalizeWardrobe(data, options);
     const compact = {
-      version: WARDROBE_VERSION,
-      schemes: normalized.schemes.map(entry => ({ id: entry.id, composition: compactCompositionForStorage(entry.composition) })),
+      schemaVersion: WARDROBE_SCHEMA_VERSION,
+      schemes: normalized.schemes.map(entry => ({ id: entry.id, composition: compactCompositionForStorage(entry.composition, options) })),
       equippedIds: normalized.equippedIds,
     };
     if (utf8Bytes(compact) > MAX_WARDROBE_BYTES) throw new Error("wardrobe-byte-budget");

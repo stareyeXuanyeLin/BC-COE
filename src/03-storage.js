@@ -1,5 +1,5 @@
   function packWardrobe(data) {
-    const compact = compactWardrobeForStorage(normalizeWardrobe(data));
+    const compact = compactWardrobeForStorage(data, { validateReferences: false });
     const json = JSON.stringify(compact);
     try {
       if (globalThis.LZString?.compressToUTF16) return `lz:${LZString.compressToUTF16(json)}`;
@@ -28,11 +28,22 @@
     }
     try {
       const parsed = JSON.parse(json);
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("root-not-object");
-      if (parsed.version != null && Number(parsed.version) > WARDROBE_VERSION) return { status: "unsupported", raw: value, data: null, error: "newer-schema" };
-      return { status: "ok", raw: value, data: normalizeWardrobe(parsed), error: null };
+      const migration = migrateWardrobeData(parsed);
+      return {
+        status: "ok",
+        raw: value,
+        data: migration.data,
+        error: null,
+        migration: {
+          migrated: migration.migrated,
+          fromVersion: migration.fromVersion,
+          toVersion: migration.toVersion,
+        },
+      };
     } catch (error) {
-      return { status: "corrupt", raw: value, data: null, error: String(error?.message || error) };
+      const unsupportedCodes = new Set(["newer-schema", "newer-legacy-schema", "newer-outfit-schema"]);
+      const status = unsupportedCodes.has(error?.code) ? "unsupported" : "corrupt";
+      return { status, raw: value, data: null, error: error?.code || String(error?.message || error), migration: null };
     }
   }
 
@@ -94,6 +105,36 @@
     catch (_) { return null; }
   }
 
+  function migrationBackupKey(fromVersion) {
+    return `${accountStorageKey()}.migration-backup.v${fromVersion}`;
+  }
+
+  function preserveMigrationBackup(result, source) {
+    if (!result?.migration?.migrated || typeof result.raw !== "string") return null;
+    const key = migrationBackupKey(result.migration.fromVersion);
+    const fingerprint = storageFingerprint(result.raw);
+    let existing = null;
+    try { existing = JSON.parse(localStorage.getItem(key) || "null"); }
+    catch (_) { /* replace malformed backup */ }
+    if (existing?.fingerprint === fingerprint && existing?.raw === result.raw) return key;
+    const backup = JSON.stringify({
+      backupVersion: 1,
+      source,
+      fromSchemaVersion: result.migration.fromVersion,
+      toSchemaVersion: result.migration.toVersion,
+      createdAt: new Date().toISOString(),
+      fingerprint,
+      raw: result.raw,
+    });
+    try {
+      localStorage.setItem(key, backup);
+      if (localStorage.getItem(key) !== backup) throw new Error("backup-verification-failed");
+    } catch (error) {
+      throw wardrobeMigrationError("migration-backup-failed", `无法备份旧衣柜：${String(error?.message || error)}`);
+    }
+    return key;
+  }
+
   function loadWardrobe() {
     const serverRaw = globalThis.Player?.ExtensionSettings?.[SETTINGS_KEY] ?? null;
     const localRaw = readLocalWardrobeRaw();
@@ -102,7 +143,9 @@
     const marker = readLocalSyncMarker();
     const markerMatchesLocal = local.status === "ok" && marker?.fingerprint === storageFingerprint(localRaw);
     const failures = [server, local].filter(result => ["deferred", "corrupt", "unsupported"].includes(result.status));
-    const contentsDiffer = server.status === "ok" && local.status === "ok" && JSON.stringify(compactWardrobeForStorage(server.data)) !== JSON.stringify(compactWardrobeForStorage(local.data));
+    const contentsDiffer = server.status === "ok" && local.status === "ok" &&
+      JSON.stringify(compactWardrobeForStorage(server.data, { validateReferences: false })) !==
+      JSON.stringify(compactWardrobeForStorage(local.data, { validateReferences: false }));
     const localOnly = markerMatchesLocal && (contentsDiffer || server.status !== "ok");
     const conflict = contentsDiffer && !localOnly;
     if (!contentsDiffer && marker) clearLocalSyncMarker();
@@ -110,17 +153,49 @@
     let selected = null;
     let source = null;
     if (localOnly) { selected = local.data; source = "local"; }
+    else if (server.status === "ok" && local.status === "ok" && !contentsDiffer && server.migration?.migrated && !local.migration?.migrated) {
+      selected = local.data; source = "local";
+    }
     else if (server.status === "ok") { selected = server.data; source = "server"; }
     else if (local.status === "ok") { selected = local.data; source = "local"; }
     else if (server.status === "absent" && local.status === "absent") { selected = normalizeWardrobe(null); source = "empty"; }
+    const migrations = [
+      ...(server.status === "ok" && server.migration?.migrated ? [{ source: "server", result: server }] : []),
+      ...(local.status === "ok" && local.migration?.migrated ? [{ source: "local", result: local }] : []),
+    ];
     wardrobeReadState = {
       status: failures[0]?.status || (conflict ? "conflict" : localOnly ? "local-only" : selected ? "ok" : "absent"),
-      source, server: { status: server.status, error: server.error, raw: server.raw },
-      local: { status: local.status, error: local.error, raw: local.raw }, conflict,
+      source,
+      server: { status: server.status, error: server.error, raw: server.raw, migration: server.migration || null },
+      local: { status: local.status, error: local.error, raw: local.raw, migration: local.migration || null },
+      conflict,
+      migration: migrations.length ? { status: "pending", fromVersion: Math.min(...migrations.map(entry => entry.result.migration.fromVersion)), toVersion: WARDROBE_SCHEMA_VERSION, backupKey: null } : null,
       sync: localOnly ? { mode: "local-only", reason: marker.reason, requestBytes: marker.requestBytes, maxRequestBytes: MAX_SERVER_SYNC_MESSAGE_BYTES } : null,
     };
     if (selected) wardrobe = selected;
-    if (persistenceBlocked) {
+
+    if (!persistenceBlocked && selected && migrations.length) {
+      try {
+        const preferred = migrations.find(entry => entry.source === source) || migrations[0];
+        const backupKey = preserveMigrationBackup(preferred.result, preferred.source);
+        persistWardrobe({ force: true, source: "migration", migration: { status: "completed", fromVersion: preferred.result.migration.fromVersion, toVersion: WARDROBE_SCHEMA_VERSION, backupKey } });
+      } catch (error) {
+        persistenceBlocked = true;
+        wardrobeReadState.status = "migration-failed";
+        wardrobeReadState.migration = {
+          status: "failed",
+          fromVersion: Math.min(...migrations.map(entry => entry.result.migration.fromVersion)),
+          toVersion: WARDROBE_SCHEMA_VERSION,
+          backupKey: null,
+          error: error?.code || String(error?.message || error),
+        };
+        const message = "旧衣柜迁移写回失败，已保留原始数据并停止自动保存";
+        diagnostics.lastWarnings.push(message);
+        warn(message, error);
+      }
+    }
+
+    if (persistenceBlocked && wardrobeReadState.status !== "migration-failed") {
       const message = conflict ? "服务器与本地衣柜内容冲突，已停止自动写回" : "衣柜数据暂不可安全读取，已停止写回";
       diagnostics.lastWarnings.push(message);
       warn(message, wardrobeReadState);
@@ -128,7 +203,7 @@
     return wardrobeReadState;
   }
 
-  function setLocalOnlyState(packed, serverState, localState, reason, requestBytes) {
+  function setLocalOnlyState(packed, serverState, localState, reason, requestBytes, options = {}) {
     const marker = writeLocalSyncMarker(packed, reason, requestBytes);
     wardrobeReadState = {
       status: "local-only",
@@ -136,13 +211,14 @@
       server: serverState,
       local: localState,
       conflict: false,
+      migration: options.migration || null,
       sync: { mode: marker.mode, reason: marker.reason, requestBytes: marker.requestBytes, maxRequestBytes: marker.maxRequestBytes },
     };
   }
 
   function persistWardrobe(options = {}) {
     if (persistenceBlocked && options.force !== true) throw new Error(`wardrobe-write-blocked:${wardrobeReadState.status}`);
-    const normalized = normalizeWardrobe(wardrobe);
+    const normalized = normalizeWardrobe(wardrobe, { validateReferences: false });
     const packed = packWardrobe(normalized);
     const requestBytes = serverSyncMessageBytes(packed);
     wardrobe = normalized;
@@ -159,7 +235,7 @@
 
     if (requestBytes > MAX_SERVER_SYNC_MESSAGE_BYTES) {
       if (localError) throw new Error(`wardrobe-storage-unavailable:${localError}`);
-      setLocalOnlyState(packed, serverState, localState, "server-byte-budget", requestBytes);
+      setLocalOnlyState(packed, serverState, localState, "server-byte-budget", requestBytes, options);
       const message = `衣柜同步请求 ${requestBytes} 字节，超过安全上限 ${MAX_SERVER_SYNC_MESSAGE_BYTES} 字节；已仅保存到本机`;
       if (!diagnostics.lastWarnings.includes(message)) diagnostics.lastWarnings.push(message);
       warn(message);
@@ -169,7 +245,7 @@
 
     if (!globalThis.Player || typeof globalThis.ServerPlayerExtensionSettingsSync !== "function") {
       if (localError) throw new Error(`wardrobe-storage-unavailable:${localError}`);
-      setLocalOnlyState(packed, serverState, localState, "server-sync-unavailable", requestBytes);
+      setLocalOnlyState(packed, serverState, localState, "server-sync-unavailable", requestBytes, options);
       toast("服务器同步暂不可用，已保存到本机", "warn");
       return packed;
     }
@@ -182,17 +258,18 @@
       clearLocalSyncMarker();
       wardrobeReadState = {
         status: "sync-sent",
-        source: "user-save",
+        source: options.source || "user-save",
         server: { status: "sent", error: null, raw: packed },
         local: localState,
         conflict: false,
+        migration: options.migration || null,
         sync: { mode: "server", reason: null, requestBytes, maxRequestBytes: MAX_SERVER_SYNC_MESSAGE_BYTES },
       };
     } catch (error) {
       if (hadPreviousServerValue) Player.ExtensionSettings[SETTINGS_KEY] = previousServerRaw;
       else delete Player.ExtensionSettings[SETTINGS_KEY];
       if (localError) throw error;
-      setLocalOnlyState(packed, serverState, localState, "server-sync-error", requestBytes);
+      setLocalOnlyState(packed, serverState, localState, "server-sync-error", requestBytes, options);
       warn("服务器衣柜同步失败；本地副本已保存", error);
       toast("服务器同步失败，已保存到本机", "warn");
     }
@@ -310,7 +387,7 @@
   }
 
   function createWardrobeExchangeDocument(data = wardrobe) {
-    const payload = compactWardrobeForStorage(data);
+    const payload = compactWardrobeForStorage(data, { validateReferences: false });
     return {
       format: WARDROBE_EXCHANGE_FORMAT,
       formatVersion: EXCHANGE_FORMAT_VERSION,
@@ -340,13 +417,14 @@
     if (formatVersion > EXCHANGE_FORMAT_VERSION) throw exchangeError("newer-exchange-format", "该衣柜文件需要更新版本的 COE");
     if (formatVersion !== EXCHANGE_FORMAT_VERSION) throw exchangeError("unsupported-exchange-format", "不支持该衣柜文件格式版本");
     const payload = envelope.payload;
-    if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw exchangeError("wardrobe-root", "衣柜数据根节点无效");
-    if (payload.version != null && Number(payload.version) > WARDROBE_VERSION) throw exchangeError("newer-wardrobe-schema", "该衣柜由更新版本的 COE 导出");
-    if (Array.isArray(payload.schemes) && payload.schemes.length > MAX_SCHEMES) throw exchangeError("too-many-schemes", `衣柜服装超过 ${MAX_SCHEMES} 套`);
+    let migration;
+    try { migration = migrateWardrobeData(payload); }
+    catch (error) { throw exchangeError(error?.code || "wardrobe-migration-failed", error?.message || "衣柜数据迁移失败"); }
+    const migratedPayload = migration.compact;
     const schemeIds = new Set();
     let missingLayers = 0;
     let affectedSchemes = 0;
-    for (const scheme of Array.isArray(payload.schemes) ? payload.schemes : []) {
+    for (const scheme of migratedPayload.schemes) {
       if (typeof scheme?.id !== "string" || !scheme.id) throw exchangeError("invalid-scheme-id", "衣柜包含无效的方案 ID");
       if (schemeIds.has(scheme.id)) throw exchangeError("duplicate-scheme-id", "衣柜包含重复的方案 ID");
       schemeIds.add(scheme.id);
@@ -359,12 +437,17 @@
       if (schemeMissing) affectedSchemes++;
       missingLayers += schemeMissing;
     }
-    const normalized = normalizeWardrobe(payload);
+    const normalized = normalizeWardrobe(migratedPayload);
     compactWardrobeForStorage(normalized);
     return {
       wardrobe: normalized,
       missingLayers,
       affectedSchemes,
+      migration: {
+        migrated: migration.migrated,
+        fromVersion: migration.fromVersion,
+        toVersion: migration.toVersion,
+      },
       metadata: {
         createdAt: typeof envelope.createdAt === "string" ? envelope.createdAt.slice(0, 40) : null,
         pluginVersion: typeof envelope.pluginVersion === "string" ? envelope.pluginVersion.slice(0, 24) : null,

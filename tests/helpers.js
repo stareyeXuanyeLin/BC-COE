@@ -6,7 +6,7 @@ const { webcrypto } = require('node:crypto');
 
 const root = path.resolve(__dirname, '..');
 const parts = [
-  '00-userscript-header.js','01-runtime.js','02-data.js','03-storage.js','04-assets.js',
+  '00-userscript-header.js','01-runtime.js','02-data.js','02-schema-migrations.js','03-storage.js','04-assets.js',
   '05-capabilities.js','06-adapters.js','07-renderer.js','08-ui-shell.js','09-wardrobe.js',
   '10-editor.js','11-remote-protocol.js','12-remote-store.js','13-remote-transport.js',
   '14-remote-controller.js','15-bootstrap.js',

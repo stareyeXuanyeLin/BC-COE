@@ -48,6 +48,10 @@
         requestBytes: wardrobeReadState.sync?.requestBytes ?? null,
         maxRequestBytes: MAX_SERVER_SYNC_MESSAGE_BYTES,
         persistenceBlocked,
+        migrationStatus: wardrobeReadState.migration?.status || null,
+        migrationFromVersion: wardrobeReadState.migration?.fromVersion ?? null,
+        migrationToVersion: wardrobeReadState.migration?.toVersion ?? null,
+        migrationBackupKey: wardrobeReadState.migration?.backupKey || null,
       },
     });
   }
@@ -153,7 +157,8 @@
 
   if (globalThis.__COE_TEST_MODE__) {
     globalThis.__COE_TEST_API__ = {
-      normalizeWardrobe, normalizeComposition, normalizeLayerTransform, compactWardrobeForStorage, compactCompositionForStorage, compactLayerForStorage, packWardrobe, unpackWardrobeDetailed,
+      normalizeWardrobe, normalizeComposition, normalizeLayerTransform, compactWardrobeForStorage, compactCompositionForStorage, compactLayerForStorage,
+      migrateWardrobeData, readWardrobeSchemaVersion, packWardrobe, unpackWardrobeDetailed,
       createOutfitExchangeString, parseOutfitExchangeString, createWardrobeExchangeDocument, parseWardrobeExchangeDocument, wardrobeExportFilename, localTimestamp, sanitizeFilenamePart,
       serverSyncMessageBytes, storageFingerprint, loadWardrobe, persistWardrobe,
       computeDefaultOverallCenter, resolveOverallTransform, resolveRenderableOverallTransform, resolveNumericOrigin, transformPointAroundOverallPivot, transformPointAroundOverallPivotAxes,

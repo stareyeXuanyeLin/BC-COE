@@ -8,7 +8,7 @@ const { webcrypto } = require('node:crypto');
 
 const root = path.resolve(__dirname, '..');
 const parts = [
-  '00-userscript-header.js','01-runtime.js','02-data.js','03-storage.js','04-assets.js',
+  '00-userscript-header.js','01-runtime.js','02-data.js','02-schema-migrations.js','03-storage.js','04-assets.js',
   '05-capabilities.js','06-adapters.js','07-renderer.js','08-ui-shell.js','09-wardrobe.js',
   '10-editor.js','11-remote-protocol.js','12-remote-store.js','13-remote-transport.js',
   '14-remote-controller.js','15-bootstrap.js',
@@ -373,6 +373,104 @@ test('compact serializer omits redundant/UI/runtime fields', () => {
   const compact = api.compactWardrobeForStorage(raw);
   const text = JSON.stringify(compact);
   for (const forbidden of ['updatedAt','appearanceSanitizedVersion','collapsed','defaultOffsetX','defaultOffsetY','defaultColor','defaultPriority','defaultOpacity','provider','sourceColor']) assert.equal(text.includes(forbidden), false, forbidden);
+});
+
+test('legacy wardrobe data migrates to schemaVersion 1 without losing saved outfit fields', () => {
+  const asset = makeAsset();
+  const { api } = load({ assets: [asset] });
+  const legacy = {
+    version: 7,
+    schemes: [{
+      id: 'saved-outfit',
+      composition: {
+        ...compositionFor(asset),
+        version: 6,
+        materials: [{ ...compositionFor(asset).materials[0], overallMirrorX: true, overallScale: 1.25 }],
+        layers: [{ ...compositionFor(asset).layers[0], mirrorY: true, rotation: 0.5 }],
+      },
+    }],
+    equippedIds: ['saved-outfit'],
+  };
+  const result = api.unpackWardrobeDetailed(`json:${JSON.stringify(legacy)}`);
+  assert.equal(result.status, 'ok');
+  assert.equal(result.migration.migrated, true);
+  assert.equal(result.migration.fromVersion, 0);
+  assert.equal(result.migration.toVersion, 1);
+  assert.equal(result.data.schemaVersion, 1);
+  assert.equal(result.data.schemes[0].id, 'saved-outfit');
+  assert.equal(result.data.schemes[0].composition.materials[0].overallMirrorX, true);
+  assert.equal(result.data.schemes[0].composition.materials[0].overallScale, 1.25);
+  assert.equal(result.data.schemes[0].composition.layers[0].mirrorY, true);
+  assert.equal(result.data.schemes[0].composition.layers[0].rotation, 0.5);
+  const stored = JSON.parse(api.packWardrobe(result.data).slice(5));
+  assert.equal(stored.schemaVersion, 1);
+  assert.equal(Object.hasOwn(stored, 'version'), false);
+});
+
+test('current and future wardrobe schemas are distinguished before normalization', () => {
+  const { api } = load();
+  const current = api.unpackWardrobeDetailed('json:{"schemaVersion":1,"schemes":[],"equippedIds":[]}');
+  assert.equal(current.status, 'ok');
+  assert.equal(current.migration.migrated, false);
+  assert.equal(current.migration.fromVersion, 1);
+  assert.equal(current.migration.toVersion, 1);
+  assert.equal(api.unpackWardrobeDetailed('json:{"schemaVersion":2,"schemes":[],"equippedIds":[]}').status, 'unsupported');
+  assert.equal(api.unpackWardrobeDetailed('json:{"version":8,"schemes":[],"equippedIds":[]}').status, 'unsupported');
+});
+
+test('loadWardrobe backs up and automatically writes a legacy wardrobe in the current schema', () => {
+  const asset = makeAsset();
+  const legacy = {
+    version: 7,
+    schemes: [{ id: 'friend-test', composition: compositionFor(asset) }],
+    equippedIds: ['friend-test'],
+  };
+  const oldPacked = `json:${JSON.stringify(legacy)}`;
+  const store = new Map([['BC.CustomOutfitEditor.v1.1', oldPacked]]);
+  const syncCalls = [];
+  const player = {
+    AccountName: 'A', MemberNumber: 1, AssetFamily: 'Female3DCG', Appearance: [], AppearanceLayers: [],
+    ExtensionSettings: { CustomOutfitEditor: oldPacked },
+  };
+  const { api } = load({ assets: [asset], player, store, globals: { ServerPlayerExtensionSettingsSync: key => syncCalls.push(key) } });
+  const state = api.loadWardrobe();
+  assert.equal(state.migration.status, 'completed');
+  assert.equal(state.migration.fromVersion, 0);
+  assert.deepEqual(syncCalls, ['CustomOutfitEditor']);
+  const local = api.unpackWardrobeDetailed(store.get('BC.CustomOutfitEditor.v1.1'));
+  const server = api.unpackWardrobeDetailed(player.ExtensionSettings.CustomOutfitEditor);
+  assert.equal(local.migration.migrated, false);
+  assert.equal(server.migration.migrated, false);
+  assert.equal(local.data.schemes[0].id, 'friend-test');
+  const backup = JSON.parse(store.get('BC.CustomOutfitEditor.v1.1.migration-backup.v0'));
+  assert.equal(backup.raw, oldPacked);
+  assert.equal(backup.fromSchemaVersion, 0);
+});
+
+test('failed migration backup keeps legacy storage untouched and blocks automatic writes', () => {
+  const legacy = 'json:{"version":7,"schemes":[],"equippedIds":[]}';
+  const store = new Map([['BC.CustomOutfitEditor.v1.1', legacy]]);
+  const syncCalls = [];
+  const localStorage = {
+    getItem: key => store.get(key) ?? null,
+    setItem: (key, value) => {
+      if (key.includes('migration-backup')) throw new Error('quota');
+      store.set(key, value);
+    },
+    removeItem: key => store.delete(key),
+  };
+  const player = {
+    AccountName: 'A', MemberNumber: 1, AssetFamily: 'Female3DCG', Appearance: [], AppearanceLayers: [],
+    ExtensionSettings: { CustomOutfitEditor: legacy },
+  };
+  const { api } = load({ player, store, globals: { localStorage, ServerPlayerExtensionSettingsSync: key => syncCalls.push(key) } });
+  const state = api.loadWardrobe();
+  assert.equal(state.status, 'migration-failed');
+  assert.equal(state.migration.status, 'failed');
+  assert.equal(api.statusSnapshot().wardrobeRead.persistenceBlocked, true);
+  assert.equal(store.get('BC.CustomOutfitEditor.v1.1'), legacy);
+  assert.equal(player.ExtensionSettings.CustomOutfitEditor, legacy);
+  assert.deepEqual(syncCalls, []);
 });
 
 test('lz payload is deferred when LZString is not ready', () => {

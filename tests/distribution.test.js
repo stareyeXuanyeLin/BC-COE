@@ -17,67 +17,72 @@ test('public installation routes all resolve to main', () => {
     assert.doesNotMatch(content, /(?:single-layer-transform-rebuild|@layer-transform)/, `${name} must not reference an obsolete release branch`);
   }
 
+  assert.match(loader, /@grant\s+GM_xmlhttpRequest/);
+  assert.match(loader, /@grant\s+GM_addElement/);
+  assert.match(loader, /@grant\s+unsafeWindow/);
+  assert.match(loader, /raw\.githubusercontent\.com/);
   assert.match(loader, /cdn\.jsdelivr\.net/);
   assert.match(loader, /fastly\.jsdelivr\.net/);
   assert.match(loader, /gcore\.jsdelivr\.net/);
   assert.match(loader, /BC-COE@main\/dist\/CustomOutfitEditor\.user\.js/);
-  assert.doesNotMatch(loader, /script\.src\s*=.*raw\.githubusercontent\.com/);
+  assert.doesNotMatch(loader, /script\.src\s*=/);
 });
 
-test('remote loader falls back across executable CDN endpoints', () => {
+test('remote loader fetches GitHub raw first and executes downloaded core through Tampermonkey', () => {
   const loader = read('dist/CustomOutfitEditor.loader.user.js');
   const requested = [];
-  const window = {};
+  const unsafeWindow = {};
+  const validCore = 'const MOD_NAME = "CustomOutfitEditor"; function initialize() {}';
   const context = {
-    window,
-    document: {
-      head: {
-        appendChild(script) {
-          requested.push(script.src);
-          if (requested.length < 3) script.onerror();
-          else script.onload();
-        },
-      },
-      documentElement: null,
-      createElement() {
-        return { remove() {} };
-      },
+    unsafeWindow,
+    document: { head: {}, documentElement: {} },
+    GM_xmlhttpRequest(options) {
+      requested.push(options.url);
+      options.onload({ status: 200, responseText: validCore });
+    },
+    GM_addElement(_parent, tag, attributes) {
+      assert.equal(tag, 'script');
+      assert.match(attributes.textContent, /sourceURL=https:\/\/raw\.githubusercontent\.com/);
+      unsafeWindow.__CUSTOM_OUTFIT_EDITOR_CORE_EVALUATED__ = true;
+      return {};
     },
     console: { info() {}, warn() {}, error() {} },
     Date: { now: () => 123456 },
-    setTimeout: () => 1,
-    clearTimeout() {},
+  };
+
+  vm.runInNewContext(loader, context);
+
+  assert.equal(new URL(requested[0]).host, 'raw.githubusercontent.com');
+  assert.equal(requested.length, 1);
+  assert.equal(unsafeWindow.__CUSTOM_OUTFIT_EDITOR_LOADER__, true);
+  assert.equal(unsafeWindow.__CUSTOM_OUTFIT_EDITOR_CORE_EVALUATED__, undefined);
+});
+
+test('remote loader falls back after invalid responses and clears its guard after total failure', () => {
+  const loader = read('dist/CustomOutfitEditor.loader.user.js');
+  const requested = [];
+  const unsafeWindow = {};
+  const context = {
+    unsafeWindow,
+    document: { head: {}, documentElement: {} },
+    GM_xmlhttpRequest(options) {
+      requested.push(options.url);
+      options.onload({ status: 503, responseText: '<html>unavailable</html>' });
+    },
+    GM_addElement() { throw new Error('invalid responses must not execute'); },
+    console: { info() {}, warn() {}, error() {} },
+    Date: { now: () => 123456 },
   };
 
   vm.runInNewContext(loader, context);
 
   assert.deepEqual(requested.map(url => new URL(url).host), [
+    'raw.githubusercontent.com',
     'cdn.jsdelivr.net',
     'fastly.jsdelivr.net',
     'gcore.jsdelivr.net',
   ]);
-  assert.equal(window.__CUSTOM_OUTFIT_EDITOR_LOADER__, true);
-  assert.ok(requested.every(url => url.includes('BC-COE@main/dist/CustomOutfitEditor.user.js')));
-});
-
-test('remote loader clears its guard after every CDN endpoint fails', () => {
-  const loader = read('dist/CustomOutfitEditor.loader.user.js');
-  const window = {};
-  const context = {
-    window,
-    document: {
-      head: { appendChild(script) { script.onerror(); } },
-      documentElement: null,
-      createElement() { return { remove() {} }; },
-    },
-    console: { info() {}, warn() {}, error() {} },
-    Date: { now: () => 123456 },
-    setTimeout: () => 1,
-    clearTimeout() {},
-  };
-
-  vm.runInNewContext(loader, context);
-  assert.equal(window.__CUSTOM_OUTFIT_EDITOR_LOADER__, undefined);
+  assert.equal(unsafeWindow.__CUSTOM_OUTFIT_EDITOR_LOADER__, undefined);
 });
 
 test('published core, docs and runtime agree on protocol and release version', () => {

@@ -36,7 +36,9 @@ Custom Outfit Editor 是用于组合、编辑和同步已加载服装素材的�
 
 [![Install Loader](https://img.shields.io/badge/Tampermonkey-%E2%86%95%20%E5%AE%89%E8%A3%85%E6%AD%A3%E5%BC%8F%E7%89%88-8B0000?labelColor=1c1c1c&logo=tampermonkey)](https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/main/dist/CustomOutfitEditor.loader.user.js)
 
-加载器每次进入游戏时从 `main` 分支获取最新核心脚本。请停用或删除其它 Custom Outfit Editor 版本，避免多个实例同时注册绘制 Hook。
+加载器每次进入游戏时使用 Tampermonkey 特权请求直接获取并执行 `main` 分支的最新核心脚本，避免浏览器跨域、脚本 MIME 与 CDN 分支缓存导致的旧版本问题；仅在 GitHub 原始文件网络不可达时使用 CDN 备用源。首次安装或升级到新版加载器时，请允许它访问列出的 GitHub 与 jsDelivr 域名。
+
+请停用或删除其它 Custom Outfit Editor 版本，尤其是完整脚本与旧加载器，避免多个实例同时注册绘制 Hook。
 
 ### 完整脚本安装
 

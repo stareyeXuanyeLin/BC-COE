@@ -2,9 +2,9 @@
 // @name         Bondage Club - Custom Outfit Editor（正式版加载器）
 // @name:zh-CN   Bondage Club - 自定义服装编辑器（正式版加载器）
 // @namespace    https://github.com/stareyeXuanyeLin/BC-COE
-// @version      1.2.7
-// @description  Loads the latest Custom Outfit Editor from the official branch with automatic CDN fallback.
-// @description:zh-CN 每次进入页面时从正式分支加载最新的 Custom Outfit Editor，并在 CDN 故障时自动切换备用节点。
+// @version      1.3.0
+// @description  Fetches and executes the latest Custom Outfit Editor from the official branch with a privileged request and network fallback.
+// @description:zh-CN 每次进入页面时通过特权请求获取并执行正式分支的最新 Custom Outfit Editor，并在网络故障时自动切换备用源。
 // @author       林宣夜 ＆ 佩菈
 // @match        https://www.bondageprojects.com/R*/BondageClub*
 // @match        https://bondageprojects.com/R*/BondageClub*
@@ -19,7 +19,13 @@
 // @include      /^https:\/\/(www\.)?bondage-europe\.com\/R\d+\/(BondageClub|\d+)(\/((index|\d+)\.html)?)?$/
 // @include      /^https:\/\/(www\.)?bondage-asia\.com\/club\/R\d+\/(BondageClub|\d+)(\/((index|\d+)\.html)?)?$/
 // @include      /^https?:\/\/localhost:\d+\/(BondageClub|\d+)(\/((index|\d+)\.html)?)?$/
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @grant        GM_addElement
+// @grant        unsafeWindow
+// @connect      raw.githubusercontent.com
+// @connect      cdn.jsdelivr.net
+// @connect      fastly.jsdelivr.net
+// @connect      gcore.jsdelivr.net
 // @noframes
 // @run-at       document-end
 // @downloadURL  https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/main/dist/CustomOutfitEditor.loader.user.js
@@ -29,43 +35,75 @@
 (function () {
     "use strict";
 
-    if (window.__CUSTOM_OUTFIT_EDITOR_LOADER__) return;
-    window.__CUSTOM_OUTFIT_EDITOR_LOADER__ = true;
+    const pageWindow = unsafeWindow;
+    const LOADER_GUARD = "__CUSTOM_OUTFIT_EDITOR_LOADER__";
+    const EXECUTION_MARKER = "__CUSTOM_OUTFIT_EDITOR_CORE_EVALUATED__";
+    if (pageWindow[LOADER_GUARD]) return;
+    pageWindow[LOADER_GUARD] = true;
 
-    const CORE_PATH = "gh/stareyeXuanyeLin/BC-COE@main/dist/CustomOutfitEditor.user.js";
-    const CDN_BASES = Object.freeze([
-        "https://cdn.jsdelivr.net/",
-        "https://fastly.jsdelivr.net/",
-        "https://gcore.jsdelivr.net/",
-    ]);
     const cacheKey = Date.now();
-    const parent = document.head || document.documentElement;
+    const corePath = "stareyeXuanyeLin/BC-COE/main/dist/CustomOutfitEditor.user.js";
+    const sources = Object.freeze([
+        `https://raw.githubusercontent.com/${corePath}?timestamp=${cacheKey}`,
+        `https://cdn.jsdelivr.net/gh/stareyeXuanyeLin/BC-COE@main/dist/CustomOutfitEditor.user.js?timestamp=${cacheKey}`,
+        `https://fastly.jsdelivr.net/gh/stareyeXuanyeLin/BC-COE@main/dist/CustomOutfitEditor.user.js?timestamp=${cacheKey}`,
+        `https://gcore.jsdelivr.net/gh/stareyeXuanyeLin/BC-COE@main/dist/CustomOutfitEditor.user.js?timestamp=${cacheKey}`,
+    ]);
+
+    function fail(message, detail) {
+        delete pageWindow[LOADER_GUARD];
+        console.error(`[Custom Outfit Editor Loader] ${message}`, detail || "");
+    }
+
+    function validCore(source) {
+        return typeof source === "string"
+            && source.includes('const MOD_NAME = "CustomOutfitEditor"')
+            && source.includes("function initialize()")
+            && !/^\s*</.test(source);
+    }
+
+    function executeCore(source, sourceURL) {
+        delete pageWindow[EXECUTION_MARKER];
+        const marker = `\n;globalThis.${EXECUTION_MARKER} = true;\n//# sourceURL=${sourceURL}`;
+        GM_addElement(document.head || document.documentElement, "script", { textContent: source + marker });
+        if (pageWindow[EXECUTION_MARKER] !== true) throw new Error("核心文本已下载，但未能在游戏页面上下文中执行");
+        delete pageWindow[EXECUTION_MARKER];
+        console.info(`[Custom Outfit Editor Loader] latest core executed from ${sourceURL}.`);
+    }
 
     function loadFrom(attempt) {
-        if (attempt >= CDN_BASES.length) {
-            delete window.__CUSTOM_OUTFIT_EDITOR_LOADER__;
-            console.error("[Custom Outfit Editor Loader] all CDN endpoints failed; core was not loaded.");
+        if (attempt >= sources.length) {
+            fail("all remote sources failed; core was not loaded.");
             return;
         }
 
-        const script = document.createElement("script");
-        const source = `${CDN_BASES[attempt]}${CORE_PATH}?timestamp=${cacheKey}-${attempt}`;
-
-        script.async = true;
-        script.src = source;
-        script.onload = () => {
-            script.onload = null;
-            script.onerror = null;
-            console.info(`[Custom Outfit Editor Loader] core loaded from ${CDN_BASES[attempt]} (cache key ${cacheKey}).`);
-        };
-        script.onerror = () => {
-            script.onload = null;
-            script.onerror = null;
-            script.remove();
-            console.warn(`[Custom Outfit Editor Loader] failed to load ${source}; trying the next CDN.`);
-            loadFrom(attempt + 1);
-        };
-        parent.appendChild(script);
+        const sourceURL = sources[attempt];
+        GM_xmlhttpRequest({
+            method: "GET",
+            url: sourceURL,
+            timeout: 15000,
+            headers: { "Cache-Control": "no-cache" },
+            onload(response) {
+                if (response.status < 200 || response.status >= 300 || !validCore(response.responseText)) {
+                    console.warn(`[Custom Outfit Editor Loader] invalid response from ${sourceURL} (HTTP ${response.status}); trying the next source.`);
+                    loadFrom(attempt + 1);
+                    return;
+                }
+                try {
+                    executeCore(response.responseText, sourceURL);
+                } catch (error) {
+                    fail("the core was downloaded but execution failed.", error);
+                }
+            },
+            onerror(error) {
+                console.warn(`[Custom Outfit Editor Loader] request failed for ${sourceURL}; trying the next source.`, error);
+                loadFrom(attempt + 1);
+            },
+            ontimeout() {
+                console.warn(`[Custom Outfit Editor Loader] request timed out for ${sourceURL}; trying the next source.`);
+                loadFrom(attempt + 1);
+            },
+        });
     }
 
     loadFrom(0);

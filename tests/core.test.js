@@ -395,6 +395,61 @@ test('packWardrobe normalizes then compacts without restoring omitted defaults',
   assert.equal(packed.includes('defaultOffsetX'), false);
 });
 
+test('single outfit exchange string round-trips compact composition data', () => {
+  const asset = makeAsset();
+  asset.Group.Clothing = true;
+  const { api } = load({ assets: [asset] });
+  const encoded = api.createOutfitExchangeString(compositionFor(asset));
+  assert.match(encoded, /^COE-OUTFIT:1:b64:/);
+  const parsed = api.parseOutfitExchangeString(encoded);
+  assert.equal(parsed.composition.name, 'x');
+  assert.equal(parsed.composition.layers.length, 1);
+  assert.equal(parsed.composition.materials[0].sourceAsset, 'Dress');
+  assert.equal(parsed.missingLayers, 0);
+});
+
+test('single outfit import reports partially missing asset layers and rejects unsupported slots', () => {
+  const available = makeAsset('Cloth', 'Dress');
+  available.Group.Clothing = true;
+  const missing = makeAsset('Cloth', 'Cape');
+  missing.Group.Clothing = true;
+  const source = load({ assets: [available, missing] });
+  const composition = compositionFor(available);
+  composition.materials.push({ id: 'm2', sourceGroup: 'Cloth', sourceAsset: 'Cape', colors: ['Default'] });
+  composition.layers.push({ materialId: 'm2', sourceGroup: 'Cloth', sourceAsset: 'Cape', sourceLayer: 'Base', sourceLayerIndex: 0, priority: 11, offsetX: 0, offsetY: 0, opacity: 1 });
+  const encoded = source.api.createOutfitExchangeString(composition);
+  const target = load({ assets: [available] });
+  const parsed = target.api.parseOutfitExchangeString(encoded);
+  assert.equal(parsed.composition.layers.length, 1);
+  assert.equal(parsed.missingLayers, 1);
+
+  const invalid = compositionFor(available);
+  invalid.slotGroup = 'BurgerCloth';
+  assert.throws(() => target.api.parseOutfitExchangeString(source.api.createOutfitExchangeString(invalid)), /不受支持的服装格子/);
+});
+
+test('wardrobe exchange document round-trips and rejects duplicate scheme ids', () => {
+  const asset = makeAsset();
+  asset.Group.Clothing = true;
+  const { api } = load({ assets: [asset] });
+  const wardrobe = { version: 6, schemes: [{ id: 's', composition: compositionFor(asset) }], equippedIds: ['s'] };
+  const documentData = api.createWardrobeExchangeDocument(wardrobe);
+  const parsed = api.parseWardrobeExchangeDocument(`\uFEFF${JSON.stringify(documentData)}`);
+  assert.equal(parsed.wardrobe.schemes.length, 1);
+  assert.equal(parsed.missingLayers, 0);
+  assert.equal(parsed.affectedSchemes, 0);
+  assert.deepEqual(Array.from(parsed.wardrobe.equippedIds), ['s']);
+  documentData.payload.schemes.push(documentData.payload.schemes[0]);
+  assert.throws(() => api.parseWardrobeExchangeDocument(JSON.stringify(documentData)), /重复的方案 ID/);
+});
+
+test('wardrobe export filename uses immutable account identity, sanitized name and local timestamp', () => {
+  const player = { AccountName: 'A:B*', Name: 'Display', MemberNumber: 42, AssetFamily: 'Female3DCG', Appearance: [], AppearanceLayers: [], ExtensionSettings: {} };
+  const { api } = load({ player });
+  const date = new Date(2026, 6, 8, 9, 5, 4);
+  assert.equal(api.wardrobeExportFilename(date), 'A_B__42_20260708-090504.coe-wardrobe.json');
+});
+
 test('server sync capacity measures the complete Socket.IO AccountUpdate message in UTF-8 bytes', () => {
   const { api } = load();
   const packed = 'json:{"name":"衣柜"}';

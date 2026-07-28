@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bondage Club - Custom Outfit Editor
 // @namespace    https://github.com/stareyeXuanyeLin/BC-COE
-// @version      1.0.2
+// @version      1.1.0
 // @description  Custom Outfit Editor 正式版，自定义组合与同步已加载的服装素材。
 // @author       林宣夜 ＆ 佩菈
 // @match        https://www.bondageprojects.com/R*/*
@@ -25,7 +25,7 @@
 
 
   const MOD_NAME = "CustomOutfitEditor";
-  const VERSION = "1.0.2";
+  const VERSION = "1.1.0";
   console.info(`[${MOD_NAME}] userscript injected`, location.href);
   const SETTINGS_KEY = "CustomOutfitEditor";
   const STORAGE_KEY = "BC.CustomOutfitEditor.v1";
@@ -37,6 +37,11 @@
   const MAX_MATERIAL_BYTES = 8192;
   const MAX_SCHEME_BYTES = 65536;
   const MAX_WARDROBE_BYTES = 262144;
+  const OUTFIT_EXCHANGE_FORMAT = "COE_OUTFIT";
+  const WARDROBE_EXCHANGE_FORMAT = "COE_WARDROBE";
+  const EXCHANGE_FORMAT_VERSION = 1;
+  const MAX_OUTFIT_EXCHANGE_CHARS = 200000;
+  const MAX_WARDROBE_FILE_BYTES = 1048576;
   // The production BC server accepts at most 180,000 bytes per incoming
   // Socket.IO message. Keep a conservative reserve for Engine.IO/Socket.IO
   // framing and future protocol changes; the measured AccountUpdate event must
@@ -842,6 +847,199 @@
       toast("服务器同步失败，已保存到本机", "warn");
     }
     return packed;
+  }
+
+  function exchangeError(code, message) {
+    const error = new Error(message || code);
+    error.code = code;
+    return error;
+  }
+
+  function encodeUTF8Base64(text) {
+    const bytes = typeof TextEncoder === "function"
+      ? new TextEncoder().encode(text)
+      : Uint8Array.from(unescape(encodeURIComponent(text)), character => character.charCodeAt(0));
+    let binary = "";
+    for (let index = 0; index < bytes.length; index += 0x8000) {
+      binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+    }
+    return btoa(binary);
+  }
+
+  function decodeUTF8Base64(value) {
+    let binary;
+    try { binary = atob(value); }
+    catch (_) { throw exchangeError("invalid-base64", "服装字符串的 Base64 内容已损坏"); }
+    const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
+    try {
+      if (typeof TextDecoder === "function") return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      let encoded = "";
+      for (const byte of bytes) encoded += `%${byte.toString(16).padStart(2, "0")}`;
+      return decodeURIComponent(encoded);
+    } catch (_) {
+      throw exchangeError("invalid-utf8", "服装字符串不是有效的 UTF-8 数据");
+    }
+  }
+
+  function validateOutfitPayloadShape(payload) {
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw exchangeError("outfit-root", "服装数据根节点无效");
+    if (payload.version != null && Number(payload.version) > COMPOSITION_VERSION) throw exchangeError("newer-outfit-schema", "该服装由更新版本的 COE 导出");
+    if (Array.isArray(payload.layers) && payload.layers.length > MAX_LAYERS) throw exchangeError("too-many-layers", `服装图层超过 ${MAX_LAYERS} 个`);
+    if (Array.isArray(payload.recycle) && payload.recycle.length > MAX_LAYERS) throw exchangeError("too-many-recycled-layers", `服装回收区图层超过 ${MAX_LAYERS} 个`);
+    if (Array.isArray(payload.materials) && payload.materials.length > MAX_LAYERS) throw exchangeError("too-many-materials", `服装素材超过 ${MAX_LAYERS} 件`);
+    const materialIds = new Set();
+    for (const material of Array.isArray(payload.materials) ? payload.materials : []) {
+      if (!material || typeof material !== "object") continue;
+      if (typeof material.id === "string" && material.id) {
+        if (materialIds.has(material.id)) throw exchangeError("duplicate-material-id", "服装包含重复的素材 ID");
+        materialIds.add(material.id);
+      }
+    }
+  }
+
+  function createOutfitExchangeString(composition) {
+    const payload = compactCompositionForStorage(composition);
+    const envelope = {
+      format: OUTFIT_EXCHANGE_FORMAT,
+      formatVersion: EXCHANGE_FORMAT_VERSION,
+      createdAt: new Date().toISOString(),
+      pluginVersion: VERSION,
+      payload,
+    };
+    const json = JSON.stringify(envelope);
+    if (globalThis.LZString?.compressToBase64) {
+      const compressed = LZString.compressToBase64(json);
+      if (typeof compressed === "string" && compressed) return `COE-OUTFIT:${EXCHANGE_FORMAT_VERSION}:lz:${compressed}`;
+    }
+    return `COE-OUTFIT:${EXCHANGE_FORMAT_VERSION}:b64:${encodeUTF8Base64(json)}`;
+  }
+
+  function parseOutfitExchangeString(value) {
+    const input = String(value ?? "").trim();
+    if (!input) throw exchangeError("empty-outfit-string", "请先粘贴服装字符串");
+    if (input.length > MAX_OUTFIT_EXCHANGE_CHARS) throw exchangeError("outfit-string-too-large", "服装字符串超过安全长度限制");
+    const match = /^COE-OUTFIT:(\d+):(lz|b64):([A-Za-z0-9+/=_-]+)$/.exec(input);
+    if (!match) throw exchangeError("invalid-outfit-prefix", "这不是有效的 COE 单件服装字符串");
+    const formatVersion = Number(match[1]);
+    if (formatVersion > EXCHANGE_FORMAT_VERSION) throw exchangeError("newer-exchange-format", "该服装字符串需要更新版本的 COE");
+    if (formatVersion !== EXCHANGE_FORMAT_VERSION) throw exchangeError("unsupported-exchange-format", "不支持该服装字符串格式版本");
+    let json;
+    if (match[2] === "lz") {
+      if (typeof globalThis.LZString?.decompressFromBase64 !== "function") throw exchangeError("lz-not-ready", "压缩组件尚未加载，请稍后重试");
+      try { json = LZString.decompressFromBase64(match[3]); }
+      catch (_) { throw exchangeError("invalid-compressed-outfit", "服装字符串的压缩内容已损坏"); }
+      if (typeof json !== "string" || !json) throw exchangeError("invalid-compressed-outfit", "服装字符串的压缩内容已损坏");
+    } else {
+      json = decodeUTF8Base64(match[3].replace(/-/g, "+").replace(/_/g, "/"));
+    }
+    if (utf8Bytes(json) > MAX_SCHEME_BYTES + 16384) throw exchangeError("outfit-payload-too-large", "服装数据超过安全容量限制");
+    let envelope;
+    try { envelope = JSON.parse(json); }
+    catch (_) { throw exchangeError("invalid-outfit-json", "服装字符串中的 JSON 已损坏"); }
+    if (!envelope || typeof envelope !== "object" || Array.isArray(envelope) || envelope.format !== OUTFIT_EXCHANGE_FORMAT) {
+      throw exchangeError("wrong-exchange-kind", "字符串内容不是 COE 单件服装");
+    }
+    if (Number(envelope.formatVersion) !== EXCHANGE_FORMAT_VERSION) throw exchangeError("exchange-version-mismatch", "服装字符串的格式版本不一致");
+    validateOutfitPayloadShape(envelope.payload);
+    const unfiltered = normalizeComposition(envelope.payload, { validateReferences: false });
+    if (!VANILLA_CLOTHING_SLOT_GROUPS.has(unfiltered.slotGroup)) throw exchangeError("invalid-slot-group", "服装使用了不受支持的服装格子");
+    compactCompositionForStorage(unfiltered);
+    const available = normalizeComposition(envelope.payload);
+    const missingLayers = Math.max(0, unfiltered.layers.length - available.layers.length);
+    const missingRecycle = Math.max(0, unfiltered.recycle.length - available.recycle.length);
+    if (unfiltered.layers.length > 0 && available.layers.length === 0) throw exchangeError("all-assets-missing", "当前环境缺少这件服装使用的全部素材");
+    return {
+      composition: available,
+      metadata: {
+        createdAt: typeof envelope.createdAt === "string" ? envelope.createdAt.slice(0, 40) : null,
+        pluginVersion: typeof envelope.pluginVersion === "string" ? envelope.pluginVersion.slice(0, 24) : null,
+      },
+      missingLayers,
+      missingRecycle,
+    };
+  }
+
+  function createWardrobeExchangeDocument(data = wardrobe) {
+    const payload = compactWardrobeForStorage(data);
+    return {
+      format: WARDROBE_EXCHANGE_FORMAT,
+      formatVersion: EXCHANGE_FORMAT_VERSION,
+      createdAt: new Date().toISOString(),
+      pluginVersion: VERSION,
+      gameVersion: String(globalThis.GameVersion || globalThis.CurrentVersion || "unknown").slice(0, 40),
+      owner: {
+        accountName: String(globalThis.Player?.AccountName || globalThis.Player?.Name || "Player").slice(0, 80),
+        memberNumber: Number.isInteger(globalThis.Player?.MemberNumber) ? globalThis.Player.MemberNumber : null,
+      },
+      payload,
+    };
+  }
+
+  function parseWardrobeExchangeDocument(text) {
+    let json = String(text ?? "");
+    if (json.charCodeAt(0) === 0xfeff) json = json.slice(1);
+    if (!json.trim()) throw exchangeError("empty-wardrobe-file", "衣柜文件为空");
+    if (utf8Bytes(json) > MAX_WARDROBE_FILE_BYTES) throw exchangeError("wardrobe-file-too-large", "衣柜文件超过 1 MiB 安全限制");
+    let envelope;
+    try { envelope = JSON.parse(json); }
+    catch (_) { throw exchangeError("invalid-wardrobe-json", "衣柜文件不是有效的 JSON"); }
+    if (!envelope || typeof envelope !== "object" || Array.isArray(envelope) || envelope.format !== WARDROBE_EXCHANGE_FORMAT) {
+      throw exchangeError("wrong-exchange-kind", "文件内容不是 COE 衣柜备份");
+    }
+    const formatVersion = Number(envelope.formatVersion);
+    if (formatVersion > EXCHANGE_FORMAT_VERSION) throw exchangeError("newer-exchange-format", "该衣柜文件需要更新版本的 COE");
+    if (formatVersion !== EXCHANGE_FORMAT_VERSION) throw exchangeError("unsupported-exchange-format", "不支持该衣柜文件格式版本");
+    const payload = envelope.payload;
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw exchangeError("wardrobe-root", "衣柜数据根节点无效");
+    if (payload.version != null && Number(payload.version) > WARDROBE_VERSION) throw exchangeError("newer-wardrobe-schema", "该衣柜由更新版本的 COE 导出");
+    if (Array.isArray(payload.schemes) && payload.schemes.length > MAX_SCHEMES) throw exchangeError("too-many-schemes", `衣柜服装超过 ${MAX_SCHEMES} 套`);
+    const schemeIds = new Set();
+    let missingLayers = 0;
+    let affectedSchemes = 0;
+    for (const scheme of Array.isArray(payload.schemes) ? payload.schemes : []) {
+      if (typeof scheme?.id !== "string" || !scheme.id) throw exchangeError("invalid-scheme-id", "衣柜包含无效的方案 ID");
+      if (schemeIds.has(scheme.id)) throw exchangeError("duplicate-scheme-id", "衣柜包含重复的方案 ID");
+      schemeIds.add(scheme.id);
+      validateOutfitPayloadShape(scheme.composition);
+      const unfiltered = normalizeComposition(scheme.composition, { validateReferences: false });
+      if (!VANILLA_CLOTHING_SLOT_GROUPS.has(unfiltered.slotGroup)) throw exchangeError("invalid-slot-group", `服装「${unfiltered.name}」使用了不受支持的服装格子`);
+      const available = normalizeComposition(scheme.composition);
+      const schemeMissing = Math.max(0, unfiltered.layers.length - available.layers.length)
+        + Math.max(0, unfiltered.recycle.length - available.recycle.length);
+      if (schemeMissing) affectedSchemes++;
+      missingLayers += schemeMissing;
+    }
+    const normalized = normalizeWardrobe(payload);
+    compactWardrobeForStorage(normalized);
+    return {
+      wardrobe: normalized,
+      missingLayers,
+      affectedSchemes,
+      metadata: {
+        createdAt: typeof envelope.createdAt === "string" ? envelope.createdAt.slice(0, 40) : null,
+        pluginVersion: typeof envelope.pluginVersion === "string" ? envelope.pluginVersion.slice(0, 24) : null,
+        accountName: typeof envelope.owner?.accountName === "string" ? envelope.owner.accountName.slice(0, 80) : null,
+        memberNumber: Number.isInteger(envelope.owner?.memberNumber) ? envelope.owner.memberNumber : null,
+      },
+    };
+  }
+
+  function sanitizeFilenamePart(value, fallback) {
+    let output = String(value ?? "").replace(/[<>:\"/\\|?*\u0000-\u001f]/g, "_").replace(/[. ]+$/g, "").trim();
+    if (!output) output = fallback;
+    if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i.test(output)) output = `_${output}`;
+    return output.slice(0, 80);
+  }
+
+  function localTimestamp(date = new Date()) {
+    const part = value => String(value).padStart(2, "0");
+    return `${date.getFullYear()}${part(date.getMonth() + 1)}${part(date.getDate())}-${part(date.getHours())}${part(date.getMinutes())}${part(date.getSeconds())}`;
+  }
+
+  function wardrobeExportFilename(date = new Date()) {
+    const accountName = sanitizeFilenamePart(globalThis.Player?.AccountName || globalThis.Player?.Name, "Player");
+    const memberNumber = Number.isInteger(globalThis.Player?.MemberNumber) ? String(globalThis.Player.MemberNumber) : "unknown";
+    return `${accountName}_${memberNumber}_${localTimestamp(date)}.coe-wardrobe.json`;
   }
 
 
@@ -2128,7 +2326,7 @@
     style.dataset.coeVersion = VERSION;
     style.textContent = `
 #${BUTTON_ID}{position:fixed;left:18px;top:18px;z-index:99980;min-width:176px;border:2px solid #111;border-radius:8px;background:linear-gradient(#fff,#cfeaff);color:#102333;padding:9px 14px;font:700 15px/1.2 system-ui;box-shadow:0 3px 0 #111,0 9px 24px #0008;cursor:pointer}#${BUTTON_ID}:hover{filter:brightness(1.07);transform:translateY(-1px)}
-#${ROOT_ID}{position:fixed;inset:0;z-index:99990;background:transparent;color:#111;font:14px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif;box-sizing:border-box;pointer-events:none}#${ROOT_ID} *{box-sizing:border-box}#${ROOT_ID} button,#${ROOT_ID} input,#${ROOT_ID} select{font:inherit}.coe-panel{position:absolute;inset:0;background:transparent;pointer-events:none}.coe-head{position:absolute;left:0;right:0;top:0;height:72px;display:flex;align-items:center;gap:14px;padding:9px 18px;border-bottom:2px solid #111;background:linear-gradient(180deg,#f6fbff 0,#c4dbe9 100%);color:#132333;box-shadow:0 3px 12px #0008;pointer-events:auto;z-index:3}.coe-brand{display:flex;align-items:center;gap:11px;min-width:0;flex:1}.coe-brand-mark{display:grid;place-items:center;width:42px;height:42px;flex:none;border:2px solid #142535;border-radius:50%;background:#fff;color:#24658e;font-size:22px}.coe-head h2{margin:0;font-size:20px;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.coe-build{display:block;margin-top:3px;color:#496479;font:600 11px/1.2 ui-monospace,Consolas,monospace}.coe-body{position:absolute;right:0;top:72px;bottom:0;width:48%;min-width:560px;padding:12px;overflow:auto;border-left:2px solid #111;background:#d8d8d8f2;box-shadow:-6px 0 18px #0008;pointer-events:auto}.coe-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.coe-head .coe-actions{justify-content:flex-end}.coe-btn{border:2px solid #111923;border-radius:6px;background:linear-gradient(#fff,#c4d2dc);color:#152432;padding:7px 11px;font-weight:700;box-shadow:0 2px 0 #070b0f;cursor:pointer}.coe-btn:hover{filter:brightness(1.07)}.coe-btn:active{transform:translateY(1px);box-shadow:0 1px 0 #070b0f}.coe-primary{background:linear-gradient(#b8e9ff,#54b6eb);color:#071a27}.coe-danger{background:linear-gradient(#ffd0d8,#e67689);color:#32101a}.coe-muted{color:#536b7d}.coe-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.coe-card{border:2px solid #555;border-radius:7px;padding:11px;background:#f4f4f4;color:#142331;box-shadow:0 2px 5px #0003}.coe-card h3{margin:0 0 5px;font-size:16px}.coe-card-title{display:flex;align-items:center;gap:8px}.coe-card-title h3{flex:1}.coe-card.coe-equipped{border:3px solid #1889c8;background:#e0f3ff;box-shadow:0 0 0 2px #8bd2f7 inset}.coe-equipped-badge{display:inline-block;padding:3px 7px;border-radius:4px;background:#d5d5d5;color:#555;font-size:11px}.coe-card.coe-equipped .coe-equipped-badge{background:#1889c8;color:#fff}.coe-wardrobe-summary{margin-bottom:10px;padding:8px 10px;border:1px solid #677b88;border-radius:5px;background:#eef5f9;color:#233b4b;font-size:12px}.coe-remote-prefs{display:grid;gap:7px;margin-bottom:10px;padding:10px;border:2px solid #52758b;border-radius:7px;background:#e7f4fb}.coe-remote-prefs h3{margin:0 0 2px}.coe-remote-prefs label{display:flex;align-items:center;gap:7px;font-weight:700}.coe-remote-prefs input{width:17px;height:17px}.coe-remote-prefs p{margin:2px 0 0;color:#3f5c6d;font-size:11px}.coe-empty{text-align:center;padding:48px 18px;color:#536b7d}
+#${ROOT_ID}{position:fixed;inset:0;z-index:99990;background:transparent;color:#111;font:14px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif;box-sizing:border-box;pointer-events:none}#${ROOT_ID} *{box-sizing:border-box}#${ROOT_ID} button,#${ROOT_ID} input,#${ROOT_ID} select{font:inherit}.coe-panel{position:absolute;inset:0;background:transparent;pointer-events:none}.coe-head{position:absolute;left:0;right:0;top:0;height:72px;display:flex;align-items:center;gap:14px;padding:9px 18px;border-bottom:2px solid #111;background:linear-gradient(180deg,#f6fbff 0,#c4dbe9 100%);color:#132333;box-shadow:0 3px 12px #0008;pointer-events:auto;z-index:3}.coe-brand{display:flex;align-items:center;gap:11px;min-width:0;flex:1}.coe-brand-mark{display:grid;place-items:center;width:42px;height:42px;flex:none;border:2px solid #142535;border-radius:50%;background:#fff;color:#24658e;font-size:22px}.coe-head h2{margin:0;font-size:20px;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.coe-build{display:block;margin-top:3px;color:#496479;font:600 11px/1.2 ui-monospace,Consolas,monospace}.coe-body{position:absolute;right:0;top:72px;bottom:0;width:48%;min-width:560px;padding:12px;overflow:auto;border-left:2px solid #111;background:#d8d8d8f2;box-shadow:-6px 0 18px #0008;pointer-events:auto}.coe-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.coe-head .coe-actions{justify-content:flex-end}.coe-btn{border:2px solid #111923;border-radius:6px;background:linear-gradient(#fff,#c4d2dc);color:#152432;padding:7px 11px;font-weight:700;box-shadow:0 2px 0 #070b0f;cursor:pointer}.coe-btn:hover{filter:brightness(1.07)}.coe-btn:active{transform:translateY(1px);box-shadow:0 1px 0 #070b0f}.coe-primary{background:linear-gradient(#b8e9ff,#54b6eb);color:#071a27}.coe-danger{background:linear-gradient(#ffd0d8,#e67689);color:#32101a}.coe-muted{color:#536b7d}.coe-menu{position:relative}.coe-menu>summary{list-style:none;user-select:none}.coe-menu>summary::-webkit-details-marker{display:none}.coe-menu-panel{position:absolute;right:0;top:calc(100% + 6px);z-index:8;display:grid;min-width:180px;padding:6px;border:2px solid #172631;border-radius:7px;background:#f2f6f8;box-shadow:0 7px 20px #0007}.coe-menu-panel button{border:0;border-radius:4px;background:transparent;color:#142331;padding:8px 9px;text-align:left;font-weight:700;cursor:pointer}.coe-menu-panel button:hover{background:#cdeaff}.coe-modal-backdrop{position:fixed;inset:0;z-index:100005;display:grid;place-items:center;padding:20px;background:#0008;pointer-events:auto}.coe-modal{width:min(680px,92vw);max-height:86vh;overflow:auto;border:2px solid #172631;border-radius:9px;background:#eef3f6;color:#142331;padding:16px;box-shadow:0 14px 42px #000b}.coe-modal h3{margin:0 0 10px;font-size:18px}.coe-modal-content{display:grid;gap:9px}.coe-modal-content p{margin:0}.coe-modal-actions{justify-content:flex-end;margin-top:13px}.coe-exchange-text{width:100%;min-height:210px;resize:vertical;border:1px solid #667c8c;border-radius:6px;background:#fff;color:#111;padding:9px;font:12px/1.45 ui-monospace,Consolas,monospace;word-break:break-all}.coe-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.coe-card{border:2px solid #555;border-radius:7px;padding:11px;background:#f4f4f4;color:#142331;box-shadow:0 2px 5px #0003}.coe-card h3{margin:0 0 5px;font-size:16px}.coe-card-title{display:flex;align-items:center;gap:8px}.coe-card-title h3{flex:1}.coe-card.coe-equipped{border:3px solid #1889c8;background:#e0f3ff;box-shadow:0 0 0 2px #8bd2f7 inset}.coe-equipped-badge{display:inline-block;padding:3px 7px;border-radius:4px;background:#d5d5d5;color:#555;font-size:11px}.coe-card.coe-equipped .coe-equipped-badge{background:#1889c8;color:#fff}.coe-wardrobe-summary{margin-bottom:10px;padding:8px 10px;border:1px solid #677b88;border-radius:5px;background:#eef5f9;color:#233b4b;font-size:12px}.coe-remote-prefs{display:grid;gap:7px;margin-bottom:10px;padding:10px;border:2px solid #52758b;border-radius:7px;background:#e7f4fb}.coe-remote-prefs h3{margin:0 0 2px}.coe-remote-prefs label{display:flex;align-items:center;gap:7px;font-weight:700}.coe-remote-prefs input{width:17px;height:17px}.coe-remote-prefs p{margin:2px 0 0;color:#3f5c6d;font-size:11px}.coe-empty{text-align:center;padding:48px 18px;color:#536b7d}
 .coe-editor{height:100%;min-height:0}.coe-editor-tools{height:100%;min-height:0;display:grid;grid-template-rows:auto auto minmax(0,1fr);border:2px solid #555;border-radius:6px;background:#ededed;overflow:hidden}.coe-scheme-bar{padding:9px 11px;border-bottom:1px solid #777;background:#f7f7f7}.coe-field{display:flex;align-items:center;gap:8px}.coe-field label{font-weight:700;white-space:nowrap}.coe-field input,.coe-field select,.coe-search{min-width:0;border:1px solid #667c8c;border-radius:5px;background:#fff;color:#111;padding:7px 9px;outline:none}.coe-field input:focus,.coe-search:focus{border-color:#2699dc;box-shadow:0 0 0 2px #4bb9f044}.coe-title-input{width:100%;font-size:16px!important}.coe-tool-tabs{display:flex;gap:6px;padding:7px;border-bottom:1px solid #777;background:#c9c9c9}.coe-tool-tabs .coe-btn{flex:1;padding:6px 9px}.coe-tool-content{min-height:0;overflow:auto;padding:9px}.coe-editor-section{margin-bottom:11px}.coe-section-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 7px}.coe-section-head h3{margin:0;font-size:14px}.coe-badge{display:inline-flex;align-items:center;min-height:21px;padding:2px 7px;border:1px solid #688296;border-radius:999px;background:#e4f2fb;color:#24516c;font-size:11px}.coe-pose-groups{display:grid;gap:3px}.coe-pose-group{display:grid;grid-template-columns:42px minmax(0,1fr);align-items:center;gap:5px}.coe-pose-group h4{margin:0;color:#3d5363;font-size:11px}.coe-pose-buttons{display:flex;flex-wrap:wrap;gap:3px}.coe-pose-buttons .coe-btn{padding:2px 6px;border-width:1px;border-radius:4px;box-shadow:none;font-size:10px}.coe-pose-buttons button.coe-active{background:linear-gradient(#b8e9ff,#54b6eb);border-color:#116c9d}.coe-hint{padding:7px 9px;border:1px solid #708798;border-radius:6px;background:#e4edf4;color:#233b4b;font-size:11px}.coe-transform-editor{margin:9px 0;padding:9px;border:2px solid #d28b28;border-radius:7px;background:#fff6df;color:#2b2112}.coe-transform-head{display:flex;align-items:center;justify-content:space-between;gap:8px}.coe-transform-head strong,.coe-transform-head .coe-muted{display:block}.coe-transform-fields{display:grid;grid-template-columns:repeat(4,minmax(70px,1fr));gap:6px;margin-top:7px}.coe-transform-fields label{display:flex;flex-direction:column;color:#333;font-size:10px}.coe-transform-fields input{margin-top:3px;width:100%;min-width:0;border:1px solid #967a45;border-radius:4px;background:#fff;color:#111;padding:5px}.coe-transform-head select{max-width:190px;border:1px solid #967a45;border-radius:4px;padding:5px;background:#fff;color:#111}.coe-divider{height:1px;background:#888;margin:10px 0}.coe-layer-list{display:flex;flex-direction:column;gap:7px}.coe-layer{border:1px solid #777;border-radius:6px;padding:8px;background:#fafafa}.coe-layer.coe-hidden{opacity:.55}.coe-layer.coe-recycled{opacity:.7;border-style:dashed}.coe-layer-top{display:flex;gap:6px;align-items:center;margin-bottom:7px}.coe-drag-handle{color:#667;cursor:grab}.coe-layer-name{font-weight:700;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.coe-layer-top .coe-btn{padding:4px 6px;font-size:11px}.coe-controls{display:grid;grid-template-columns:repeat(4,minmax(52px,1fr)) minmax(90px,1.4fr) repeat(2,minmax(52px,1fr));gap:4px;overflow-x:auto}.coe-controls label{display:flex;min-width:0;flex-direction:column;color:#333;font-size:10px}.coe-controls input{margin-top:2px;width:100%;min-width:0;height:27px;border:1px solid #777;border-radius:4px;background:#fff;color:#111;padding:3px 4px}.coe-color-choice{display:flex;align-items:center;gap:5px;margin-top:3px;width:100%;min-width:0;height:29px;padding:3px 5px;border:1px solid #667;border-radius:4px;background:#fff;color:#111;cursor:pointer}.coe-color-choice:hover{border-color:#168cca;background:#eaf7ff}.coe-color-choice:disabled{cursor:not-allowed;opacity:.55}.coe-color-swatch{width:18px;height:18px;flex:none;border:1px solid #555;border-radius:3px;background-color:#fff;background-image:linear-gradient(45deg,#ccc 25%,transparent 25%),linear-gradient(-45deg,#ccc 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#ccc 75%),linear-gradient(-45deg,transparent 75%,#ccc 75%);background-size:8px 8px;background-position:0 0,0 4px,4px -4px,-4px 0}.coe-color-swatch::after{display:block;width:100%;height:100%;border-radius:2px;background:var(--coe-color,#fff);content:""}.coe-color-choice code{min-width:0;overflow:hidden;color:inherit;font:700 10px/1.2 ui-monospace,Consolas,monospace;text-overflow:ellipsis;white-space:nowrap}.coe-material-editor{border:2px solid #666;border-radius:7px;background:#e4e4e4;overflow:hidden}.coe-material-editor+.coe-material-editor{margin-top:9px}.coe-material-editor.coe-hidden{opacity:.58}.coe-material-editor.coe-recycled{border-style:dashed}.coe-material-editor-head{display:flex;align-items:center;gap:7px;padding:8px;background:#d0d0d0;border-bottom:1px solid #777}.coe-material-identity{display:flex;flex:1;min-width:0;flex-direction:column}.coe-material-identity strong{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.coe-material-identity .coe-muted{font-size:10px}.coe-collapse{width:25px;height:25px;border:0;background:transparent;cursor:pointer}.coe-overall-color{display:flex;align-items:center;gap:5px;font-size:11px;font-weight:700}.coe-overall-color .coe-color-choice{width:auto;max-width:104px;margin-top:0}.coe-material-editor-layers{display:flex;flex-direction:column;gap:7px;padding:7px}.coe-material-editor.coe-collapsed .coe-material-editor-head{border-bottom:0}.coe-recycle-row{display:flex;align-items:center;gap:8px;padding:5px 7px;border:1px solid #888;border-radius:5px;background:#fafafa}.coe-recycle-row span{flex:1}
 .coe-material-picker{display:block;min-height:100%}.coe-material-toolbar{position:sticky;top:-9px;z-index:3;padding:0 0 9px;background:#ededed}.coe-search{width:100%}.coe-materials{display:flex;flex-direction:column;gap:7px;min-height:0}.coe-material-group-title{position:sticky;top:38px;z-index:2;margin:0 0 6px;border-radius:4px;background:#c9c9c9;color:#111;font-size:13px}.coe-material-group-toggle{display:grid;grid-template-columns:16px minmax(0,1fr) auto;align-items:center;gap:5px;width:100%;border:0;background:transparent;color:inherit;padding:5px 7px;text-align:left;cursor:pointer}.coe-material-group-toggle strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.coe-material-group-toggle small{padding:1px 5px;border-radius:999px;background:#eef3f6;color:#405765}.coe-material-section.coe-collapsed .coe-material-group{display:none}.coe-material-group{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}.coe-material{display:flex;flex-direction:column;align-items:stretch;gap:4px;min-width:0;min-height:136px;border:1px solid #777;border-radius:5px;background:#fafafa;padding:6px;text-align:center;color:#111;cursor:pointer}.coe-material:hover{border-color:#168cca;background:#e2f4ff}.coe-material:disabled{cursor:not-allowed;filter:grayscale(.7);opacity:.58}.coe-material.coe-cap-safe{border-color:#268a52}.coe-material.coe-cap-limited{border-color:#c38b13}.coe-material.coe-cap-unverified,.coe-material.coe-cap-unsupported{border-color:#a34b56}.coe-material img{width:100%;height:96px;object-fit:contain;border-radius:4px;background:#eee}.coe-material strong{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:11px}.coe-material .coe-muted{font-size:10px}.coe-toast{position:fixed;left:50%;bottom:26px;transform:translate(-50%,14px);opacity:0;z-index:100010;background:#e8f4fc;color:#142331;border:2px solid #182735;border-radius:8px;padding:9px 15px;box-shadow:0 7px 22px #0009;transition:.2s;pointer-events:none}.coe-toast.coe-show{transform:translate(-50%,0);opacity:1}.coe-toast.coe-error{background:#ffd3dc}.coe-toast.coe-warn{background:#ffe4a8}
 .coe-owned-color-picker{background:linear-gradient(180deg,#f7fbfe 0,#d5e1e8 100%)!important;border:2px solid #172631!important;border-radius:8px;box-shadow:0 8px 28px #000a!important}
@@ -2393,16 +2591,206 @@
     return false;
   }
 
+  function uniqueImportedSchemeName(name) {
+    const base = String(name || "未命名方案").slice(0, 60);
+    const names = new Set(wardrobe.schemes.map(scheme => scheme.composition.name));
+    if (!names.has(base)) return base;
+    for (let index = 1; index < 1000; index++) {
+      const suffix = index === 1 ? "（导入）" : `（导入 ${index}）`;
+      const candidate = `${base.slice(0, Math.max(0, 60 - suffix.length))}${suffix}`;
+      if (!names.has(candidate)) return candidate;
+    }
+    return `${base.slice(0, 48)}（${uid().slice(-7)}）`;
+  }
+
+  function openExchangeModal(title) {
+    document.querySelector(`#${ROOT_ID} .coe-modal-backdrop`)?.remove();
+    const backdrop = document.createElement("div");
+    backdrop.className = "coe-modal-backdrop";
+    const panel = document.createElement("section");
+    panel.className = "coe-modal";
+    const heading = document.createElement("h3");
+    heading.textContent = title;
+    const content = document.createElement("div");
+    content.className = "coe-modal-content";
+    const actions = document.createElement("div");
+    actions.className = "coe-actions coe-modal-actions";
+    const cancel = document.createElement("button");
+    cancel.className = "coe-btn";
+    cancel.textContent = "关闭";
+    cancel.addEventListener("click", () => backdrop.remove());
+    actions.appendChild(cancel);
+    panel.append(heading, content, actions);
+    backdrop.appendChild(panel);
+    document.getElementById(ROOT_ID)?.appendChild(backdrop);
+    return { backdrop, content, actions };
+  }
+
+  async function copyExchangeText(text, textarea) {
+    try {
+      if (!globalThis.navigator?.clipboard?.writeText) throw new Error("clipboard-unavailable");
+      await navigator.clipboard.writeText(text);
+      toast("服装字符串已复制到剪贴板");
+    } catch (_) {
+      textarea.focus();
+      textarea.select();
+      toast("无法自动复制，已为你选中字符串", "warn");
+    }
+  }
+
+  function showOutfitExport(scheme) {
+    try {
+      const text = createOutfitExchangeString(scheme.composition);
+      const modal = openExchangeModal(`导出「${scheme.composition.name}」`);
+      const hint = document.createElement("p");
+      hint.className = "coe-muted";
+      hint.textContent = "复制下面以 COE-OUTFIT 开头的字符串，即可分享或备份这件服装。";
+      const textarea = document.createElement("textarea");
+      textarea.className = "coe-exchange-text";
+      textarea.readOnly = true;
+      textarea.value = text;
+      const copy = document.createElement("button");
+      copy.className = "coe-btn coe-primary";
+      copy.textContent = "复制字符串";
+      copy.addEventListener("click", () => copyExchangeText(text, textarea));
+      modal.content.append(hint, textarea);
+      modal.actions.appendChild(copy);
+      textarea.focus();
+      textarea.select();
+    } catch (error) {
+      toast(`导出失败: ${error?.message || error}`, "error");
+    }
+  }
+
+  function importSingleOutfitString(text, body) {
+    if (!ensureWardrobeWritable()) return false;
+    if (wardrobe.schemes.length >= MAX_SCHEMES) throw new Error(`衣柜最多保存 ${MAX_SCHEMES} 套方案`);
+    const parsed = parseOutfitExchangeString(text);
+    const missing = parsed.missingLayers + parsed.missingRecycle;
+    if (missing && !confirm(`当前环境缺少 ${missing} 个图层引用。继续导入后，这些部分不会显示，是否继续？`)) return false;
+    const previous = cloneJSON(wardrobe);
+    try {
+      const composition = cloneJSON(parsed.composition);
+      composition.name = uniqueImportedSchemeName(composition.name);
+      const candidate = normalizeWardrobe({
+        version: WARDROBE_VERSION,
+        schemes: [{ id: uid(), composition }, ...wardrobe.schemes],
+        equippedIds: wardrobe.equippedIds,
+      });
+      compactWardrobeForStorage(candidate);
+      wardrobe = candidate;
+      persistWardrobe();
+      syncEquippedSchemes();
+      renderWardrobe(body);
+      toast(`已导入「${composition.name}」，当前保持未启用`);
+      return true;
+    } catch (error) {
+      wardrobe = previous;
+      throw error;
+    }
+  }
+
+  function showOutfitImport(body) {
+    const modal = openExchangeModal("导入单件服装");
+    const hint = document.createElement("p");
+    hint.className = "coe-muted";
+    hint.textContent = "粘贴以 COE-OUTFIT 开头的服装字符串。导入后会作为新方案加入，并保持未启用。";
+    const textarea = document.createElement("textarea");
+    textarea.className = "coe-exchange-text";
+    textarea.placeholder = "COE-OUTFIT:1:…";
+    const submit = document.createElement("button");
+    submit.className = "coe-btn coe-primary";
+    submit.textContent = "检查并导入";
+    submit.addEventListener("click", () => {
+      try {
+        if (importSingleOutfitString(textarea.value, body)) modal.backdrop.remove();
+      } catch (error) {
+        toast(`导入失败: ${error?.message || error}`, "error");
+      }
+    });
+    modal.content.append(hint, textarea);
+    modal.actions.appendChild(submit);
+    textarea.focus();
+  }
+
+  function downloadWardrobeFile() {
+    if (persistenceBlocked && !confirm(`衣柜当前处于「${wardrobeReadState.status}」状态。将只导出当前界面选中的 ${wardrobeReadState.source || "内存"} 版本，不包含另一份冲突数据。是否继续？`)) return;
+    try {
+      const documentData = createWardrobeExchangeDocument(wardrobe);
+      const text = JSON.stringify(documentData, null, 2);
+      const blob = new Blob([text], { type: "application/json;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = wardrobeExportFilename();
+      link.style.display = "none";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+      toast(`已导出 ${wardrobe.schemes.length} 套服装`);
+    } catch (error) {
+      toast(`导出衣柜失败: ${error?.message || error}`, "error");
+    }
+  }
+
+  function importWardrobeFile(body) {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".json,.coe-wardrobe.json,application/json";
+    input.style.display = "none";
+    input.addEventListener("change", async () => {
+      const file = input.files?.[0];
+      input.remove();
+      if (!file) return;
+      try {
+        if (file.size > MAX_WARDROBE_FILE_BYTES) throw new Error("衣柜文件超过 1 MiB 安全限制");
+        const parsed = parseWardrobeExchangeDocument(await file.text());
+        const source = parsed.metadata.accountName
+          ? `${parsed.metadata.accountName}${parsed.metadata.memberNumber == null ? "" : ` #${parsed.metadata.memberNumber}`}`
+          : "未知玩家";
+        const warning = persistenceBlocked ? `\n当前衣柜处于「${wardrobeReadState.status}」保护状态，本次操作会明确覆盖该状态。` : "";
+        const missingWarning = parsed.missingLayers
+          ? `\n当前环境缺少 ${parsed.missingLayers} 个图层引用，影响 ${parsed.affectedSchemes} 套服装；导入后这些部分不会显示。`
+          : "";
+        if (!confirm(`文件来源：${source}\n文件包含：${parsed.wardrobe.schemes.length} 套服装\n当前衣柜：${wardrobe.schemes.length} 套服装\n\n导入会替换整个衣柜，并将所有方案设为未启用。${missingWarning}${warning}\n建议先导出当前衣柜。是否继续？`)) return;
+        const previous = wardrobe;
+        const previousBlocked = persistenceBlocked;
+        try {
+          wardrobe = normalizeWardrobe({ ...parsed.wardrobe, equippedIds: [] });
+          persistenceBlocked = false;
+          persistWardrobe({ force: true });
+          syncEquippedSchemes();
+          renderWardrobe(body);
+          const localOnly = wardrobeReadState.sync?.mode === "local-only";
+          toast(localOnly ? `已导入 ${wardrobe.schemes.length} 套服装，仅保存到本机` : `已导入 ${wardrobe.schemes.length} 套服装`, localOnly ? "warn" : "info");
+        } catch (error) {
+          wardrobe = previous;
+          persistenceBlocked = previousBlocked;
+          throw error;
+        }
+      } catch (error) {
+        toast(`导入衣柜失败: ${error?.message || error}`, "error");
+      }
+    }, { once: true });
+    document.body.appendChild(input);
+    input.click();
+  }
+
   function openWardrobe() {
     restoreEditorAppearance();
     loadWardrobe();
     ensureEquippedIds();
     syncEquippedSchemes();
-    const body = rootShell("自定义服装衣柜", '<button class="coe-btn coe-primary" data-action="new">＋ 新建方案</button><button class="coe-btn" data-action="unequip-all">全部卸下</button><button class="coe-btn" data-action="close">关闭</button>');
+    const exchangeMenu = '<details class="coe-menu"><summary class="coe-btn">导入导出 ▾</summary><div class="coe-menu-panel"><button data-import-outfit>导入单件服装</button><button data-import-wardrobe>导入整个衣柜</button><button data-export-wardrobe>导出整个衣柜</button></div></details>';
+    const body = rootShell("自定义服装衣柜", `<button class="coe-btn coe-primary" data-action="new">＋ 新建方案</button>${exchangeMenu}<button class="coe-btn" data-action="unequip-all">全部卸下</button><button class="coe-btn" data-action="close">关闭</button>`);
     uiMode = "wardrobe";
     const root = document.getElementById(ROOT_ID);
     root.classList.add("coe-wardrobe-root");
     root.querySelector('[data-action="new"]').addEventListener("click", () => openEditor({ version: 2, name: "新方案", layers: [], recycle: [] }, null));
+    root.querySelector("[data-import-outfit]").addEventListener("click", () => showOutfitImport(body));
+    root.querySelector("[data-import-wardrobe]").addEventListener("click", () => importWardrobeFile(body));
+    root.querySelector("[data-export-wardrobe]").addEventListener("click", downloadWardrobeFile);
     root.querySelector('[data-action="unequip-all"]').addEventListener("click", () => {
       if (!ensureWardrobeWritable()) return;
       wardrobe.equippedIds = [];
@@ -2449,7 +2837,7 @@
       card.className = `coe-card${isEquipped ? " coe-equipped" : ""}`;
       const slotLabel = clothingSlotLabel(schemeSlotGroup(scheme));
       const tagWorn = isTagEquipped(globalThis.Player, schemeSlotGroup(scheme));
-      card.innerHTML = `<div class="coe-card-title"><h3>${escapeHTML(scheme.composition.name)}</h3><span class="coe-equipped-badge">${isEquipped ? (tagWorn ? "已穿着" : "已启用") : "未启用"}</span></div><p class="coe-muted">部位 ${escapeHTML(slotLabel)} · 图层 ${stats.layers} · 素材 ${stats.assets} 件</p><div class="coe-actions"><button class="coe-btn ${isEquipped ? "coe-danger" : "coe-primary"}" data-toggle>${isEquipped ? "停用" : "启用"}</button><button class="coe-btn" data-edit>编辑</button><button class="coe-btn coe-danger" data-delete>删除</button></div>`;
+      card.innerHTML = `<div class="coe-card-title"><h3>${escapeHTML(scheme.composition.name)}</h3><span class="coe-equipped-badge">${isEquipped ? (tagWorn ? "已穿着" : "已启用") : "未启用"}</span></div><p class="coe-muted">部位 ${escapeHTML(slotLabel)} · 图层 ${stats.layers} · 素材 ${stats.assets} 件</p><div class="coe-actions"><button class="coe-btn ${isEquipped ? "coe-danger" : "coe-primary"}" data-toggle>${isEquipped ? "停用" : "启用"}</button><button class="coe-btn" data-edit>编辑</button><button class="coe-btn" data-export>导出</button><button class="coe-btn coe-danger" data-delete>删除</button></div>`;
       card.querySelector("[data-toggle]").addEventListener("click", () => {
         if (!ensureWardrobeWritable()) return;
         if (isEquipped) wardrobe.equippedIds = wardrobe.equippedIds.filter(id => id !== scheme.id);
@@ -2459,6 +2847,7 @@
         renderWardrobe(body);
       });
       card.querySelector("[data-edit]").addEventListener("click", () => openEditor(scheme.composition, scheme.id));
+      card.querySelector("[data-export]").addEventListener("click", () => showOutfitExport(scheme));
       card.querySelector("[data-delete]").addEventListener("click", () => {
         if (!ensureWardrobeWritable()) return;
         if (!confirm(`删除方案「${scheme.composition.name}」？此操作无法撤销。`)) return;
@@ -4104,6 +4493,12 @@
       apply: composition => applyComposition(composition),
       getCurrent: () => cloneJSON(getComposition(globalThis.Player)),
       exportWardrobe: () => packWardrobe(wardrobe),
+      exportWardrobeDocument: () => cloneJSON(createWardrobeExchangeDocument(wardrobe)),
+      exportOutfit: schemeId => {
+        const scheme = wardrobe.schemes.find(entry => entry.id === schemeId);
+        if (!scheme) throw new Error("找不到要导出的服装方案");
+        return createOutfitExchangeString(scheme.composition);
+      },
       exportRawStorage: () => cloneJSON({ server: wardrobeReadState.server?.raw ?? null, local: wardrobeReadState.local?.raw ?? null }),
       importWardrobe: packed => {
         const result = unpackWardrobeDetailed(packed);
@@ -4176,6 +4571,7 @@
   if (globalThis.__COE_TEST_MODE__) {
     globalThis.__COE_TEST_API__ = {
       normalizeWardrobe, normalizeComposition, normalizeLayerTransform, compactWardrobeForStorage, compactCompositionForStorage, compactLayerForStorage, packWardrobe, unpackWardrobeDetailed,
+      createOutfitExchangeString, parseOutfitExchangeString, createWardrobeExchangeDocument, parseWardrobeExchangeDocument, wardrobeExportFilename, localTimestamp, sanitizeFilenamePart,
       serverSyncMessageBytes, storageFingerprint, loadWardrobe, persistWardrobe,
       computeDefaultOverallCenter, resolveOverallTransform, resolveRenderableOverallTransform, resolveNumericOrigin, transformPointAroundOverallPivot,
       stableInsertSyntheticLayers, coeAssetLayerSort: stableInsertSyntheticLayers, analyzeSourceAsset, sanitizePlainRecord,

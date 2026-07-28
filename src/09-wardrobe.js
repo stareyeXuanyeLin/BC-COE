@@ -86,16 +86,206 @@
     return false;
   }
 
+  function uniqueImportedSchemeName(name) {
+    const base = String(name || "未命名方案").slice(0, 60);
+    const names = new Set(wardrobe.schemes.map(scheme => scheme.composition.name));
+    if (!names.has(base)) return base;
+    for (let index = 1; index < 1000; index++) {
+      const suffix = index === 1 ? "（导入）" : `（导入 ${index}）`;
+      const candidate = `${base.slice(0, Math.max(0, 60 - suffix.length))}${suffix}`;
+      if (!names.has(candidate)) return candidate;
+    }
+    return `${base.slice(0, 48)}（${uid().slice(-7)}）`;
+  }
+
+  function openExchangeModal(title) {
+    document.querySelector(`#${ROOT_ID} .coe-modal-backdrop`)?.remove();
+    const backdrop = document.createElement("div");
+    backdrop.className = "coe-modal-backdrop";
+    const panel = document.createElement("section");
+    panel.className = "coe-modal";
+    const heading = document.createElement("h3");
+    heading.textContent = title;
+    const content = document.createElement("div");
+    content.className = "coe-modal-content";
+    const actions = document.createElement("div");
+    actions.className = "coe-actions coe-modal-actions";
+    const cancel = document.createElement("button");
+    cancel.className = "coe-btn";
+    cancel.textContent = "关闭";
+    cancel.addEventListener("click", () => backdrop.remove());
+    actions.appendChild(cancel);
+    panel.append(heading, content, actions);
+    backdrop.appendChild(panel);
+    document.getElementById(ROOT_ID)?.appendChild(backdrop);
+    return { backdrop, content, actions };
+  }
+
+  async function copyExchangeText(text, textarea) {
+    try {
+      if (!globalThis.navigator?.clipboard?.writeText) throw new Error("clipboard-unavailable");
+      await navigator.clipboard.writeText(text);
+      toast("服装字符串已复制到剪贴板");
+    } catch (_) {
+      textarea.focus();
+      textarea.select();
+      toast("无法自动复制，已为你选中字符串", "warn");
+    }
+  }
+
+  function showOutfitExport(scheme) {
+    try {
+      const text = createOutfitExchangeString(scheme.composition);
+      const modal = openExchangeModal(`导出「${scheme.composition.name}」`);
+      const hint = document.createElement("p");
+      hint.className = "coe-muted";
+      hint.textContent = "复制下面以 COE-OUTFIT 开头的字符串，即可分享或备份这件服装。";
+      const textarea = document.createElement("textarea");
+      textarea.className = "coe-exchange-text";
+      textarea.readOnly = true;
+      textarea.value = text;
+      const copy = document.createElement("button");
+      copy.className = "coe-btn coe-primary";
+      copy.textContent = "复制字符串";
+      copy.addEventListener("click", () => copyExchangeText(text, textarea));
+      modal.content.append(hint, textarea);
+      modal.actions.appendChild(copy);
+      textarea.focus();
+      textarea.select();
+    } catch (error) {
+      toast(`导出失败: ${error?.message || error}`, "error");
+    }
+  }
+
+  function importSingleOutfitString(text, body) {
+    if (!ensureWardrobeWritable()) return false;
+    if (wardrobe.schemes.length >= MAX_SCHEMES) throw new Error(`衣柜最多保存 ${MAX_SCHEMES} 套方案`);
+    const parsed = parseOutfitExchangeString(text);
+    const missing = parsed.missingLayers + parsed.missingRecycle;
+    if (missing && !confirm(`当前环境缺少 ${missing} 个图层引用。继续导入后，这些部分不会显示，是否继续？`)) return false;
+    const previous = cloneJSON(wardrobe);
+    try {
+      const composition = cloneJSON(parsed.composition);
+      composition.name = uniqueImportedSchemeName(composition.name);
+      const candidate = normalizeWardrobe({
+        version: WARDROBE_VERSION,
+        schemes: [{ id: uid(), composition }, ...wardrobe.schemes],
+        equippedIds: wardrobe.equippedIds,
+      });
+      compactWardrobeForStorage(candidate);
+      wardrobe = candidate;
+      persistWardrobe();
+      syncEquippedSchemes();
+      renderWardrobe(body);
+      toast(`已导入「${composition.name}」，当前保持未启用`);
+      return true;
+    } catch (error) {
+      wardrobe = previous;
+      throw error;
+    }
+  }
+
+  function showOutfitImport(body) {
+    const modal = openExchangeModal("导入单件服装");
+    const hint = document.createElement("p");
+    hint.className = "coe-muted";
+    hint.textContent = "粘贴以 COE-OUTFIT 开头的服装字符串。导入后会作为新方案加入，并保持未启用。";
+    const textarea = document.createElement("textarea");
+    textarea.className = "coe-exchange-text";
+    textarea.placeholder = "COE-OUTFIT:1:…";
+    const submit = document.createElement("button");
+    submit.className = "coe-btn coe-primary";
+    submit.textContent = "检查并导入";
+    submit.addEventListener("click", () => {
+      try {
+        if (importSingleOutfitString(textarea.value, body)) modal.backdrop.remove();
+      } catch (error) {
+        toast(`导入失败: ${error?.message || error}`, "error");
+      }
+    });
+    modal.content.append(hint, textarea);
+    modal.actions.appendChild(submit);
+    textarea.focus();
+  }
+
+  function downloadWardrobeFile() {
+    if (persistenceBlocked && !confirm(`衣柜当前处于「${wardrobeReadState.status}」状态。将只导出当前界面选中的 ${wardrobeReadState.source || "内存"} 版本，不包含另一份冲突数据。是否继续？`)) return;
+    try {
+      const documentData = createWardrobeExchangeDocument(wardrobe);
+      const text = JSON.stringify(documentData, null, 2);
+      const blob = new Blob([text], { type: "application/json;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = wardrobeExportFilename();
+      link.style.display = "none";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+      toast(`已导出 ${wardrobe.schemes.length} 套服装`);
+    } catch (error) {
+      toast(`导出衣柜失败: ${error?.message || error}`, "error");
+    }
+  }
+
+  function importWardrobeFile(body) {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".json,.coe-wardrobe.json,application/json";
+    input.style.display = "none";
+    input.addEventListener("change", async () => {
+      const file = input.files?.[0];
+      input.remove();
+      if (!file) return;
+      try {
+        if (file.size > MAX_WARDROBE_FILE_BYTES) throw new Error("衣柜文件超过 1 MiB 安全限制");
+        const parsed = parseWardrobeExchangeDocument(await file.text());
+        const source = parsed.metadata.accountName
+          ? `${parsed.metadata.accountName}${parsed.metadata.memberNumber == null ? "" : ` #${parsed.metadata.memberNumber}`}`
+          : "未知玩家";
+        const warning = persistenceBlocked ? `\n当前衣柜处于「${wardrobeReadState.status}」保护状态，本次操作会明确覆盖该状态。` : "";
+        const missingWarning = parsed.missingLayers
+          ? `\n当前环境缺少 ${parsed.missingLayers} 个图层引用，影响 ${parsed.affectedSchemes} 套服装；导入后这些部分不会显示。`
+          : "";
+        if (!confirm(`文件来源：${source}\n文件包含：${parsed.wardrobe.schemes.length} 套服装\n当前衣柜：${wardrobe.schemes.length} 套服装\n\n导入会替换整个衣柜，并将所有方案设为未启用。${missingWarning}${warning}\n建议先导出当前衣柜。是否继续？`)) return;
+        const previous = wardrobe;
+        const previousBlocked = persistenceBlocked;
+        try {
+          wardrobe = normalizeWardrobe({ ...parsed.wardrobe, equippedIds: [] });
+          persistenceBlocked = false;
+          persistWardrobe({ force: true });
+          syncEquippedSchemes();
+          renderWardrobe(body);
+          const localOnly = wardrobeReadState.sync?.mode === "local-only";
+          toast(localOnly ? `已导入 ${wardrobe.schemes.length} 套服装，仅保存到本机` : `已导入 ${wardrobe.schemes.length} 套服装`, localOnly ? "warn" : "info");
+        } catch (error) {
+          wardrobe = previous;
+          persistenceBlocked = previousBlocked;
+          throw error;
+        }
+      } catch (error) {
+        toast(`导入衣柜失败: ${error?.message || error}`, "error");
+      }
+    }, { once: true });
+    document.body.appendChild(input);
+    input.click();
+  }
+
   function openWardrobe() {
     restoreEditorAppearance();
     loadWardrobe();
     ensureEquippedIds();
     syncEquippedSchemes();
-    const body = rootShell("自定义服装衣柜", '<button class="coe-btn coe-primary" data-action="new">＋ 新建方案</button><button class="coe-btn" data-action="unequip-all">全部卸下</button><button class="coe-btn" data-action="close">关闭</button>');
+    const exchangeMenu = '<details class="coe-menu"><summary class="coe-btn">导入导出 ▾</summary><div class="coe-menu-panel"><button data-import-outfit>导入单件服装</button><button data-import-wardrobe>导入整个衣柜</button><button data-export-wardrobe>导出整个衣柜</button></div></details>';
+    const body = rootShell("自定义服装衣柜", `<button class="coe-btn coe-primary" data-action="new">＋ 新建方案</button>${exchangeMenu}<button class="coe-btn" data-action="unequip-all">全部卸下</button><button class="coe-btn" data-action="close">关闭</button>`);
     uiMode = "wardrobe";
     const root = document.getElementById(ROOT_ID);
     root.classList.add("coe-wardrobe-root");
     root.querySelector('[data-action="new"]').addEventListener("click", () => openEditor({ version: 2, name: "新方案", layers: [], recycle: [] }, null));
+    root.querySelector("[data-import-outfit]").addEventListener("click", () => showOutfitImport(body));
+    root.querySelector("[data-import-wardrobe]").addEventListener("click", () => importWardrobeFile(body));
+    root.querySelector("[data-export-wardrobe]").addEventListener("click", downloadWardrobeFile);
     root.querySelector('[data-action="unequip-all"]').addEventListener("click", () => {
       if (!ensureWardrobeWritable()) return;
       wardrobe.equippedIds = [];
@@ -142,7 +332,7 @@
       card.className = `coe-card${isEquipped ? " coe-equipped" : ""}`;
       const slotLabel = clothingSlotLabel(schemeSlotGroup(scheme));
       const tagWorn = isTagEquipped(globalThis.Player, schemeSlotGroup(scheme));
-      card.innerHTML = `<div class="coe-card-title"><h3>${escapeHTML(scheme.composition.name)}</h3><span class="coe-equipped-badge">${isEquipped ? (tagWorn ? "已穿着" : "已启用") : "未启用"}</span></div><p class="coe-muted">部位 ${escapeHTML(slotLabel)} · 图层 ${stats.layers} · 素材 ${stats.assets} 件</p><div class="coe-actions"><button class="coe-btn ${isEquipped ? "coe-danger" : "coe-primary"}" data-toggle>${isEquipped ? "停用" : "启用"}</button><button class="coe-btn" data-edit>编辑</button><button class="coe-btn coe-danger" data-delete>删除</button></div>`;
+      card.innerHTML = `<div class="coe-card-title"><h3>${escapeHTML(scheme.composition.name)}</h3><span class="coe-equipped-badge">${isEquipped ? (tagWorn ? "已穿着" : "已启用") : "未启用"}</span></div><p class="coe-muted">部位 ${escapeHTML(slotLabel)} · 图层 ${stats.layers} · 素材 ${stats.assets} 件</p><div class="coe-actions"><button class="coe-btn ${isEquipped ? "coe-danger" : "coe-primary"}" data-toggle>${isEquipped ? "停用" : "启用"}</button><button class="coe-btn" data-edit>编辑</button><button class="coe-btn" data-export>导出</button><button class="coe-btn coe-danger" data-delete>删除</button></div>`;
       card.querySelector("[data-toggle]").addEventListener("click", () => {
         if (!ensureWardrobeWritable()) return;
         if (isEquipped) wardrobe.equippedIds = wardrobe.equippedIds.filter(id => id !== scheme.id);
@@ -152,6 +342,7 @@
         renderWardrobe(body);
       });
       card.querySelector("[data-edit]").addEventListener("click", () => openEditor(scheme.composition, scheme.id));
+      card.querySelector("[data-export]").addEventListener("click", () => showOutfitExport(scheme));
       card.querySelector("[data-delete]").addEventListener("click", () => {
         if (!ensureWardrobeWritable()) return;
         if (!confirm(`删除方案「${scheme.composition.name}」？此操作无法撤销。`)) return;

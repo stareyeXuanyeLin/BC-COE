@@ -76,6 +76,12 @@
       apply: composition => applyComposition(composition),
       getCurrent: () => cloneJSON(getComposition(globalThis.Player)),
       exportWardrobe: () => packWardrobe(wardrobe),
+      exportWardrobeDocument: () => cloneJSON(createWardrobeExchangeDocument(wardrobe)),
+      exportOutfit: schemeId => {
+        const scheme = wardrobe.schemes.find(entry => entry.id === schemeId);
+        if (!scheme) throw new Error("找不到要导出的服装方案");
+        return createOutfitExchangeString(scheme.composition);
+      },
       exportRawStorage: () => cloneJSON({ server: wardrobeReadState.server?.raw ?? null, local: wardrobeReadState.local?.raw ?? null }),
       importWardrobe: packed => {
         const result = unpackWardrobeDetailed(packed);
@@ -148,6 +154,7 @@
   if (globalThis.__COE_TEST_MODE__) {
     globalThis.__COE_TEST_API__ = {
       normalizeWardrobe, normalizeComposition, normalizeLayerTransform, compactWardrobeForStorage, compactCompositionForStorage, compactLayerForStorage, packWardrobe, unpackWardrobeDetailed,
+      createOutfitExchangeString, parseOutfitExchangeString, createWardrobeExchangeDocument, parseWardrobeExchangeDocument, wardrobeExportFilename, localTimestamp, sanitizeFilenamePart,
       serverSyncMessageBytes, storageFingerprint, loadWardrobe, persistWardrobe,
       computeDefaultOverallCenter, resolveOverallTransform, resolveRenderableOverallTransform, resolveNumericOrigin, transformPointAroundOverallPivot,
       stableInsertSyntheticLayers, coeAssetLayerSort: stableInsertSyntheticLayers, analyzeSourceAsset, sanitizePlainRecord,

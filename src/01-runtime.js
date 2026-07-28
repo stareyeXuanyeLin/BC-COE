@@ -1,5 +1,5 @@
   const MOD_NAME = "CustomOutfitEditor";
-  const VERSION = "1.0.2";
+  const VERSION = "1.1.0";
   console.info(`[${MOD_NAME}] userscript injected`, location.href);
   const SETTINGS_KEY = "CustomOutfitEditor";
   const STORAGE_KEY = "BC.CustomOutfitEditor.v1";
@@ -11,6 +11,11 @@
   const MAX_MATERIAL_BYTES = 8192;
   const MAX_SCHEME_BYTES = 65536;
   const MAX_WARDROBE_BYTES = 262144;
+  const OUTFIT_EXCHANGE_FORMAT = "COE_OUTFIT";
+  const WARDROBE_EXCHANGE_FORMAT = "COE_WARDROBE";
+  const EXCHANGE_FORMAT_VERSION = 1;
+  const MAX_OUTFIT_EXCHANGE_CHARS = 200000;
+  const MAX_WARDROBE_FILE_BYTES = 1048576;
   // The production BC server accepts at most 180,000 bytes per incoming
   // Socket.IO message. Keep a conservative reserve for Engine.IO/Socket.IO
   // framing and future protocol changes; the measured AccountUpdate event must

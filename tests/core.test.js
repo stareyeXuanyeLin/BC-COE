@@ -118,11 +118,13 @@ test('pose controls provide compact Chinese labels for vanilla pose names', () =
   assert.equal(api.localizedPoseLabel({ Name: 'FuturePose', Description: '未来姿势' }), '未来姿势');
 });
 
-test('transform target dropdown lists material targets only and pointer transform buttons are removed', () => {
+test('transform targets come from persistent list selection without dropdown or pointer handles', () => {
   const source = fs.readFileSync(path.join(root, 'src', '10-editor.js'), 'utf8');
-  assert.doesNotMatch(source, /const layerOptions/);
-  assert.doesNotMatch(source, /data-transform-handle/);
-  assert.doesNotMatch(source, /function bindTransformHandle/);
+  assert.doesNotMatch(source, /data-transform-target|const layerOptions/);
+  assert.doesNotMatch(source, /data-edit-transform|data-edit-overall/);
+  assert.doesNotMatch(source, /data-transform-handle|function bindTransformHandle/);
+  assert.match(source, /data-select-material/);
+  assert.match(source, /data-select-layer/);
 });
 
 test('material categories default to collapsed and matching search categories expand automatically', () => {

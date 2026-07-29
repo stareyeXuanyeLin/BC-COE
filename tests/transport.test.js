@@ -62,3 +62,79 @@ test('CLEAR only removes the matching sender state', async () => {
   assert.equal(api.getRemoteStoreForTest().peers.has(7), true);
   assert.equal(api.getRemoteStoreForTest().activeSnapshots.has(7), false);
 });
+
+test('snapshot transport sends the first eight chunks synchronously without timer pacing', () => {
+  const { api, sent } = load();
+  const chunks = Array.from({ length: 8 }, (_, index) => `part${index}`);
+  api.enqueueRemoteSnapshotBatch({ requestId: 'request_A', session: 'session_A', revision: 1, hash: 'hash_A' }, chunks, 7);
+  assert.equal(sent.length, 8);
+  const envelopes = sent.map(entry => api.parseRemoteContent(entry.packet.Content));
+  assert.deepEqual(envelopes.map(entry => entry.index), [0, 1, 2, 3, 4, 5, 6, 7]);
+  assert.ok(envelopes.every(entry => entry.t === 'CHUNK' && entry.count === 8));
+});
+
+test('large snapshot transport schedules one later burst instead of one timer per chunk', () => {
+  const timers = [];
+  let nextTimer = 0;
+  const env = load({ globals: {
+    setTimeout(fn, delay) { const timer = { id: ++nextTimer, fn, delay, cleared: false }; timers.push(timer); return timer; },
+    clearTimeout(timer) { if (timer) timer.cleared = true; },
+  } });
+  const chunks = Array.from({ length: 9 }, (_, index) => `part${index}`);
+  env.api.enqueueRemoteSnapshotBatch({ requestId: 'request_A', session: 'session_A', revision: 1, hash: 'hash_A' }, chunks, 7);
+  assert.equal(env.sent.length, 8);
+  assert.equal(timers.length, 1);
+  assert.equal(timers[0].delay, 250);
+  timers[0].fn();
+  assert.equal(env.sent.length, 9);
+  assert.equal(env.api.parseRemoteContent(env.sent[8].packet.Content).index, 8);
+});
+
+test('control message preempts a delayed snapshot burst', () => {
+  const timers = [];
+  const env = load({ globals: {
+    setTimeout(fn, delay) { const timer = { fn, delay, cleared: false }; timers.push(timer); return timer; },
+    clearTimeout(timer) { if (timer) timer.cleared = true; },
+  } });
+  const chunks = Array.from({ length: 9 }, (_, index) => `part${index}`);
+  env.api.enqueueRemoteSnapshotBatch({ requestId: 'request_A', session: 'session_A', revision: 1, hash: 'hash_A' }, chunks, 7);
+  env.api.enqueueRemoteEnvelope({ t: 'CLEAR', s: 'session_A' }, 7);
+  assert.equal(timers[0].cleared, true);
+  assert.deepEqual(env.sent.slice(8).map(entry => env.api.parseRemoteContent(entry.packet.Content).t), ['CLEAR', 'CHUNK']);
+});
+
+test('a solicited snapshot has a dedicated chunk budget independent of control rate', () => {
+  const { api } = load();
+  const request = { requestId: 'request_A', session: 'session_A', revision: 1, hash: 'hash_A' };
+  api.setPendingRequest(7, request);
+  for (let index = 0; index < 36; index++) {
+    assert.equal(api.acceptRequestedRemoteChunk(7, { t: 'CHUNK', ...request, index: 0, count: 1, data: 'a' }), true);
+  }
+  assert.equal(api.acceptRequestedRemoteChunk(7, { t: 'CHUNK', ...request, index: 0, count: 1, data: 'a' }), false);
+});
+
+test('REQUEST uses cached chunks and sends a small snapshot in one synchronous burst', async () => {
+  const sender = { MemberNumber: 7, Appearance: [], AppearanceLayers: [], AssetFamily: 'Female3DCG' };
+  const env = load({ characters: [sender] });
+  const canonical = env.api.canonicalRemoteSnapshot(snapshot());
+  const hash = await env.api.sha256Base64Url(canonical);
+  env.api.setRemotePrefsForTest({ sharingEnabled: true, receivingEnabled: true });
+  env.api.setLocalRemoteStateForTest({ session: 'session_A', revision: 1, hash, canonical, snapshot: snapshot() });
+  await env.api.handleRemoteEnvelope(sender, { t: 'REQUEST', requestId: 'request_A', session: 'session_A', revision: 1, hash }, env.api.getRemoteStoreForTest().roomGeneration);
+  const cached = env.api.getLocalRemoteStateForTest().chunks;
+  assert.equal(env.sent.length, cached.length);
+  assert.ok(env.sent.length > 0 && env.sent.length <= 8);
+  assert.ok(env.sent.every(entry => env.api.parseRemoteContent(entry.packet.Content).t === 'CHUNK'));
+});
+
+test('member join announces cached STATE immediately without a random timer', () => {
+  const env = load();
+  const hooks = {};
+  env.api.setLocalRemoteStateForTest({ session: 'session_A', revision: 0, hash: '', canonical: '', snapshot: { v: 1, m: [], l: [] } });
+  env.api.installAllHooksForTest({ hookFunction(name, _priority, fn) { hooks[name] = fn; } });
+  hooks.ChatRoomSyncMemberJoin([{ SourceMemberNumber: 7 }], () => undefined);
+  assert.equal(env.sent.length, 1);
+  const envelope = env.api.parseRemoteContent(env.sent[0].packet.Content);
+  assert.equal(envelope.t, 'STATE');
+  assert.equal(env.sent[0].packet.Target, 7);
+});

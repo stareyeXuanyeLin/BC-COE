@@ -4,6 +4,8 @@
   let localRemoteRevision = 0;
   let localRemoteHash = "";
   let localRemoteCanonical = "";
+  let localRemoteEncoded = "";
+  let localRemoteChunks = [];
   let localRemoteSnapshot = null;
   let localRemoteBuildToken = 0;
   let localRemoteStateTimer = 0;
@@ -91,20 +93,43 @@
     return validateRemoteSnapshot({ v: 1, m: visibleMaterials, l: layers });
   }
 
+  function cancelLocalRemoteBuildTimer() {
+    if (!localRemoteStateTimer) return;
+    clearTimeout(localRemoteStateTimer);
+    remoteStore.timers.delete(localRemoteStateTimer);
+    localRemoteStateTimer = 0;
+  }
+
+  function recordLocalRemoteBuildFailure(error) {
+    remoteDiagnostic("local-build-failed", null, error?.message || error);
+    if (localRemotePreviouslyShared) sendRemoteClear();
+  }
+
   function scheduleLocalRemoteBuild(forceState = false) {
-    if (localRemoteStateTimer) {
-      clearTimeout(localRemoteStateTimer);
-      remoteStore.timers.delete(localRemoteStateTimer);
-    }
+    cancelLocalRemoteBuildTimer();
     const generation = remoteStore.roomGeneration;
     const token = ++localRemoteBuildToken;
     localRemoteStateTimer = scheduleRemoteTimer(() => {
       localRemoteStateTimer = 0;
-      updateLocalRemoteSnapshot(generation, token, forceState).catch(error => {
-        remoteDiagnostic("local-build-failed", null, error?.message || error);
-        if (localRemotePreviouslyShared) sendRemoteClear();
-      });
+      updateLocalRemoteSnapshot(generation, token, forceState).catch(recordLocalRemoteBuildFailure);
     }, 500);
+  }
+
+  function announceLocalRemoteState(target = null, generation = remoteStore.roomGeneration) {
+    if (generation !== remoteStore.roomGeneration) return Promise.resolve(false);
+    cancelLocalRemoteBuildTimer();
+    if (localRemoteSnapshot !== null) {
+      sendRemoteState(target, true);
+      return Promise.resolve(true);
+    }
+    const token = ++localRemoteBuildToken;
+    return updateLocalRemoteSnapshot(generation, token, target == null).then(updated => {
+      if (updated && target != null) sendRemoteState(target, true);
+      return updated;
+    }).catch(error => {
+      recordLocalRemoteBuildFailure(error);
+      return false;
+    });
   }
 
   async function updateLocalRemoteSnapshot(generation = remoteStore.roomGeneration, token = ++localRemoteBuildToken, forceState = false) {
@@ -115,12 +140,16 @@
       throw error;
     }
     const canonical = canonicalRemoteSnapshot(snapshot);
+    const encoded = snapshot.l.length ? encodeRemoteText(canonical) : "";
+    const chunks = encoded ? splitRemoteData(encoded) : [];
     const hash = snapshot.l.length ? await sha256Base64Url(canonical) : "";
     if (generation !== remoteStore.roomGeneration || token !== localRemoteBuildToken) return false;
     const changed = hash !== localRemoteHash;
     if (changed) localRemoteRevision++;
     localRemoteSnapshot = snapshot;
     localRemoteCanonical = canonical;
+    localRemoteEncoded = encoded;
+    localRemoteChunks = chunks;
     localRemoteHash = hash;
     if (!snapshot.l.length) {
       if (localRemotePreviouslyShared) sendRemoteClear();
@@ -177,6 +206,7 @@
   }
 
   function scheduleRemoteRequestTimeout(memberNumber, request, generation) {
+    const delay = request.retries > 0 ? 8000 : 4000;
     scheduleRemoteTimer(() => {
       if (generation !== remoteStore.roomGeneration) return;
       const pending = pendingRequestFor(memberNumber);
@@ -187,11 +217,11 @@
         remoteDiagnostic("request-timeout", memberNumber);
         return;
       }
-      const retry = { ...pending, requestId: remoteRandomId(9), retries: pending.retries + 1 };
+      const retry = { ...pending, requestId: remoteRandomId(9), retries: pending.retries + 1, chunkMessages: 0 };
       setPendingRequest(memberNumber, retry);
       enqueueRemoteEnvelope({ t: "REQUEST", requestId: retry.requestId, session: retry.session, revision: retry.revision, hash: retry.hash }, memberNumber);
       scheduleRemoteRequestTimeout(memberNumber, retry, generation);
-    }, 12000);
+    }, delay);
   }
 
   async function handleRemoteEnvelope(sender, envelope, generation) {
@@ -237,12 +267,16 @@
       return;
     }
     if (envelope.t === "REQUEST") {
-      if (!remotePrefs.sharingEnabled || envelope.session !== localPeerSessionId || envelope.revision !== localRemoteRevision || envelope.hash !== localRemoteHash || !localRemoteCanonical) return;
+      if (!remotePrefs.sharingEnabled || envelope.session !== localPeerSessionId || envelope.revision !== localRemoteRevision || envelope.hash !== localRemoteHash || !localRemoteCanonical || !localRemoteChunks.length) return;
       const now = remoteNow();
-      if (now - (remoteStore.responseTimes.get(memberNumber) || 0) < 10000) return;
+      if (now - (remoteStore.responseTimes.get(memberNumber) || 0) < 3000) return;
       remoteStore.responseTimes.set(memberNumber, now);
-      const chunks = splitRemoteData(encodeRemoteText(localRemoteCanonical));
-      chunks.forEach((data, index) => enqueueRemoteEnvelope({ t: "CHUNK", requestId: envelope.requestId, session: localPeerSessionId, revision: localRemoteRevision, hash: localRemoteHash, index, count: chunks.length, data }, memberNumber, { earliest: now + index * 400 }));
+      enqueueRemoteSnapshotBatch({
+        requestId: envelope.requestId,
+        session: localPeerSessionId,
+        revision: localRemoteRevision,
+        hash: localRemoteHash,
+      }, localRemoteChunks, memberNumber);
       return;
     }
     const assembled = addRemoteChunk(memberNumber, envelope);
@@ -269,14 +303,16 @@
       resetRemoteRoom();
       const generation = remoteStore.roomGeneration;
       const result = next(args);
-      Promise.resolve(result).then(() => { if (generation === remoteStore.roomGeneration) scheduleLocalRemoteBuild(true); }).catch(() => {});
+      Promise.resolve(result).then(() => {
+        if (generation === remoteStore.roomGeneration) announceLocalRemoteState(null, generation);
+      }).catch(() => {});
       return result;
     });
     modApi.hookFunction("ChatRoomSyncMemberJoin", 1000, (args, next) => {
       const result = next(args);
       const memberNumber = Number(args[0]?.SourceMemberNumber ?? args[0]?.MemberNumber ?? args[0]);
       const generation = remoteStore.roomGeneration;
-      scheduleRemoteTimer(() => { if (generation === remoteStore.roomGeneration && Number.isInteger(memberNumber)) sendRemoteState(memberNumber, true); }, 100 + Math.floor(Math.random() * 401));
+      if (Number.isInteger(memberNumber)) announceLocalRemoteState(memberNumber, generation);
       return result;
     });
     modApi.hookFunction("ChatRoomSyncMemberLeave", 1000, (args, next) => {
@@ -313,6 +349,8 @@
     localRemoteRevision = 0;
     localRemoteHash = "";
     localRemoteCanonical = "";
+    localRemoteEncoded = "";
+    localRemoteChunks = [];
     localRemoteSnapshot = null;
     if (!installRemoteMessageHandler()) throw new Error("remote-message-handler-unavailable");
     scheduleLocalRemoteBuild(true);

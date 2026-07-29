@@ -4,8 +4,8 @@ $source = Join-Path $root 'src'
 $dist = Join-Path $root 'dist'
 $output = Join-Path $dist 'CustomOutfitEditor.user.js'
 $parts = @(
-  '00-userscript-header.js','01-runtime.js','02-data.js','02-schema-migrations.js','03-storage.js','04-assets.js',
-  '05-capabilities.js','06-adapters.js','07-renderer.js','08-ui-shell.js','09-wardrobe.js',
+  '00-userscript-header.js','01-runtime.js','02-data.js','02-set-data.js','02-schema-migrations.js','03-storage.js','04-assets.js',
+  '05-capabilities.js','06-adapters.js','07-renderer.js','08-ui-shell.js','09-set-exchange.js','09-set-wardrobe.js','09-wardrobe.js',
   '10-editor.js','11-remote-protocol.js','12-remote-store.js','13-remote-transport.js',
   '14-remote-controller.js','15-bootstrap.js'
 )

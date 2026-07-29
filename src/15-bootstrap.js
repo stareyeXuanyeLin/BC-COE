@@ -86,6 +86,7 @@
         if (!scheme) throw new Error("找不到要导出的服装方案");
         return createOutfitExchangeString(scheme.composition);
       },
+      exportSet: setId => createSetExchangeString(setId, wardrobe),
       exportRawStorage: () => cloneJSON({ server: wardrobeReadState.server?.raw ?? null, local: wardrobeReadState.local?.raw ?? null }),
       importWardrobe: packed => {
         const result = unpackWardrobeDetailed(packed);
@@ -159,8 +160,10 @@
   if (globalThis.__COE_TEST_MODE__) {
     globalThis.__COE_TEST_API__ = {
       normalizeWardrobe, normalizeComposition, normalizeLayerTransform, compactWardrobeForStorage, compactCompositionForStorage, compactLayerForStorage,
+      normalizeSet, compactSetForStorage, normalizeAppearanceBundle, sanitizeSetProperty, captureAppearanceForSet, captureCurrentSet, buildSetApplyPlan, validateSetReferences, findSetsReferencingScheme,
       migrateWardrobeData, readWardrobeSchemaVersion, packWardrobe, unpackWardrobeDetailed,
-      createOutfitExchangeString, parseOutfitExchangeString, createWardrobeExchangeDocument, parseWardrobeExchangeDocument, wardrobeExportFilename, localTimestamp, sanitizeFilenamePart,
+      createOutfitExchangeString, parseOutfitExchangeString, createSetExchangeString, parseSetExchangeString, buildSetImportPlan, commitSetImportPlan, createWardrobeExchangeDocument, parseWardrobeExchangeDocument, wardrobeExportFilename, localTimestamp, sanitizeFilenamePart,
+      removeSchemeAndSetReferences, deleteSetTransaction, saveCurrentSetTransaction, applySetTransaction,
       serverSyncMessageBytes, storageFingerprint, loadWardrobe, persistWardrobe,
       computeDefaultOverallCenter, resolveOverallTransform, resolveRenderableOverallTransform, resolveNumericOrigin, transformPointAroundOverallPivot, transformPointAroundOverallPivotAxes,
       stableInsertSyntheticLayers, coeAssetLayerSort: stableInsertSyntheticLayers, analyzeSourceAsset, sanitizePlainRecord,

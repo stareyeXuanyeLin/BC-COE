@@ -11,7 +11,18 @@
   const MAX_MATERIAL_BYTES = 8192;
   const MAX_SCHEME_BYTES = 65536;
   const MAX_WARDROBE_BYTES = 262144;
+  // A typical full R130 Appearance bundle is well below 16 KiB. Keep each set
+  // bounded at 64 KiB and the first online wardrobe at 20 records; the existing
+  // 160,000-byte AccountUpdate measurement remains authoritative and falls back
+  // to local-only storage instead of truncating data.
+  const MAX_SETS = 20;
+  const MAX_SET_APPEARANCE_ITEMS = 80;
+  const MAX_SET_CUSTOM_OUTFITS = 40;
+  const MAX_SET_BYTES = 65536;
+  const MAX_SET_EXCHANGE_CHARS = 500000;
+  const MAX_SET_EXCHANGE_BYTES = 262144;
   const OUTFIT_EXCHANGE_FORMAT = "COE_OUTFIT";
+  const SET_EXCHANGE_FORMAT = "COE_SET";
   const WARDROBE_EXCHANGE_FORMAT = "COE_WARDROBE";
   const EXCHANGE_FORMAT_VERSION = 1;
   const MAX_OUTFIT_EXCHANGE_CHARS = 200000;
@@ -43,7 +54,8 @@
   let editing = null;
   let editingId = null;
   let syntheticByCharacter = new WeakMap();
-  let wardrobe = { schemaVersion: 1, schemes: [], equippedIds: [] };
+  let wardrobe = { schemaVersion: 2, schemes: [], sets: [], equippedIds: [] };
+  let wardrobeView = "outfits";
   let wardrobeReadState = { status: "absent", source: null, server: null, local: null, conflict: false };
   let persistenceBlocked = false;
   let duplicateInstance = false;

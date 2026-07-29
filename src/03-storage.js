@@ -374,7 +374,7 @@
     const available = normalizeComposition(envelope.payload);
     const missingLayers = Math.max(0, unfiltered.layers.length - available.layers.length);
     const missingRecycle = Math.max(0, unfiltered.recycle.length - available.recycle.length);
-    if (unfiltered.layers.length > 0 && available.layers.length === 0) throw exchangeError("all-assets-missing", "当前环境缺少这件服装使用的全部素材");
+    const allAssetsMissing = unfiltered.layers.length > 0 && available.layers.length === 0;
     return {
       composition: available,
       metadata: {
@@ -383,6 +383,7 @@
       },
       missingLayers,
       missingRecycle,
+      allAssetsMissing,
     };
   }
 
@@ -443,6 +444,7 @@
       wardrobe: normalized,
       missingLayers,
       affectedSchemes,
+      missingSetReferences: migration.missingSetReferences || 0,
       migration: {
         migrated: migration.migrated,
         fromVersion: migration.fromVersion,

@@ -37,7 +37,18 @@
   const MAX_MATERIAL_BYTES = 8192;
   const MAX_SCHEME_BYTES = 65536;
   const MAX_WARDROBE_BYTES = 262144;
+  // A typical full R130 Appearance bundle is well below 16 KiB. Keep each set
+  // bounded at 64 KiB and the first online wardrobe at 20 records; the existing
+  // 160,000-byte AccountUpdate measurement remains authoritative and falls back
+  // to local-only storage instead of truncating data.
+  const MAX_SETS = 20;
+  const MAX_SET_APPEARANCE_ITEMS = 80;
+  const MAX_SET_CUSTOM_OUTFITS = 40;
+  const MAX_SET_BYTES = 65536;
+  const MAX_SET_EXCHANGE_CHARS = 500000;
+  const MAX_SET_EXCHANGE_BYTES = 262144;
   const OUTFIT_EXCHANGE_FORMAT = "COE_OUTFIT";
+  const SET_EXCHANGE_FORMAT = "COE_SET";
   const WARDROBE_EXCHANGE_FORMAT = "COE_WARDROBE";
   const EXCHANGE_FORMAT_VERSION = 1;
   const MAX_OUTFIT_EXCHANGE_CHARS = 200000;
@@ -69,7 +80,8 @@
   let editing = null;
   let editingId = null;
   let syntheticByCharacter = new WeakMap();
-  let wardrobe = { schemaVersion: 1, schemes: [], equippedIds: [] };
+  let wardrobe = { schemaVersion: 2, schemes: [], sets: [], equippedIds: [] };
+  let wardrobeView = "outfits";
   let wardrobeReadState = { status: "absent", source: null, server: null, local: null, conflict: false };
   let persistenceBlocked = false;
   let duplicateInstance = false;
@@ -126,7 +138,7 @@
 
 
   const COMPOSITION_VERSION = 6;
-  const WARDROBE_SCHEMA_VERSION = 1;
+  const WARDROBE_SCHEMA_VERSION = 2;
   const LEGACY_WARDROBE_VERSION = 7;
 
   function materialKey(group, asset) {
@@ -566,9 +578,18 @@
       occupiedSlots.add(slotGroup);
       return true;
     });
+    const setIds = new Set();
+    const sets = [];
+    for (const rawSet of Array.isArray(raw?.sets) ? raw.sets.slice(0, MAX_SETS) : []) {
+      const set = normalizeSet(rawSet, { validSchemeIds: validIds });
+      if (!set || setIds.has(set.id)) continue;
+      setIds.add(set.id);
+      sets.push(set);
+    }
     return {
       schemaVersion: WARDROBE_SCHEMA_VERSION,
       schemes,
+      sets,
       equippedIds,
     };
   }
@@ -657,13 +678,247 @@
 
   function compactWardrobeForStorage(data, options = {}) {
     const normalized = normalizeWardrobe(data, options);
+    const validSchemeIds = new Set(normalized.schemes.map(entry => entry.id));
     const compact = {
       schemaVersion: WARDROBE_SCHEMA_VERSION,
       schemes: normalized.schemes.map(entry => ({ id: entry.id, composition: compactCompositionForStorage(entry.composition, options) })),
+      sets: normalized.sets.map(set => compactSetForStorage(set, { validSchemeIds })),
       equippedIds: normalized.equippedIds,
     };
     if (utf8Bytes(compact) > MAX_WARDROBE_BYTES) throw new Error("wardrobe-byte-budget");
     return compact;
+  }
+
+
+
+  const SET_PROPERTY_DENIED_KEYS = Object.freeze(new Set([
+    "__proto__", "prototype", "constructor", "Expression", "ExpressionTrigger", "ExpressionGroup",
+    "LockedBy", "LockMemberNumber", "LockMemberNumberList", "LockPickSeed", "Password", "CombinationNumber",
+    "MemberNumberList", "ItemMemberNumber", "RemoveTimer", "ChangeTimer", "Timer", "Craft", "Difficulty",
+  ]));
+
+  function sanitizeSetPropertyValue(value, depth = 0, budget = { keys: 0 }) {
+    if (value == null || typeof value === "boolean") return value;
+    if (typeof value === "number") {
+      if (!Number.isFinite(value) || Math.abs(value) > 1000000000) throw new Error("set-property-number");
+      return value;
+    }
+    if (typeof value === "string") {
+      if (value.length > 500) throw new Error("set-property-string");
+      return value;
+    }
+    if (depth >= 4) throw new Error("set-property-depth");
+    if (Array.isArray(value)) {
+      if (value.length > 64) throw new Error("set-property-array");
+      return value.map(entry => sanitizeSetPropertyValue(entry, depth + 1, budget));
+    }
+    if (Object.prototype.toString.call(value) !== "[object Object]") throw new Error("set-property-not-plain");
+    const output = {};
+    for (const [key, entry] of Object.entries(value)) {
+      if (SET_PROPERTY_DENIED_KEYS.has(key)) continue;
+      if (!/^[A-Za-z0-9_]{1,48}$/.test(key)) throw new Error("set-property-key");
+      budget.keys++;
+      if (budget.keys > 96) throw new Error("set-property-keys");
+      output[key] = sanitizeSetPropertyValue(entry, depth + 1, budget);
+    }
+    return output;
+  }
+
+  function sanitizeSetProperty(value) {
+    if (value == null) return {};
+    let output;
+    try { output = sanitizeSetPropertyValue(value); }
+    catch (_) { return {}; }
+    if (!output || Array.isArray(output) || typeof output !== "object") return {};
+    delete output.Expression;
+    return utf8Bytes(output) <= 8192 ? output : {};
+  }
+
+  function normalizeAppearanceBundle(raw) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+    const group = typeof raw.group === "string" ? raw.group.slice(0, 64) : "";
+    const asset = typeof raw.asset === "string" ? raw.asset.slice(0, 80) : "";
+    if (!group || !asset || asset === TAG_ASSET_NAME) return null;
+    const color = sanitizeColor(raw.color);
+    const property = sanitizeSetProperty(raw.property);
+    return { group, asset, color, property };
+  }
+
+  function compactAppearanceBundle(bundle) {
+    const normalized = normalizeAppearanceBundle(bundle);
+    if (!normalized) return null;
+    const output = { group: normalized.group, asset: normalized.asset };
+    if (!(normalized.color === "Default" || (Array.isArray(normalized.color) && normalized.color.length === 0))) output.color = normalized.color;
+    if (Object.keys(normalized.property).length) output.property = normalized.property;
+    return output;
+  }
+
+  function normalizeSet(raw, options = {}) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+    const appearance = [];
+    const appearanceGroups = new Set();
+    for (const entry of Array.isArray(raw.appearance) ? raw.appearance.slice(0, MAX_SET_APPEARANCE_ITEMS) : []) {
+      const bundle = normalizeAppearanceBundle(entry);
+      if (!bundle || appearanceGroups.has(bundle.group)) continue;
+      appearanceGroups.add(bundle.group);
+      appearance.push(bundle);
+    }
+    const customOutfits = [];
+    const customSlots = new Set();
+    for (const entry of Array.isArray(raw.customOutfits) ? raw.customOutfits.slice(0, MAX_SET_CUSTOM_OUTFITS) : []) {
+      const slotGroup = typeof entry?.slotGroup === "string" ? entry.slotGroup.slice(0, 64) : "";
+      const schemeId = typeof entry?.schemeId === "string" ? entry.schemeId.slice(0, 100) : "";
+      if (!slotGroup || !schemeId || customSlots.has(slotGroup)) continue;
+      if (options.validSchemeIds && !options.validSchemeIds.has(schemeId) && options.keepDangling !== true) continue;
+      customSlots.add(slotGroup);
+      customOutfits.push({ slotGroup, schemeId });
+    }
+    return {
+      id: typeof raw.id === "string" && raw.id ? raw.id.slice(0, 100) : uid(),
+      name: String(raw.name || "未命名套装").slice(0, 60),
+      appearance,
+      customOutfits,
+    };
+  }
+
+  function compactSetForStorage(raw, options = {}) {
+    const normalized = normalizeSet(raw, options);
+    if (!normalized) throw new Error("invalid-set");
+    const compact = {
+      id: normalized.id,
+      name: normalized.name,
+      appearance: normalized.appearance.map(compactAppearanceBundle).filter(Boolean),
+      customOutfits: normalized.customOutfits.map(entry => ({ slotGroup: entry.slotGroup, schemeId: entry.schemeId })),
+    };
+    if (utf8Bytes(compact) > MAX_SET_BYTES) throw new Error("set-byte-budget");
+    return compact;
+  }
+
+  function assertStoredSetPropertySafe(value, depth = 0) {
+    if (value == null || typeof value !== "object") return;
+    if (depth > 6) throw new Error("set-property-depth");
+    for (const [key, entry] of Object.entries(value)) {
+      if (["__proto__", "prototype", "constructor"].includes(key)) throw new Error("set-property-pollution");
+      assertStoredSetPropertySafe(entry, depth + 1);
+    }
+  }
+
+  function validateStoredSetShape(raw) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw wardrobeMigrationError("invalid-set", "衣柜包含无效的套装");
+    if (typeof raw.id !== "string" || !raw.id) throw wardrobeMigrationError("invalid-set-id", "套装 ID 无效");
+    if (!Array.isArray(raw.appearance) || !Array.isArray(raw.customOutfits)) throw wardrobeMigrationError("invalid-set-shape", "套装缺少外观或自定义服装列表");
+    if (raw.appearance.length > MAX_SET_APPEARANCE_ITEMS) throw wardrobeMigrationError("too-many-set-appearance", `套装外观超过 ${MAX_SET_APPEARANCE_ITEMS} 件`);
+    if (raw.customOutfits.length > MAX_SET_CUSTOM_OUTFITS) throw wardrobeMigrationError("too-many-set-outfits", `套装自定义服装超过 ${MAX_SET_CUSTOM_OUTFITS} 件`);
+    const groups = new Set();
+    for (const entry of raw.appearance) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry) || typeof entry.group !== "string" || typeof entry.asset !== "string") {
+        throw wardrobeMigrationError("invalid-set-appearance", "套装包含无效的外观项目");
+      }
+      if (groups.has(entry.group)) throw wardrobeMigrationError("duplicate-set-group", "套装包含重复的外观部位");
+      groups.add(entry.group);
+      try {
+        assertStoredSetPropertySafe(entry.property);
+        sanitizeSetPropertyValue(entry.property == null ? {} : entry.property);
+      } catch (_) { throw wardrobeMigrationError("invalid-set-property", "套装包含不安全的外观 Property"); }
+    }
+    const slots = new Set();
+    for (const entry of raw.customOutfits) {
+      if (!entry || typeof entry !== "object" || typeof entry.slotGroup !== "string" || typeof entry.schemeId !== "string") {
+        throw wardrobeMigrationError("invalid-set-reference", "套装包含无效的自定义服装引用");
+      }
+      if (slots.has(entry.slotGroup)) throw wardrobeMigrationError("duplicate-set-slot", "套装包含重复的自定义服装部位");
+      slots.add(entry.slotGroup);
+    }
+    if (utf8Bytes(raw) > MAX_SET_BYTES) throw wardrobeMigrationError("set-byte-budget", "套装超过安全容量限制");
+  }
+
+  function validateSetReferences(set, data = wardrobe) {
+    const validIds = new Set((data?.schemes || []).map(entry => entry.id));
+    return (set?.customOutfits || []).filter(entry => !validIds.has(entry.schemeId)).map(entry => ({ ...entry }));
+  }
+
+  function findSetsReferencingScheme(schemeId, data = wardrobe) {
+    return (data?.sets || []).filter(set => set.customOutfits?.some(entry => entry.schemeId === schemeId));
+  }
+
+  function captureAppearanceForSet(character = globalThis.Player, data = wardrobe) {
+    const appearance = [];
+    const customOutfits = [];
+    const anomalies = [];
+    const groups = new Set();
+    const customSlots = new Set();
+    const equipped = new Set(data?.equippedIds || []);
+    const schemeBySlot = new Map((data?.schemes || [])
+      .filter(scheme => equipped.has(scheme.id))
+      .map(scheme => [schemeSlotGroup(scheme), scheme]));
+    for (const item of character?.Appearance || []) {
+      const asset = item?.Asset;
+      const group = asset?.Group?.Name;
+      if (!group || asset?.Group?.Category !== "Appearance") continue;
+      if (asset.Name === TAG_ASSET_NAME) {
+        const scheme = schemeBySlot.get(group);
+        if (!scheme) { anomalies.push({ type: "orphan-tag", slotGroup: group }); continue; }
+        if (!customSlots.has(group)) {
+          customSlots.add(group);
+          customOutfits.push({ slotGroup: group, schemeId: scheme.id });
+        }
+        continue;
+      }
+      if (groups.has(group)) { anomalies.push({ type: "duplicate-group", group }); continue; }
+      groups.add(group);
+      appearance.push({ group, asset: asset.Name, color: sanitizeColor(item.Color), property: sanitizeSetProperty(item.Property) });
+    }
+    return { appearance, customOutfits, anomalies };
+  }
+
+  function captureCurrentSet(name, character = globalThis.Player, data = wardrobe) {
+    const captured = captureAppearanceForSet(character, data);
+    const set = normalizeSet({ id: uid(), name, appearance: captured.appearance, customOutfits: captured.customOutfits }, {
+      validSchemeIds: new Set((data?.schemes || []).map(entry => entry.id)),
+    });
+    compactSetForStorage(set, { validSchemeIds: new Set((data?.schemes || []).map(entry => entry.id)) });
+    return { set, anomalies: captured.anomalies };
+  }
+
+  function buildSetApplyPlan(set, character = globalThis.Player, data = wardrobe) {
+    const normalized = normalizeSet(set, { validSchemeIds: new Set((data?.schemes || []).map(entry => entry.id)), keepDangling: true });
+    if (!normalized) throw new Error("invalid-set");
+    const missingAppearance = [];
+    const missingSchemes = [];
+    const appearance = [];
+    const expressions = new Map((character?.Appearance || []).map(item => [item?.Asset?.Group?.Name, item?.Property?.Expression]).filter(([, value]) => value != null));
+    for (const bundle of normalized.appearance) {
+      const asset = typeof globalThis.AssetGet === "function" ? AssetGet(character?.AssetFamily || "Female3DCG", bundle.group, bundle.asset) : null;
+      if (!asset || asset.Group?.Category !== "Appearance" || asset.Name === TAG_ASSET_NAME) {
+        missingAppearance.push({ group: bundle.group, asset: bundle.asset });
+        continue;
+      }
+      const property = sanitizeSetProperty(bundle.property);
+      if (expressions.has(bundle.group)) property.Expression = cloneJSON(expressions.get(bundle.group));
+      appearance.push({ Asset: asset, Color: cloneJSON(bundle.color), Property: property });
+    }
+    const schemeById = new Map((data?.schemes || []).map(entry => [entry.id, entry]));
+    const equippedIds = [];
+    const occupied = new Set();
+    for (const reference of normalized.customOutfits) {
+      const scheme = schemeById.get(reference.schemeId);
+      if (!scheme || schemeSlotGroup(scheme) !== reference.slotGroup || occupied.has(reference.slotGroup)) {
+        missingSchemes.push({ ...reference });
+        continue;
+      }
+      let tag = typeof globalThis.AssetGet === "function" ? AssetGet(character?.AssetFamily || "Female3DCG", reference.slotGroup, TAG_ASSET_NAME) : null;
+      if (!tag && typeof registerTagAssets === "function") {
+        registerTagAssets();
+        tag = AssetGet(character?.AssetFamily || "Female3DCG", reference.slotGroup, TAG_ASSET_NAME);
+      }
+      if (!tag) { missingSchemes.push({ ...reference, reason: "tag-missing" }); continue; }
+      const existingIndex = appearance.findIndex(item => item.Asset?.Group?.Name === reference.slotGroup);
+      if (existingIndex >= 0) appearance.splice(existingIndex, 1);
+      appearance.push({ Asset: tag, Color: "Default", Property: {} });
+      occupied.add(reference.slotGroup);
+      equippedIds.push(scheme.id);
+    }
+    return { setId: normalized.id, appearance, equippedIds, missingAppearance, missingSchemes };
   }
 
 
@@ -688,6 +943,19 @@
     }
     if (!Array.isArray(raw.schemes) || !Array.isArray(raw.equippedIds)) {
       throw wardrobeMigrationError("wardrobe-shape", "衣柜缺少方案列表或启用列表");
+    }
+    const schemaVersion = readWardrobeSchemaVersion(raw);
+    if (schemaVersion >= 2 && !Array.isArray(raw.sets)) {
+      throw wardrobeMigrationError("wardrobe-sets-shape", "衣柜缺少套装列表");
+    }
+    if (Array.isArray(raw.sets) && raw.sets.length > MAX_SETS) {
+      throw wardrobeMigrationError("too-many-sets", `套装衣柜超过 ${MAX_SETS} 套`);
+    }
+    const setIds = new Set();
+    for (const set of Array.isArray(raw.sets) ? raw.sets : []) {
+      validateStoredSetShape(set);
+      if (setIds.has(set.id)) throw wardrobeMigrationError("duplicate-set-id", "衣柜包含重复的套装 ID");
+      setIds.add(set.id);
     }
     if (raw.schemes.length > MAX_SCHEMES) {
       throw wardrobeMigrationError("too-many-schemes", `衣柜服装超过 ${MAX_SCHEMES} 套`);
@@ -734,6 +1002,12 @@
         equippedIds: cloneJSON(raw.equippedIds),
       };
     },
+    2: raw => ({
+      schemaVersion: 2,
+      schemes: cloneJSON(raw.schemes),
+      sets: [],
+      equippedIds: cloneJSON(raw.equippedIds),
+    }),
   });
 
   function migrateWardrobeData(raw) {
@@ -759,6 +1033,8 @@
     }
 
     validateStoredWardrobeShape(current);
+    const storedSchemeIds = new Set(current.schemes.map(entry => entry.id));
+    const missingSetReferences = (current.sets || []).reduce((count, set) => count + set.customOutfits.filter(entry => !storedSchemeIds.has(entry.schemeId)).length, 0);
     const normalized = normalizeWardrobe(current, { validateReferences: false });
     const compact = compactWardrobeForStorage(normalized, { validateReferences: false });
     if (compact.schemaVersion !== WARDROBE_SCHEMA_VERSION) {
@@ -770,6 +1046,7 @@
       migrated: fromVersion !== WARDROBE_SCHEMA_VERSION,
       fromVersion,
       toVersion: WARDROBE_SCHEMA_VERSION,
+      missingSetReferences,
     };
   }
 
@@ -1151,7 +1428,7 @@
     const available = normalizeComposition(envelope.payload);
     const missingLayers = Math.max(0, unfiltered.layers.length - available.layers.length);
     const missingRecycle = Math.max(0, unfiltered.recycle.length - available.recycle.length);
-    if (unfiltered.layers.length > 0 && available.layers.length === 0) throw exchangeError("all-assets-missing", "当前环境缺少这件服装使用的全部素材");
+    const allAssetsMissing = unfiltered.layers.length > 0 && available.layers.length === 0;
     return {
       composition: available,
       metadata: {
@@ -1160,6 +1437,7 @@
       },
       missingLayers,
       missingRecycle,
+      allAssetsMissing,
     };
   }
 
@@ -1220,6 +1498,7 @@
       wardrobe: normalized,
       missingLayers,
       affectedSchemes,
+      missingSetReferences: migration.missingSetReferences || 0,
       migration: {
         migrated: migration.migrated,
         fromVersion: migration.fromVersion,
@@ -2779,6 +3058,420 @@
 
 
 
+  function assertSafeExchangeValue(value, depth = 0, budget = { keys: 0 }) {
+    if (value == null || typeof value === "boolean" || typeof value === "string") return;
+    if (typeof value === "number") {
+      if (!Number.isFinite(value)) throw exchangeError("non-finite-value", "套装包含无效数字");
+      return;
+    }
+    if (depth > 10) throw exchangeError("exchange-depth", "套装数据嵌套过深");
+    if (Array.isArray(value)) {
+      if (value.length > 200) throw exchangeError("exchange-array", "套装数组超过安全限制");
+      value.forEach(entry => assertSafeExchangeValue(entry, depth + 1, budget));
+      return;
+    }
+    if (Object.prototype.toString.call(value) !== "[object Object]") throw exchangeError("exchange-object", "套装包含无效对象");
+    for (const [key, entry] of Object.entries(value)) {
+      if (["__proto__", "prototype", "constructor"].includes(key)) throw exchangeError("pollution-key", "套装包含危险字段");
+      budget.keys++;
+      if (budget.keys > 4000) throw exchangeError("exchange-keys", "套装字段超过安全限制");
+      assertSafeExchangeValue(entry, depth + 1, budget);
+    }
+  }
+
+  function compositionSignature(composition) {
+    const compact = compactCompositionForStorage(composition, { validateReferences: false });
+    const canonical = cloneJSON(compact);
+    delete canonical.name;
+    return JSON.stringify(canonical);
+  }
+
+  function createSetExchangeString(setId, data = wardrobe) {
+    const set = data.sets.find(entry => entry.id === setId);
+    if (!set) throw exchangeError("set-not-found", "找不到要导出的套装");
+    const schemeById = new Map(data.schemes.map(entry => [entry.id, entry]));
+    const refs = new Map();
+    const outfits = [];
+    const customOutfits = [];
+    for (const entry of set.customOutfits) {
+      const scheme = schemeById.get(entry.schemeId);
+      if (!scheme) continue;
+      let ref = refs.get(scheme.id);
+      if (!ref) {
+        ref = `outfit-${refs.size + 1}`;
+        refs.set(scheme.id, ref);
+        outfits.push({ ref, composition: compactCompositionForStorage(scheme.composition) });
+      }
+      customOutfits.push({ slotGroup: entry.slotGroup, outfitRef: ref });
+    }
+    const payload = {
+      set: {
+        name: set.name,
+        appearance: set.appearance.map(compactAppearanceBundle).filter(Boolean),
+        customOutfits,
+      },
+      outfits,
+    };
+    const envelope = {
+      format: SET_EXCHANGE_FORMAT,
+      formatVersion: EXCHANGE_FORMAT_VERSION,
+      createdAt: new Date().toISOString(),
+      pluginVersion: VERSION,
+      payload,
+    };
+    const json = JSON.stringify(envelope);
+    if (utf8Bytes(json) > MAX_SET_EXCHANGE_BYTES) throw exchangeError("set-payload-too-large", "套装字符串超过安全容量限制");
+    if (globalThis.LZString?.compressToBase64) {
+      const compressed = LZString.compressToBase64(json);
+      if (typeof compressed === "string" && compressed) return `COE-SET:${EXCHANGE_FORMAT_VERSION}:lz:${compressed}`;
+    }
+    return `COE-SET:${EXCHANGE_FORMAT_VERSION}:b64:${encodeUTF8Base64(json)}`;
+  }
+
+  function parseSetExchangeString(value) {
+    const input = String(value ?? "").trim();
+    if (!input) throw exchangeError("empty-set-string", "请先粘贴套装字符串");
+    if (input.length > MAX_SET_EXCHANGE_CHARS) throw exchangeError("set-string-too-large", "套装字符串超过安全长度限制");
+    const match = /^COE-SET:(\d+):(lz|b64):([A-Za-z0-9+/=_-]+)$/.exec(input);
+    if (!match) throw exchangeError("invalid-set-prefix", "这不是有效的 COE 套装字符串");
+    const formatVersion = Number(match[1]);
+    if (formatVersion > EXCHANGE_FORMAT_VERSION) throw exchangeError("newer-exchange-format", "该套装字符串需要更新版本的 COE");
+    if (formatVersion !== EXCHANGE_FORMAT_VERSION) throw exchangeError("unsupported-exchange-format", "不支持该套装字符串格式版本");
+    let json;
+    if (match[2] === "lz") {
+      if (typeof globalThis.LZString?.decompressFromBase64 !== "function") throw exchangeError("lz-not-ready", "压缩组件尚未加载，请稍后重试");
+      try { json = LZString.decompressFromBase64(match[3]); }
+      catch (_) { throw exchangeError("invalid-compressed-set", "套装字符串的压缩内容已损坏"); }
+      if (typeof json !== "string" || !json) throw exchangeError("invalid-compressed-set", "套装字符串的压缩内容已损坏");
+    } else json = decodeUTF8Base64(match[3].replace(/-/g, "+").replace(/_/g, "/"));
+    if (utf8Bytes(json) > MAX_SET_EXCHANGE_BYTES) throw exchangeError("set-payload-too-large", "套装数据超过安全容量限制");
+    let envelope;
+    try { envelope = JSON.parse(json); }
+    catch (_) { throw exchangeError("invalid-set-json", "套装字符串中的 JSON 已损坏"); }
+    assertSafeExchangeValue(envelope);
+    if (!envelope || typeof envelope !== "object" || Array.isArray(envelope) || envelope.format !== SET_EXCHANGE_FORMAT) {
+      throw exchangeError("wrong-exchange-kind", "字符串内容不是 COE 套装");
+    }
+    if (Number(envelope.formatVersion) !== EXCHANGE_FORMAT_VERSION) throw exchangeError("exchange-version-mismatch", "套装字符串的格式版本不一致");
+    const payload = envelope.payload;
+    if (!payload || typeof payload !== "object" || Array.isArray(payload) || !payload.set || !Array.isArray(payload.outfits)) throw exchangeError("set-root", "套装数据根节点无效");
+    if (payload.outfits.length > MAX_SET_CUSTOM_OUTFITS) throw exchangeError("too-many-set-outfits", `套装自定义服装超过 ${MAX_SET_CUSTOM_OUTFITS} 件`);
+    const rawSet = payload.set;
+    if (!Array.isArray(rawSet.appearance) || !Array.isArray(rawSet.customOutfits)) throw exchangeError("invalid-set-shape", "套装缺少外观或自定义服装列表");
+    if (rawSet.appearance.length > MAX_SET_APPEARANCE_ITEMS) throw exchangeError("too-many-set-appearance", `套装外观超过 ${MAX_SET_APPEARANCE_ITEMS} 件`);
+    const appearanceGroups = new Set();
+    const appearance = rawSet.appearance.map(entry => {
+      if (!entry || typeof entry.group !== "string" || typeof entry.asset !== "string" || entry.asset === TAG_ASSET_NAME) throw exchangeError("invalid-set-appearance", "套装包含无效外观项目");
+      if (appearanceGroups.has(entry.group)) throw exchangeError("duplicate-set-group", "套装包含重复的外观部位");
+      appearanceGroups.add(entry.group);
+      if (entry.property != null) sanitizeSetPropertyValue(entry.property);
+      return normalizeAppearanceBundle(entry);
+    });
+    const outfitByRef = new Map();
+    for (const entry of payload.outfits) {
+      if (!entry || typeof entry.ref !== "string" || !entry.ref || outfitByRef.has(entry.ref)) throw exchangeError("duplicate-outfit-ref", "套装包含重复或无效的服装引用");
+      validateOutfitPayloadShape(entry.composition);
+      const composition = normalizeComposition(entry.composition, { validateReferences: false });
+      if (!VANILLA_CLOTHING_SLOT_GROUPS.has(composition.slotGroup)) throw exchangeError("invalid-slot-group", `服装「${composition.name}」使用了不受支持的服装格子`);
+      compactCompositionForStorage(composition, { validateReferences: false });
+      outfitByRef.set(entry.ref, composition);
+    }
+    const slots = new Set();
+    const customOutfits = rawSet.customOutfits.map(entry => {
+      if (!entry || typeof entry.slotGroup !== "string" || typeof entry.outfitRef !== "string" || !outfitByRef.has(entry.outfitRef)) throw exchangeError("invalid-outfit-ref", "套装引用了不存在的自定义服装");
+      if (slots.has(entry.slotGroup)) throw exchangeError("duplicate-set-slot", "套装包含重复的自定义服装部位");
+      if (outfitByRef.get(entry.outfitRef).slotGroup !== entry.slotGroup) throw exchangeError("slot-reference-mismatch", "套装的自定义服装部位不一致");
+      slots.add(entry.slotGroup);
+      return { slotGroup: entry.slotGroup, outfitRef: entry.outfitRef };
+    });
+    return {
+      set: { name: String(rawSet.name || "未命名套装").slice(0, 60), appearance, customOutfits },
+      outfits: [...outfitByRef].map(([ref, composition]) => ({ ref, composition })),
+      metadata: {
+        createdAt: typeof envelope.createdAt === "string" ? envelope.createdAt.slice(0, 40) : null,
+        pluginVersion: typeof envelope.pluginVersion === "string" ? envelope.pluginVersion.slice(0, 24) : null,
+      },
+    };
+  }
+
+  function buildSetImportPlan(parsed, data = wardrobe) {
+    if (!parsed?.set || !Array.isArray(parsed.outfits)) throw exchangeError("invalid-set-plan", "套装导入计划无效");
+    if (data.sets.length >= MAX_SETS) throw exchangeError("too-many-sets", `套装衣柜最多保存 ${MAX_SETS} 套`);
+    const candidateSchemes = cloneJSON(data.schemes);
+    const signatures = new Map(candidateSchemes.map(scheme => [compositionSignature(scheme.composition), scheme.id]));
+    const refToId = new Map();
+    const report = { appearanceImported: 0, appearanceMissing: 0, outfitsCreated: 0, outfitsReused: 0, outfitsSkipped: 0, missingLayers: 0 };
+    for (const entry of parsed.outfits) {
+      const unfiltered = normalizeComposition(entry.composition, { validateReferences: false });
+      const available = normalizeComposition(entry.composition);
+      report.missingLayers += Math.max(0, unfiltered.layers.length - available.layers.length) + Math.max(0, unfiltered.recycle.length - available.recycle.length);
+      if (unfiltered.layers.length > 0 && available.layers.length === 0) { report.outfitsSkipped++; continue; }
+      const signature = compositionSignature(available);
+      let schemeId = signatures.get(signature);
+      if (schemeId) report.outfitsReused++;
+      else {
+        if (candidateSchemes.length >= MAX_SCHEMES) throw exchangeError("too-many-schemes", `衣柜最多保存 ${MAX_SCHEMES} 套自定义服装`);
+        const composition = cloneJSON(available);
+        composition.name = uniqueImportedSchemeName(composition.name, { schemes: candidateSchemes });
+        schemeId = uid();
+        candidateSchemes.push({ id: schemeId, composition });
+        signatures.set(signature, schemeId);
+        report.outfitsCreated++;
+      }
+      refToId.set(entry.ref, schemeId);
+    }
+    const appearance = [];
+    for (const bundle of parsed.set.appearance) {
+      const asset = typeof globalThis.AssetGet === "function" ? AssetGet(globalThis.Player?.AssetFamily || "Female3DCG", bundle.group, bundle.asset) : null;
+      if (!asset || asset.Group?.Category !== "Appearance" || asset.Name === TAG_ASSET_NAME) { report.appearanceMissing++; continue; }
+      appearance.push(normalizeAppearanceBundle(bundle));
+      report.appearanceImported++;
+    }
+    const customOutfits = parsed.set.customOutfits
+      .filter(entry => refToId.has(entry.outfitRef))
+      .map(entry => ({ slotGroup: entry.slotGroup, schemeId: refToId.get(entry.outfitRef) }));
+    const set = normalizeSet({ id: uid(), name: uniqueSetName(parsed.set.name, data), appearance, customOutfits }, { validSchemeIds: new Set(candidateSchemes.map(entry => entry.id)) });
+    const candidate = normalizeWardrobe({ ...data, schemes: candidateSchemes, sets: [set, ...data.sets], equippedIds: data.equippedIds }, { validateReferences: false });
+    compactWardrobeForStorage(candidate);
+    return { wardrobe: candidate, set, report };
+  }
+
+  function commitSetImportPlan(plan, options = {}) {
+    if (!plan?.wardrobe || !plan?.set) throw exchangeError("invalid-set-plan", "套装导入计划无效");
+    const previous = cloneJSON(wardrobe);
+    try {
+      compactWardrobeForStorage(plan.wardrobe);
+      wardrobe = normalizeWardrobe(plan.wardrobe);
+      (options.persist || persistWardrobe)();
+      return { set: cloneJSON(plan.set), report: cloneJSON(plan.report) };
+    } catch (error) {
+      wardrobe = previous;
+      throw error;
+    }
+  }
+
+
+
+  function syncFormalAppearance() {
+    if (typeof globalThis.ServerPlayerAppearanceSync === "function") ServerPlayerAppearanceSync();
+  }
+
+  function uniqueSetName(name, data = wardrobe) {
+    const base = String(name || "未命名套装").slice(0, 60);
+    const names = new Set((data?.sets || []).map(set => set.name));
+    if (!names.has(base)) return base;
+    for (let index = 1; index < 1000; index++) {
+      const suffix = index === 1 ? "（副本）" : `（副本 ${index}）`;
+      const candidate = `${base.slice(0, Math.max(0, 60 - suffix.length))}${suffix}`;
+      if (!names.has(candidate)) return candidate;
+    }
+    return `${base.slice(0, 48)}（${uid().slice(-7)}）`;
+  }
+
+  function removeSchemeAndSetReferences(schemeId, options = {}) {
+    const previous = cloneJSON(wardrobe);
+    const previousAppearance = globalThis.Player ? cloneAppearanceItems(Player.Appearance) : null;
+    const references = findSetsReferencingScheme(schemeId, wardrobe);
+    const removedScheme = wardrobe.schemes.find(entry => entry.id === schemeId);
+    const wasEquipped = wardrobe.equippedIds.includes(schemeId);
+    try {
+      const candidate = normalizeWardrobe({
+        ...wardrobe,
+        schemes: wardrobe.schemes.filter(entry => entry.id !== schemeId),
+        sets: wardrobe.sets.map(set => ({
+          ...set,
+          customOutfits: set.customOutfits.filter(entry => entry.schemeId !== schemeId),
+        })),
+        equippedIds: wardrobe.equippedIds.filter(id => id !== schemeId),
+      }, { validateReferences: false });
+      compactWardrobeForStorage(candidate, { validateReferences: false });
+      wardrobe = candidate;
+      if (wasEquipped && removedScheme && globalThis.Player) {
+        const slotGroup = schemeSlotGroup(removedScheme);
+        Player.Appearance = Player.Appearance.filter(item => !(item?.Asset?.Name === TAG_ASSET_NAME && item?.Asset?.Group?.Name === slotGroup));
+      }
+      (options.persist || persistWardrobe)();
+      if (options.sync !== false) {
+        syncEquippedSchemes();
+        syncFormalAppearance();
+      }
+      return { removedReferences: references.length };
+    } catch (error) {
+      wardrobe = previous;
+      if (previousAppearance && globalThis.Player) Player.Appearance = previousAppearance;
+      if (options.sync !== false) syncEquippedSchemes();
+      throw error;
+    }
+  }
+
+  function deleteSetTransaction(setId, options = {}) {
+    const previous = cloneJSON(wardrobe);
+    try {
+      const candidate = normalizeWardrobe({ ...wardrobe, sets: wardrobe.sets.filter(set => set.id !== setId) }, { validateReferences: false });
+      if (candidate.sets.length === wardrobe.sets.length) return false;
+      wardrobe = candidate;
+      (options.persist || persistWardrobe)();
+      return true;
+    } catch (error) {
+      wardrobe = previous;
+      throw error;
+    }
+  }
+
+  function saveCurrentSetTransaction(name, options = {}) {
+    if (wardrobe.sets.length >= MAX_SETS) throw new Error(`套装衣柜最多保存 ${MAX_SETS} 套`);
+    const captured = captureCurrentSet(uniqueSetName(name), options.character || globalThis.Player, wardrobe);
+    if (captured.anomalies.some(entry => entry.type === "orphan-tag")) throw new Error("当前外观存在没有对应自定义服装的 COE 标签，请先重新启用该服装");
+    const previous = cloneJSON(wardrobe);
+    try {
+      const candidate = normalizeWardrobe({ ...wardrobe, sets: [captured.set, ...wardrobe.sets] }, { validateReferences: false });
+      compactWardrobeForStorage(candidate, { validateReferences: false });
+      wardrobe = candidate;
+      (options.persist || persistWardrobe)();
+      return { set: cloneJSON(captured.set), anomalies: captured.anomalies };
+    } catch (error) {
+      wardrobe = previous;
+      throw error;
+    }
+  }
+
+  function applySetTransaction(set, options = {}) {
+    if (!globalThis.Player) throw new Error("当前角色不可用");
+    const plan = buildSetApplyPlan(set, globalThis.Player, wardrobe);
+    const previousWardrobe = cloneJSON(wardrobe);
+    const previousAppearance = cloneAppearanceItems(Player.Appearance);
+    try {
+      const candidateWardrobe = normalizeWardrobe({ ...wardrobe, equippedIds: plan.equippedIds }, { validateReferences: false });
+      compactWardrobeForStorage(candidateWardrobe, { validateReferences: false });
+      Player.Appearance = plan.appearance;
+      wardrobe = candidateWardrobe;
+      (options.persist || persistWardrobe)();
+      syncEquippedSchemes();
+      syncFormalAppearance();
+      return plan;
+    } catch (error) {
+      Player.Appearance = previousAppearance;
+      wardrobe = previousWardrobe;
+      syncEquippedSchemes();
+      try { syncFormalAppearance(); } catch (_) { /* best-effort rollback sync */ }
+      throw error;
+    }
+  }
+
+  function formatSetApplyReport(plan) {
+    const missingAppearance = plan.missingAppearance.length;
+    const missingSchemes = plan.missingSchemes.length;
+    if (!missingAppearance && !missingSchemes) return "套装已完整穿上";
+    return `套装已部分穿上：缺少原版外观 ${missingAppearance} 件，自定义服装 ${missingSchemes} 件`;
+  }
+
+  function showSetExport(set) {
+    try {
+      const text = createSetExchangeString(set.id);
+      const modal = openExchangeModal(`导出套装「${set.name}」`);
+      const hint = document.createElement("p");
+      hint.className = "coe-muted";
+      hint.textContent = "此字符串包含套装外观及其引用的自定义服装，可用于手动分享或备份。";
+      const textarea = document.createElement("textarea");
+      textarea.className = "coe-exchange-text";
+      textarea.readOnly = true;
+      textarea.value = text;
+      const copy = document.createElement("button");
+      copy.className = "coe-btn coe-primary";
+      copy.textContent = "复制字符串";
+      copy.addEventListener("click", () => copyExchangeText(text, textarea));
+      modal.content.append(hint, textarea);
+      modal.actions.appendChild(copy);
+      textarea.focus();
+      textarea.select();
+    } catch (error) { toast(`导出套装失败: ${error?.message || error}`, "error"); }
+  }
+
+  function showSetImport(body) {
+    const modal = openExchangeModal("导入套装");
+    const hint = document.createElement("p");
+    hint.className = "coe-muted";
+    hint.textContent = "粘贴以 COE-SET 开头的套装字符串。导入只保存，不会自动穿上。";
+    const textarea = document.createElement("textarea");
+    textarea.className = "coe-exchange-text";
+    textarea.placeholder = "COE-SET:1:…";
+    const submit = document.createElement("button");
+    submit.className = "coe-btn coe-primary";
+    submit.textContent = "检查并导入";
+    submit.addEventListener("click", () => {
+      if (!ensureWardrobeWritable()) return;
+      try {
+        const parsed = parseSetExchangeString(textarea.value);
+        const plan = buildSetImportPlan(parsed);
+        const report = plan.report;
+        const warning = report.appearanceMissing || report.outfitsSkipped || report.missingLayers
+          ? `\n\n缺少原版外观 ${report.appearanceMissing} 件；跳过自定义服装 ${report.outfitsSkipped} 件；缺少图层 ${report.missingLayers} 个。其余内容仍可使用。`
+          : "";
+        if (!confirm(`将导入套装「${plan.set.name}」。\n新建自定义服装 ${report.outfitsCreated} 件，复用 ${report.outfitsReused} 件。${warning}\n\n导入后保持未穿着，是否继续？`)) return;
+        commitSetImportPlan(plan);
+        modal.backdrop.remove();
+        renderWardrobe(body);
+        toast(`已导入套装「${plan.set.name}」`);
+      } catch (error) { toast(`导入套装失败: ${error?.message || error}`, "error"); }
+    });
+    modal.content.append(hint, textarea);
+    modal.actions.appendChild(submit);
+    textarea.focus();
+  }
+
+  function renderSetWardrobe(body) {
+    const summary = document.createElement("div");
+    summary.className = "coe-wardrobe-summary";
+    summary.textContent = persistenceBlocked
+      ? `衣柜处于只读保护：${wardrobeReadState.status}。套装不会覆盖存储。`
+      : `已保存 ${wardrobe.sets.length}/${MAX_SETS} 套完整外观。套装实时引用自定义服装，编辑服装后会自动使用新版。`;
+    body.appendChild(summary);
+    if (!wardrobe.sets.length) {
+      body.insertAdjacentHTML("beforeend", '<div class="coe-empty"><h3>套装衣柜还是空的</h3><p>点击顶部“保存当前外观”，记录身体、脸、发型、原版服装和当前 COE 自定义服装。</p></div>');
+      return;
+    }
+    const schemeIds = new Set(wardrobe.schemes.map(entry => entry.id));
+    const grid = document.createElement("div");
+    grid.className = "coe-grid";
+    for (const set of wardrobe.sets) {
+      const missing = set.customOutfits.filter(entry => !schemeIds.has(entry.schemeId)).length;
+      const card = document.createElement("article");
+      card.className = "coe-card";
+      card.innerHTML = `<div class="coe-card-title"><h3>${escapeHTML(set.name)}</h3><span class="coe-equipped-badge">${missing ? `缺少 ${missing} 件` : "完整"}</span></div><p class="coe-muted">原版外观 ${set.appearance.length} 件 · 自定义服装 ${set.customOutfits.length} 件</p><div class="coe-actions"><button class="coe-btn coe-primary" data-wear>穿上</button><button class="coe-btn" data-rename>重命名</button><button class="coe-btn" data-export>导出</button><button class="coe-btn coe-danger" data-delete>删除</button></div>`;
+      card.querySelector("[data-wear]").addEventListener("click", () => {
+        if (!ensureWardrobeWritable()) return;
+        try {
+          const plan = applySetTransaction(set);
+          toast(formatSetApplyReport(plan), plan.missingAppearance.length || plan.missingSchemes.length ? "warn" : "info");
+          renderWardrobe(body);
+        } catch (error) { toast(`穿上套装失败: ${error?.message || error}`, "error"); }
+      });
+      card.querySelector("[data-rename]").addEventListener("click", () => {
+        if (!ensureWardrobeWritable()) return;
+        const nextName = globalThis.prompt?.("套装名称", set.name);
+        if (nextName == null || !nextName.trim()) return;
+        const previous = cloneJSON(wardrobe);
+        try {
+          const target = wardrobe.sets.find(entry => entry.id === set.id);
+          target.name = String(nextName).trim().slice(0, 60);
+          wardrobe = normalizeWardrobe(wardrobe);
+          persistWardrobe();
+          renderWardrobe(body);
+        } catch (error) { wardrobe = previous; toast(`重命名失败: ${error?.message || error}`, "error"); }
+      });
+      card.querySelector("[data-export]").addEventListener("click", () => showSetExport(set));
+      card.querySelector("[data-delete]").addEventListener("click", () => {
+        if (!ensureWardrobeWritable() || !confirm(`删除套装「${set.name}」？引用的自定义服装不会被删除。`)) return;
+        try { deleteSetTransaction(set.id); renderWardrobe(body); }
+        catch (error) { toast(`删除套装失败: ${error?.message || error}`, "error"); }
+      });
+      grid.appendChild(card);
+    }
+    body.appendChild(grid);
+  }
+
+
+
   function compositionStats(composition) {
     const layers = composition?.layers || [];
     return { layers: layers.length, assets: new Set(layers.map(layer => `${layer.sourceGroup}/${layer.sourceAsset}`)).size };
@@ -2867,9 +3560,9 @@
     return false;
   }
 
-  function uniqueImportedSchemeName(name) {
+  function uniqueImportedSchemeName(name, data = wardrobe) {
     const base = String(name || "未命名方案").slice(0, 60);
-    const names = new Set(wardrobe.schemes.map(scheme => scheme.composition.name));
+    const names = new Set((data?.schemes || []).map(scheme => scheme.composition.name));
     if (!names.has(base)) return base;
     for (let index = 1; index < 1000; index++) {
       const suffix = index === 1 ? "（导入）" : `（导入 ${index}）`;
@@ -2943,13 +3636,14 @@
     if (wardrobe.schemes.length >= MAX_SCHEMES) throw new Error(`衣柜最多保存 ${MAX_SCHEMES} 套方案`);
     const parsed = parseOutfitExchangeString(text);
     const missing = parsed.missingLayers + parsed.missingRecycle;
+    if (parsed.allAssetsMissing) throw new Error("这件服装没有任何可用图层，已跳过");
     if (missing && !confirm(`当前环境缺少 ${missing} 个图层引用。继续导入后，这些部分不会显示，是否继续？`)) return false;
     const previous = cloneJSON(wardrobe);
     try {
       const composition = cloneJSON(parsed.composition);
       composition.name = uniqueImportedSchemeName(composition.name);
       const candidate = normalizeWardrobe({
-        version: WARDROBE_VERSION,
+        ...wardrobe,
         schemes: [{ id: uid(), composition }, ...wardrobe.schemes],
         equippedIds: wardrobe.equippedIds,
       });
@@ -2958,7 +3652,7 @@
       persistWardrobe();
       syncEquippedSchemes();
       renderWardrobe(body);
-      toast(`已导入「${composition.name}」，当前保持未启用`);
+      toast(missing ? `已导入「${composition.name}」；缺少 ${missing} 个图层，已保留可用部分` : `已导入「${composition.name}」，当前保持未启用`);
       return true;
     } catch (error) {
       wardrobe = previous;
@@ -3004,7 +3698,7 @@
       link.click();
       link.remove();
       setTimeout(() => URL.revokeObjectURL(url), 0);
-      toast(`已导出 ${wardrobe.schemes.length} 套服装`);
+      toast(`已导出 ${wardrobe.schemes.length} 件自定义服装和 ${wardrobe.sets.length} 套套装`);
     } catch (error) {
       toast(`导出衣柜失败: ${error?.message || error}`, "error");
     }
@@ -3027,9 +3721,10 @@
           : "未知玩家";
         const warning = persistenceBlocked ? `\n当前衣柜处于「${wardrobeReadState.status}」保护状态，本次操作会明确覆盖该状态。` : "";
         const missingWarning = parsed.missingLayers
-          ? `\n当前环境缺少 ${parsed.missingLayers} 个图层引用，影响 ${parsed.affectedSchemes} 套服装；导入后这些部分不会显示。`
+          ? `\n当前环境缺少 ${parsed.missingLayers} 个图层引用，影响 ${parsed.affectedSchemes} 件自定义服装；导入后这些部分不会显示。`
           : "";
-        if (!confirm(`文件来源：${source}\n文件包含：${parsed.wardrobe.schemes.length} 套服装\n当前衣柜：${wardrobe.schemes.length} 套服装\n\n导入会替换整个衣柜，并将所有方案设为未启用。${missingWarning}${warning}\n建议先导出当前衣柜。是否继续？`)) return;
+        const danglingWarning = parsed.missingSetReferences ? `\n另有 ${parsed.missingSetReferences} 个失效的套装引用会被清除。` : "";
+        if (!confirm(`文件来源：${source}\n文件包含：${parsed.wardrobe.schemes.length} 件自定义服装、${parsed.wardrobe.sets.length} 套套装\n当前衣柜：${wardrobe.schemes.length} 件自定义服装、${wardrobe.sets.length} 套套装\n\n导入会替换整个衣柜，并将所有自定义服装设为未启用。${missingWarning}${danglingWarning}${warning}\n建议先导出当前衣柜。是否继续？`)) return;
         const previous = wardrobe;
         const previousBlocked = persistenceBlocked;
         try {
@@ -3039,7 +3734,8 @@
           syncEquippedSchemes();
           renderWardrobe(body);
           const localOnly = wardrobeReadState.sync?.mode === "local-only";
-          toast(localOnly ? `已导入 ${wardrobe.schemes.length} 套服装，仅保存到本机` : `已导入 ${wardrobe.schemes.length} 套服装`, localOnly ? "warn" : "info");
+          const countText = `${wardrobe.schemes.length} 件自定义服装和 ${wardrobe.sets.length} 套套装`;
+          toast(localOnly ? `已导入 ${countText}，仅保存到本机` : `已导入 ${countText}`, localOnly ? "warn" : "info");
         } catch (error) {
           wardrobe = previous;
           persistenceBlocked = previousBlocked;
@@ -3053,18 +3749,31 @@
     input.click();
   }
 
-  function openWardrobe() {
+  function openWardrobe(view = wardrobeView) {
     restoreEditorAppearance();
+    wardrobeView = view === "sets" ? "sets" : "outfits";
     loadWardrobe();
     ensureEquippedIds();
     syncEquippedSchemes();
-    const exchangeMenu = '<details class="coe-menu"><summary class="coe-btn">导入导出 ▾</summary><div class="coe-menu-panel"><button data-import-outfit>导入单件服装</button><button data-import-wardrobe>导入整个衣柜</button><button data-export-wardrobe>导出整个衣柜</button></div></details>';
-    const body = rootShell("自定义服装衣柜", `<button class="coe-btn coe-primary" data-action="new">＋ 新建方案</button>${exchangeMenu}<button class="coe-btn" data-action="unequip-all">全部卸下</button><button class="coe-btn" data-action="close">关闭</button>`);
+    const exchangeMenu = '<details class="coe-menu"><summary class="coe-btn">导入导出 ▾</summary><div class="coe-menu-panel"><button data-import-outfit>导入单件服装</button><button data-import-set>导入套装</button><button data-import-wardrobe>导入整个衣柜</button><button data-export-wardrobe>导出整个衣柜</button></div></details>';
+    const primary = wardrobeView === "sets" ? "保存当前外观" : "＋ 新建自定义服装";
+    const body = rootShell("COE 衣柜", `<button class="coe-btn coe-primary" data-action="new">${primary}</button>${exchangeMenu}<button class="coe-btn" data-action="unequip-all">全部卸下</button><button class="coe-btn" data-action="close">关闭</button>`);
     uiMode = "wardrobe";
     const root = document.getElementById(ROOT_ID);
     root.classList.add("coe-wardrobe-root");
-    root.querySelector('[data-action="new"]').addEventListener("click", () => openEditor({ version: 2, name: "新方案", layers: [], recycle: [] }, null));
+    root.querySelector('[data-action="new"]').addEventListener("click", () => {
+      if (wardrobeView === "outfits") return openEditor({ version: 2, name: "新方案", layers: [], recycle: [] }, null);
+      if (!ensureWardrobeWritable()) return;
+      const name = globalThis.prompt?.("套装名称", `新套装 ${wardrobe.sets.length + 1}`);
+      if (name == null || !name.trim()) return;
+      try {
+        const result = saveCurrentSetTransaction(name.trim());
+        renderWardrobe(body);
+        toast(`已保存套装「${result.set.name}」`);
+      } catch (error) { toast(`保存套装失败: ${error?.message || error}`, "error"); }
+    });
     root.querySelector("[data-import-outfit]").addEventListener("click", () => showOutfitImport(body));
+    root.querySelector("[data-import-set]").addEventListener("click", () => showSetImport(body));
     root.querySelector("[data-import-wardrobe]").addEventListener("click", () => importWardrobeFile(body));
     root.querySelector("[data-export-wardrobe]").addEventListener("click", downloadWardrobeFile);
     root.querySelector('[data-action="unequip-all"]').addEventListener("click", () => {
@@ -3089,6 +3798,23 @@
 
   function renderWardrobe(body) {
     body.innerHTML = "";
+    const tabs = document.createElement("nav");
+    tabs.className = "coe-tool-tabs coe-wardrobe-tabs";
+    tabs.innerHTML = `<button class="coe-btn ${wardrobeView === "outfits" ? "coe-primary" : ""}" data-view="outfits">自定义服装</button><button class="coe-btn ${wardrobeView === "sets" ? "coe-primary" : ""}" data-view="sets">套装衣柜</button>`;
+    const content = document.createElement("div");
+    content.className = "coe-wardrobe-content";
+    tabs.querySelectorAll("[data-view]").forEach(button => button.addEventListener("click", () => {
+      wardrobeView = button.dataset.view === "sets" ? "sets" : "outfits";
+      const primary = document.querySelector(`#${ROOT_ID} [data-action="new"]`);
+      if (primary) primary.textContent = wardrobeView === "sets" ? "保存当前外观" : "＋ 新建自定义服装";
+      renderWardrobe(body);
+    }));
+    body.append(tabs, content);
+    if (wardrobeView === "sets") return renderSetWardrobe(content);
+    return renderOutfitWardrobe(content);
+  }
+
+  function renderOutfitWardrobe(body) {
     ensureEquippedIds();
     const equipped = new Set(wardrobe.equippedIds);
     const summary = document.createElement("div");
@@ -3126,12 +3852,15 @@
       card.querySelector("[data-export]").addEventListener("click", () => showOutfitExport(scheme));
       card.querySelector("[data-delete]").addEventListener("click", () => {
         if (!ensureWardrobeWritable()) return;
-        if (!confirm(`删除方案「${scheme.composition.name}」？此操作无法撤销。`)) return;
-        wardrobe.schemes = wardrobe.schemes.filter(entry => entry.id !== scheme.id);
-        wardrobe.equippedIds = wardrobe.equippedIds.filter(id => id !== scheme.id);
-        persistWardrobe();
-        syncEquippedSchemes();
-        renderWardrobe(body);
+        const references = findSetsReferencingScheme(scheme.id);
+        const message = references.length
+          ? `自定义服装「${scheme.composition.name}」正在被 ${references.length} 套套装使用。\n\n继续删除后，这件自定义服装也会从这些套装中移除；套装中的其他服装和外貌不会改变。\n\n是否继续？`
+          : `删除自定义服装「${scheme.composition.name}」？此操作无法撤销。`;
+        if (!confirm(message)) return;
+        try {
+          removeSchemeAndSetReferences(scheme.id);
+          renderWardrobe(body);
+        } catch (error) { toast(`删除失败: ${error?.message || error}`, "error"); }
       });
       grid.appendChild(card);
     }
@@ -4836,6 +5565,7 @@
         if (!scheme) throw new Error("找不到要导出的服装方案");
         return createOutfitExchangeString(scheme.composition);
       },
+      exportSet: setId => createSetExchangeString(setId, wardrobe),
       exportRawStorage: () => cloneJSON({ server: wardrobeReadState.server?.raw ?? null, local: wardrobeReadState.local?.raw ?? null }),
       importWardrobe: packed => {
         const result = unpackWardrobeDetailed(packed);
@@ -4909,8 +5639,10 @@
   if (globalThis.__COE_TEST_MODE__) {
     globalThis.__COE_TEST_API__ = {
       normalizeWardrobe, normalizeComposition, normalizeLayerTransform, compactWardrobeForStorage, compactCompositionForStorage, compactLayerForStorage,
+      normalizeSet, compactSetForStorage, normalizeAppearanceBundle, sanitizeSetProperty, captureAppearanceForSet, captureCurrentSet, buildSetApplyPlan, validateSetReferences, findSetsReferencingScheme,
       migrateWardrobeData, readWardrobeSchemaVersion, packWardrobe, unpackWardrobeDetailed,
-      createOutfitExchangeString, parseOutfitExchangeString, createWardrobeExchangeDocument, parseWardrobeExchangeDocument, wardrobeExportFilename, localTimestamp, sanitizeFilenamePart,
+      createOutfitExchangeString, parseOutfitExchangeString, createSetExchangeString, parseSetExchangeString, buildSetImportPlan, commitSetImportPlan, createWardrobeExchangeDocument, parseWardrobeExchangeDocument, wardrobeExportFilename, localTimestamp, sanitizeFilenamePart,
+      removeSchemeAndSetReferences, deleteSetTransaction, saveCurrentSetTransaction, applySetTransaction,
       serverSyncMessageBytes, storageFingerprint, loadWardrobe, persistWardrobe,
       computeDefaultOverallCenter, resolveOverallTransform, resolveRenderableOverallTransform, resolveNumericOrigin, transformPointAroundOverallPivot, transformPointAroundOverallPivotAxes,
       stableInsertSyntheticLayers, coeAssetLayerSort: stableInsertSyntheticLayers, analyzeSourceAsset, sanitizePlainRecord,

@@ -129,7 +129,11 @@
     const modal = openExchangeModal(title);
     modal.cancel.textContent = "取消";
     const text = document.createElement("p");
-    text.textContent = message;
+    // Support line breaks from browser confirm() messages;
+    // HTML-escape to prevent injection while preserving newlines.
+    text.innerHTML = options.html
+      ? message
+      : message.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').split(String.fromCharCode(10)).join('<br>');
     const confirmButton = document.createElement("button");
     confirmButton.className = `coe-btn ${options.danger ? "coe-danger" : "coe-primary"}`;
     confirmButton.textContent = confirmLabel || "确定";
@@ -187,7 +191,19 @@
     const parsed = parseOutfitExchangeString(text);
     const missing = parsed.missingLayers + parsed.missingRecycle;
     if (parsed.allAssetsMissing) throw new Error("这件服装没有任何可用图层，已跳过");
-    if (missing && !confirm(`当前环境缺少 ${missing} 个图层引用。继续导入后，这些部分不会显示，是否继续？`)) return false;
+    if (missing) {
+      openConfirmationModal(
+        "缺少图层",
+        `当前环境缺少 ${missing} 个图层引用。继续导入后，这些部分不会显示，是否继续？`,
+        "继续导入",
+        () => { doImportOutfit(parsed, text, body); },
+      );
+      return null;
+    }
+    return doImportOutfit(parsed, text, body);
+  }
+
+  function doImportOutfit(parsed, text, body) {
     const previous = cloneJSON(wardrobe);
     try {
       const composition = cloneJSON(parsed.composition);
@@ -202,6 +218,7 @@
       persistWardrobe();
       syncEquippedSchemes();
       renderWardrobe(body);
+      const missing = parsed.missingLayers + parsed.missingRecycle;
       toast(missing ? `已导入「${composition.name}」；缺少 ${missing} 个图层，已保留可用部分` : `已导入「${composition.name}」，当前保持未启用`);
       return true;
     } catch (error) {
@@ -223,7 +240,8 @@
     submit.textContent = "检查并导入";
     submit.addEventListener("click", () => {
       try {
-        if (importSingleOutfitString(textarea.value, body)) modal.backdrop.remove();
+        const result = importSingleOutfitString(textarea.value, body);
+        if (result === true) modal.backdrop.remove();
       } catch (error) {
         toast(`导入失败: ${error?.message || error}`, "error");
       }
@@ -234,7 +252,19 @@
   }
 
   function downloadWardrobeFile() {
-    if (persistenceBlocked && !confirm(`衣柜当前处于「${wardrobeReadState.status}」状态。将只导出当前界面选中的 ${wardrobeReadState.source || "内存"} 版本，不包含另一份冲突数据。是否继续？`)) return;
+    if (persistenceBlocked) {
+      openConfirmationModal(
+        "导出衣柜",
+        `衣柜当前处于「${wardrobeReadState.status}」状态。将只导出当前界面选中的 ${wardrobeReadState.source || "内存"} 版本，不包含另一份冲突数据。是否继续？`,
+        "继续导出",
+        doDownloadWardrobe,
+      );
+      return;
+    }
+    doDownloadWardrobe();
+  }
+
+  function doDownloadWardrobe() {
     try {
       const documentData = createWardrobeExchangeDocument(wardrobe);
       const text = JSON.stringify(documentData, null, 2);
@@ -251,6 +281,25 @@
       toast(`已导出 ${wardrobe.schemes.length} 件自定义服装和 ${wardrobe.sets.length} 套套装`);
     } catch (error) {
       toast(`导出衣柜失败: ${error?.message || error}`, "error");
+    }
+  }
+
+  function doImportWardrobe(parsed, body) {
+    const previous = cloneJSON(wardrobe);
+    const previousBlocked = persistenceBlocked;
+    try {
+      wardrobe = normalizeWardrobe({ ...parsed.wardrobe, equippedIds: [] });
+      persistenceBlocked = false;
+      persistWardrobe({ force: true });
+      syncEquippedSchemes();
+      renderWardrobe(body);
+      const localOnly = wardrobeReadState.sync?.mode === "local-only";
+      const countText = `${wardrobe.schemes.length} 件自定义服装和 ${wardrobe.sets.length} 套套装`;
+      toast(localOnly ? `已导入 ${countText}，仅保存到本机` : `已导入 ${countText}`, localOnly ? "warn" : "info");
+    } catch (error) {
+      wardrobe = previous;
+      persistenceBlocked = previousBlocked;
+      throw error;
     }
   }
 
@@ -274,23 +323,15 @@
           ? `\n当前环境缺少 ${parsed.missingLayers} 个图层引用，影响 ${parsed.affectedSchemes} 件自定义服装；导入后这些部分不会显示。`
           : "";
         const danglingWarning = parsed.missingSetReferences ? `\n另有 ${parsed.missingSetReferences} 个失效的套装引用会被清除。` : "";
-        if (!confirm(`文件来源：${source}\n文件包含：${parsed.wardrobe.schemes.length} 件自定义服装、${parsed.wardrobe.sets.length} 套套装\n当前衣柜：${wardrobe.schemes.length} 件自定义服装、${wardrobe.sets.length} 套套装\n\n导入会替换整个衣柜，并将所有自定义服装设为未启用。${missingWarning}${danglingWarning}${warning}\n建议先导出当前衣柜。是否继续？`)) return;
-        const previous = wardrobe;
-        const previousBlocked = persistenceBlocked;
-        try {
-          wardrobe = normalizeWardrobe({ ...parsed.wardrobe, equippedIds: [] });
-          persistenceBlocked = false;
-          persistWardrobe({ force: true });
-          syncEquippedSchemes();
-          renderWardrobe(body);
-          const localOnly = wardrobeReadState.sync?.mode === "local-only";
-          const countText = `${wardrobe.schemes.length} 件自定义服装和 ${wardrobe.sets.length} 套套装`;
-          toast(localOnly ? `已导入 ${countText}，仅保存到本机` : `已导入 ${countText}`, localOnly ? "warn" : "info");
-        } catch (error) {
-          wardrobe = previous;
-          persistenceBlocked = previousBlocked;
-          throw error;
-        }
+        const importMessage = `文件来源：${source}\n文件包含：${parsed.wardrobe.schemes.length} 件自定义服装、${parsed.wardrobe.sets.length} 套套装\n当前衣柜：${wardrobe.schemes.length} 件自定义服装、${wardrobe.sets.length} 套套装\n\n导入会替换整个衣柜，并将所有自定义服装设为未启用。${missingWarning}${danglingWarning}${warning}\n建议先导出当前衣柜。是否继续？`;
+        openConfirmationModal(
+          "导入衣柜",
+          importMessage,
+          "继续导入",
+          () => {
+            doImportWardrobe(parsed, body);
+          },
+        );
       } catch (error) {
         toast(`导入衣柜失败: ${error?.message || error}`, "error");
       }
@@ -403,14 +444,33 @@
       card.querySelector("[data-delete]").addEventListener("click", () => {
         if (!ensureWardrobeWritable()) return;
         const references = findSetsReferencingScheme(scheme.id);
-        const message = references.length
-          ? `自定义服装「${scheme.composition.name}」正在被 ${references.length} 套套装使用。\n\n继续删除后，这件自定义服装也会从这些套装中移除；套装中的其他服装和外貌不会改变。\n\n是否继续？`
-          : `删除自定义服装「${scheme.composition.name}」？此操作无法撤销。`;
-        if (!confirm(message)) return;
-        try {
-          removeSchemeAndSetReferences(scheme.id);
-          renderWardrobe(body);
-        } catch (error) { toast(`删除失败: ${error?.message || error}`, "error"); }
+        if (references.length) {
+          openConfirmationModal(
+            "删除自定义服装",
+            `自定义服装「${scheme.composition.name}」正在被 ${references.length} 套套装使用。\n\n继续删除后，这件自定义服装也会从这些套装中移除；套装中的其他服装和外貌不会改变。\n\n是否继续？`,
+            "确认删除",
+            () => {
+              try {
+                removeSchemeAndSetReferences(scheme.id);
+                renderWardrobe(body);
+              } catch (error) { toast(`删除失败: ${error?.message || error}`, "error"); return false; }
+            },
+            { danger: true },
+          );
+        } else {
+          openConfirmationModal(
+            "删除自定义服装",
+            `删除自定义服装「${scheme.composition.name}」？此操作无法撤销。`,
+            "确认删除",
+            () => {
+              try {
+                removeSchemeAndSetReferences(scheme.id);
+                renderWardrobe(body);
+              } catch (error) { toast(`删除失败: ${error?.message || error}`, "error"); return false; }
+            },
+            { danger: true },
+          );
+        }
       });
       grid.appendChild(card);
     }

@@ -277,12 +277,18 @@
         const warning = report.appearanceMissing || report.outfitsSkipped || report.missingLayers
           ? `\n\n缺少原版外观 ${report.appearanceMissing} 件；跳过自定义服装 ${report.outfitsSkipped} 件；缺少图层 ${report.missingLayers} 个。其余内容仍可使用。` : "";
         const overwrite = plan.replacedSet ? `\n将覆盖格子中的「${plan.replacedSet.name}」。` : "";
-        if (!confirm(`将套装「${plan.set.name}」导入第 ${targetSlot + 1} 格。${overwrite}\n新建自定义服装 ${report.outfitsCreated} 件，复用 ${report.outfitsReused} 件。${warning}\n\n导入后保持未穿着，是否继续？`)) return;
-        commitSetImportPlan(plan);
-        selectedSetSlot = targetSlot;
-        modal.backdrop.remove();
-        renderWardrobe(body);
-        toast(`已导入套装「${plan.set.name}」`);
+        openConfirmationModal(
+          `导入套装到第 ${targetSlot + 1} 格`,
+          `将套装「${plan.set.name}」导入第 ${targetSlot + 1} 格。${overwrite}\n新建自定义服装 ${report.outfitsCreated} 件，复用 ${report.outfitsReused} 件。${warning}\n\n导入后保持未穿着，是否继续？`,
+          "继续导入",
+          () => {
+            commitSetImportPlan(plan);
+            selectedSetSlot = targetSlot;
+            modal.backdrop.remove();
+            renderWardrobe(body);
+            toast(`已导入套装「${plan.set.name}」`);
+          },
+        );
       } catch (error) { toast(`导入套装失败: ${error?.message || error}`, "error"); }
     });
     modal.content.append(hint, textarea);
@@ -457,14 +463,26 @@
     toolbar.querySelector('[data-set-command="store"]').addEventListener("click", () => {
       if (!Number.isInteger(selectedSetSlot) || !ensureWardrobeWritable()) return;
       const set = selected();
-      if (set && !confirm(`将当前完整外观储存到套装「${set.name}」？\n\n这会覆盖该格子原有的外观和自定义服装引用。`)) return;
-      try {
-        const result = set
-          ? overwriteCurrentSetTransaction(selectedSetSlot)
-          : saveCurrentSetToSlotTransaction(selectedSetSlot, `新套装 ${selectedSetSlot + 1}`);
-        renderWardrobe(body);
-        toast(set ? `已更新套装「${set.name}」` : `已保存套装「${result.set.name}」`);
-      } catch (error) { toast(`储存套装失败: ${error?.message || error}`, "error"); }
+      if (set) {
+        openConfirmationModal(
+          `覆盖「${set.name}」`,
+          `将当前完整外观储存到套装「${set.name}」？\n\n这会覆盖该格子原有的外观和自定义服装引用。`,
+          "确认覆盖",
+          () => {
+            try {
+              overwriteCurrentSetTransaction(selectedSetSlot);
+              renderWardrobe(body);
+              toast(`已更新套装「${set.name}」`);
+            } catch (error) { toast(`储存套装失败: ${error?.message || error}`, "error"); return false; }
+          },
+        );
+      } else {
+        try {
+          const result = saveCurrentSetToSlotTransaction(selectedSetSlot, `新套装 ${selectedSetSlot + 1}`);
+          renderWardrobe(body);
+          toast(`已保存套装「${result.set.name}」`);
+        } catch (error) { toast(`储存套装失败: ${error?.message || error}`, "error"); }
+      }
     });
     toolbar.querySelector('[data-set-command="wear"]').addEventListener("click", () => {
       const set = selected();

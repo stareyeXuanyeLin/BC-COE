@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { load, snapshot } = require('./helpers');
+const { load, snapshot, makeAsset } = require('./helpers');
 
 function state(api, overrides = {}) {
   return api.serializeRemoteEnvelope({ t: 'STATE', s: 'remote_session', r: 1, h: 'remote_hash', z: 100, sharing: true, ...overrides });
@@ -103,6 +103,21 @@ test('control message preempts a delayed snapshot burst', () => {
   assert.deepEqual(env.sent.slice(8).map(entry => env.api.parseRemoteContent(entry.packet.Content).t), ['CLEAR', 'CHUNK']);
 });
 
+test('multiple receivers cannot overflow the twelve-message native send window', () => {
+  const timers = [];
+  const env = load({ globals: {
+    setTimeout(fn, delay) { const timer = { fn, delay, cleared: false }; timers.push(timer); return timer; },
+    clearTimeout(timer) { if (timer) timer.cleared = true; },
+  } });
+  const chunks = Array.from({ length: 8 }, (_, index) => `part${index}`);
+  env.api.enqueueRemoteSnapshotBatch({ requestId: 'request_A', session: 'session_A', revision: 1, hash: 'hash_A' }, chunks, 7);
+  env.api.enqueueRemoteSnapshotBatch({ requestId: 'request_B', session: 'session_A', revision: 1, hash: 'hash_A' }, chunks, 8);
+  assert.equal(env.sent.length, 12);
+  assert.equal(timers.length, 1);
+  assert.ok(timers[0].delay > 0 && timers[0].delay <= 1200);
+  assert.deepEqual(env.sent.slice(8).map(entry => entry.packet.Target), [8, 8, 8, 8]);
+});
+
 test('a solicited snapshot has a dedicated chunk budget independent of control rate', () => {
   const { api } = load();
   const request = { requestId: 'request_A', session: 'session_A', revision: 1, hash: 'hash_A' };
@@ -111,6 +126,14 @@ test('a solicited snapshot has a dedicated chunk budget independent of control r
     assert.equal(api.acceptRequestedRemoteChunk(7, { t: 'CHUNK', ...request, index: 0, count: 1, data: 'a' }), true);
   }
   assert.equal(api.acceptRequestedRemoteChunk(7, { t: 'CHUNK', ...request, index: 0, count: 1, data: 'a' }), false);
+});
+
+test('new chunk progress refreshes the request activity timestamp', () => {
+  const { api } = load();
+  const request = { requestId: 'request_A', session: 'session_A', revision: 1, hash: 'hash_A' };
+  api.setPendingRequest(7, request);
+  api.addRemoteChunk(7, { t: 'CHUNK', ...request, index: 0, count: 2, data: 'a' }, 5000);
+  assert.equal(api.pendingRequestFor(7).lastProgressAt, 5000);
 });
 
 test('REQUEST uses cached chunks and sends a small snapshot in one synchronous burst', async () => {
@@ -137,4 +160,48 @@ test('member join announces cached STATE immediately without a random timer', ()
   const envelope = env.api.parseRemoteContent(env.sent[0].packet.Content);
   assert.equal(envelope.t, 'STATE');
   assert.equal(env.sent[0].packet.Target, 7);
+});
+
+test('member join rebuilds a dirty local snapshot instead of cancelling it and sending stale STATE', async () => {
+  const asset = makeAsset();
+  const env = load({ assets: [asset] });
+  env.api.setLocalRemoteStateForTest({ session: 'session_A', revision: 0, hash: '', canonical: JSON.stringify({ v: 1, m: [], l: [] }), snapshot: { v: 1, m: [], l: [] } });
+  env.api.setActiveCompositionForTest({
+    version: 6,
+    materials: [{ id: 'm', sourceGroup: 'Cloth', sourceAsset: 'Dress', colors: ['#fff'], sourceProperty: {} }],
+    layers: [{ materialId: 'm', sourceGroup: 'Cloth', sourceAsset: 'Dress', sourceLayer: 'Base', sourceLayerIndex: 0, priority: 10, offsetX: 0, offsetY: 0, opacity: 1 }],
+    recycle: [],
+  });
+  env.api.setRemotePrefsForTest({ sharingEnabled: true, receivingEnabled: true });
+  env.api.scheduleLocalRemoteBuild();
+  assert.equal(env.api.getLocalRemoteStateForTest().dirty, true);
+  await env.api.announceLocalRemoteState(7);
+  const current = env.api.getLocalRemoteStateForTest();
+  assert.equal(current.dirty, false);
+  assert.equal(current.snapshot.l.length, 1);
+  assert.ok(current.hash);
+  assert.equal(env.sent.length, 1);
+  const stateEnvelope = env.api.parseRemoteContent(env.sent[0].packet.Content);
+  assert.equal(stateEnvelope.t, 'STATE');
+  assert.equal(stateEnvelope.sharing, true);
+  assert.equal(env.sent[0].packet.Target, 7);
+});
+
+test('initial room hydration suppresses per-member STATE and sends one broadcast after sync', async () => {
+  const env = load();
+  const hooks = {};
+  env.api.setLocalRemoteStateForTest({ session: 'session_A', revision: 0, hash: '', canonical: '', snapshot: { v: 1, m: [], l: [] } });
+  env.api.installAllHooksForTest({ hookFunction(name, _priority, fn) { hooks[name] = fn; } });
+  hooks.ChatRoomSync([], args => {
+    hooks.ChatRoomSyncMemberJoin([{ SourceMemberNumber: 7 }], () => undefined);
+    hooks.ChatRoomSyncMemberJoin([{ SourceMemberNumber: 8 }], () => undefined);
+    hooks.ChatRoomSyncMemberJoin([{ SourceMemberNumber: 9 }], () => undefined);
+    return args;
+  });
+  assert.equal(env.sent.length, 0);
+  await Promise.resolve();
+  assert.equal(env.sent.length, 1);
+  const envelope = env.api.parseRemoteContent(env.sent[0].packet.Content);
+  assert.equal(envelope.t, 'STATE');
+  assert.equal(env.sent[0].packet.Target, undefined);
 });

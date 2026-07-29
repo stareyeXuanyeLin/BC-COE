@@ -5631,6 +5631,7 @@
     }
     assembly.parts.set(envelope.index, envelope.data);
     assembly.encodedBytes += envelope.data.length;
+    pending.lastProgressAt = now;
     if (assembly.encodedBytes > REMOTE_LIMITS.chunks * REMOTE_LIMITS.chunkData) {
       remoteStore.assemblies.delete(key);
       throw new Error("remote-assembly-budget");
@@ -5691,10 +5692,14 @@
 
   const REMOTE_BURST_SIZE = 8;
   const REMOTE_NEXT_BURST_DELAY = 250;
+  const REMOTE_SEND_WINDOW_MS = 1200;
+  const REMOTE_SEND_WINDOW_CAPACITY = 12;
   let remoteControlQueue = [];
   let remoteSnapshotQueue = [];
   let remoteSendTimer = 0;
   let remoteSendPumping = false;
+  let remoteSendWindowAt = 0;
+  let remoteSendWindowCount = 0;
   let remoteMessageHandlerDispose = null;
 
   function remoteRoomMember(memberNumber) {
@@ -5713,6 +5718,29 @@
     remoteSnapshotQueue = [];
     clearRemoteSendTimer();
     remoteSendPumping = false;
+    remoteSendWindowAt = 0;
+    remoteSendWindowCount = 0;
+  }
+
+  function refreshRemoteSendWindow(now = remoteNow()) {
+    if (!remoteSendWindowAt || now - remoteSendWindowAt >= REMOTE_SEND_WINDOW_MS) {
+      remoteSendWindowAt = now;
+      remoteSendWindowCount = 0;
+    }
+    return now;
+  }
+
+  function remoteSendCapacity(now = remoteNow()) {
+    refreshRemoteSendWindow(now);
+    return Math.max(0, REMOTE_SEND_WINDOW_CAPACITY - remoteSendWindowCount);
+  }
+
+  function scheduleRemoteSendPump(delay) {
+    if (remoteSendTimer) return;
+    remoteSendTimer = scheduleRemoteTimer(() => {
+      remoteSendTimer = 0;
+      pumpRemoteSendQueue();
+    }, Math.max(0, delay));
   }
 
   function remoteSendEntry(entry) {
@@ -5720,6 +5748,7 @@
     try {
       const packet = { Type: "Hidden", Content: entry.content };
       if (entry.target != null) packet.Target = entry.target;
+      remoteSendWindowCount++;
       ServerSend("ChatRoomChat", packet);
       remoteStore.stats.messagesSent++;
       remoteStore.stats.bytesSent += utf8Bytes(entry.content);
@@ -5767,14 +5796,24 @@
     remoteSendPumping = true;
     try {
       pruneRemoteSendQueues();
-      // STATE / REQUEST / CLEAR are tiny and deduplicated by the controller. Send
-      // all currently queued control messages in this execution turn so hidden-tab
-      // timer alignment cannot add one second to every handshake step.
-      while (remoteControlQueue.length) remoteSendEntry(remoteControlQueue.shift());
+      const now = refreshRemoteSendWindow();
+      // Keep the plugin below BC's native 14 messages / 1200 ms client queue.
+      // Twelve slots leave headroom for unrelated game traffic while allowing one
+      // ordinary snapshot burst to finish in the current execution turn.
+      while (remoteControlQueue.length && remoteSendCapacity(now) > 0) remoteSendEntry(remoteControlQueue.shift());
+      if (remoteControlQueue.length) {
+        scheduleRemoteSendPump(Math.max(1, REMOTE_SEND_WINDOW_MS - (now - remoteSendWindowAt)));
+        return;
+      }
       if (!remoteSnapshotQueue.length || remoteSendTimer) return;
+      const capacity = remoteSendCapacity(now);
+      if (capacity <= 0) {
+        scheduleRemoteSendPump(Math.max(1, REMOTE_SEND_WINDOW_MS - (now - remoteSendWindowAt)));
+        return;
+      }
 
       const batch = remoteSnapshotQueue.shift();
-      const end = Math.min(batch.cursor + REMOTE_BURST_SIZE, batch.chunks.length);
+      const end = Math.min(batch.cursor + REMOTE_BURST_SIZE, batch.cursor + capacity, batch.chunks.length);
       while (batch.cursor < end) {
         const index = batch.cursor++;
         const envelope = {
@@ -5794,10 +5833,11 @@
       // another target can receive its first burst before this target continues.
       if (batch.cursor < batch.chunks.length) remoteSnapshotQueue.push(batch);
       if (remoteSnapshotQueue.length) {
-        remoteSendTimer = scheduleRemoteTimer(() => {
-          remoteSendTimer = 0;
-          pumpRemoteSendQueue();
-        }, REMOTE_NEXT_BURST_DELAY);
+        const after = remoteNow();
+        const delay = remoteSendCapacity(after) > 0
+          ? REMOTE_NEXT_BURST_DELAY
+          : Math.max(1, REMOTE_SEND_WINDOW_MS - (after - remoteSendWindowAt));
+        scheduleRemoteSendPump(delay);
       }
     } finally {
       remoteSendPumping = false;
@@ -5877,8 +5917,11 @@
   let localRemoteSnapshot = null;
   let localRemoteBuildToken = 0;
   let localRemoteStateTimer = 0;
+  let localRemoteBuildInFlight = null;
+  let localRemoteDirty = true;
   let localRemoteLastStateKey = "";
   let localRemotePreviouslyShared = false;
+  let remoteRoomSyncing = false;
 
   function remoteRandomId(bytes = 12) {
     const data = new Uint8Array(bytes);
@@ -5975,32 +6018,56 @@
 
   function scheduleLocalRemoteBuild(forceState = false) {
     cancelLocalRemoteBuildTimer();
+    localRemoteDirty = true;
     const generation = remoteStore.roomGeneration;
     const token = ++localRemoteBuildToken;
     localRemoteStateTimer = scheduleRemoteTimer(() => {
       localRemoteStateTimer = 0;
-      updateLocalRemoteSnapshot(generation, token, forceState).catch(recordLocalRemoteBuildFailure);
+      const record = { generation, token, promise: null };
+      record.promise = updateLocalRemoteSnapshot(generation, token, forceState).catch(error => {
+        recordLocalRemoteBuildFailure(error);
+        return false;
+      }).finally(() => {
+        if (localRemoteBuildInFlight === record) localRemoteBuildInFlight = null;
+      });
+      localRemoteBuildInFlight = record;
     }, 500);
+  }
+
+  function ensureFreshLocalRemoteSnapshot(generation) {
+    if (generation !== remoteStore.roomGeneration) return Promise.resolve(false);
+    if (!localRemoteDirty && localRemoteSnapshot !== null) return Promise.resolve(true);
+    if (localRemoteBuildInFlight && localRemoteBuildInFlight.generation === generation &&
+      localRemoteBuildInFlight.token === localRemoteBuildToken) return localRemoteBuildInFlight.promise;
+
+    const pendingToken = localRemoteStateTimer ? localRemoteBuildToken : ++localRemoteBuildToken;
+    cancelLocalRemoteBuildTimer();
+    const record = { generation, token: pendingToken, promise: null };
+    record.promise = updateLocalRemoteSnapshot(generation, pendingToken, false, true).catch(error => {
+      recordLocalRemoteBuildFailure(error);
+      return false;
+    }).finally(() => {
+      if (localRemoteBuildInFlight === record) localRemoteBuildInFlight = null;
+    });
+    localRemoteBuildInFlight = record;
+    return record.promise;
   }
 
   function announceLocalRemoteState(target = null, generation = remoteStore.roomGeneration) {
     if (generation !== remoteStore.roomGeneration) return Promise.resolve(false);
-    cancelLocalRemoteBuildTimer();
-    if (localRemoteSnapshot !== null) {
+    if (!localRemoteDirty && localRemoteSnapshot !== null) {
       sendRemoteState(target, true);
       return Promise.resolve(true);
     }
-    const token = ++localRemoteBuildToken;
-    return updateLocalRemoteSnapshot(generation, token, target == null).then(updated => {
-      if (updated && target != null) sendRemoteState(target, true);
-      return updated;
-    }).catch(error => {
-      recordLocalRemoteBuildFailure(error);
-      return false;
+    return ensureFreshLocalRemoteSnapshot(generation).then(updated => {
+      if (!updated) return localRemoteDirty && generation === remoteStore.roomGeneration
+        ? announceLocalRemoteState(target, generation) : false;
+      sendRemoteState(target, true);
+      return true;
     });
   }
 
-  async function updateLocalRemoteSnapshot(generation = remoteStore.roomGeneration, token = ++localRemoteBuildToken, forceState = false) {
+  async function updateLocalRemoteSnapshot(generation = remoteStore.roomGeneration, token = ++localRemoteBuildToken, forceState = false, suppressState = false) {
     let snapshot;
     try { snapshot = buildLocalRemoteSnapshot(); }
     catch (error) {
@@ -6019,6 +6086,8 @@
     localRemoteEncoded = encoded;
     localRemoteChunks = chunks;
     localRemoteHash = hash;
+    localRemoteDirty = false;
+    if (suppressState) return true;
     if (!snapshot.l.length) {
       if (localRemotePreviouslyShared) sendRemoteClear();
       sendRemoteState(null, true);
@@ -6073,23 +6142,30 @@
     return true;
   }
 
-  function scheduleRemoteRequestTimeout(memberNumber, request, generation) {
-    const delay = request.retries > 0 ? 8000 : 4000;
+  function scheduleRemoteRequestTimeout(memberNumber, request, generation, delay = 12000) {
     scheduleRemoteTimer(() => {
       if (generation !== remoteStore.roomGeneration) return;
       const pending = pendingRequestFor(memberNumber);
       if (!pending || pending.requestId !== request.requestId) return;
+      const lastActivity = Math.max(pending.createdAt || 0, pending.lastProgressAt || 0);
+      const idle = remoteNow() - lastActivity;
+      // A crowded room or BC's native send queue may stretch a legal burst. Never
+      // invalidate an assembly while new chunks are still making progress.
+      if (idle < 12000) {
+        scheduleRemoteRequestTimeout(memberNumber, pending, generation, 12000 - idle);
+        return;
+      }
       remoteStore.assemblies.delete(memberNumber);
       if (pending.retries >= 1) {
         clearPendingRequest(memberNumber, pending.requestId);
         remoteDiagnostic("request-timeout", memberNumber);
         return;
       }
-      const retry = { ...pending, requestId: remoteRandomId(9), retries: pending.retries + 1, chunkMessages: 0 };
+      const retry = { ...pending, requestId: remoteRandomId(9), retries: pending.retries + 1, chunkMessages: 0, lastProgressAt: 0 };
       setPendingRequest(memberNumber, retry);
       enqueueRemoteEnvelope({ t: "REQUEST", requestId: retry.requestId, session: retry.session, revision: retry.revision, hash: retry.hash }, memberNumber);
       scheduleRemoteRequestTimeout(memberNumber, retry, generation);
-    }, delay);
+    }, Math.max(1, delay));
   }
 
   async function handleRemoteEnvelope(sender, envelope, generation) {
@@ -6169,18 +6245,25 @@
     modApi.hookFunction("ChatRoomSync", 1000, (args, next) => {
       cancelRemoteTransport();
       resetRemoteRoom();
+      remoteRoomSyncing = true;
       const generation = remoteStore.roomGeneration;
-      const result = next(args);
+      let result;
+      try { result = next(args); }
+      catch (error) { remoteRoomSyncing = false; throw error; }
       Promise.resolve(result).then(() => {
+        remoteRoomSyncing = false;
         if (generation === remoteStore.roomGeneration) announceLocalRemoteState(null, generation);
-      }).catch(() => {});
+      }).catch(() => { remoteRoomSyncing = false; });
       return result;
     });
     modApi.hookFunction("ChatRoomSyncMemberJoin", 1000, (args, next) => {
       const result = next(args);
       const memberNumber = Number(args[0]?.SourceMemberNumber ?? args[0]?.MemberNumber ?? args[0]);
       const generation = remoteStore.roomGeneration;
-      if (Number.isInteger(memberNumber)) announceLocalRemoteState(memberNumber, generation);
+      // Initial room hydration may emit one join callback for every existing
+      // character. The broadcast STATE after ChatRoomSync covers them all; sending
+      // a targeted STATE for each entry only floods BC's native send queue.
+      if (!remoteRoomSyncing && Number.isInteger(memberNumber)) announceLocalRemoteState(memberNumber, generation);
       return result;
     });
     modApi.hookFunction("ChatRoomSyncMemberLeave", 1000, (args, next) => {
@@ -6220,6 +6303,9 @@
     localRemoteEncoded = "";
     localRemoteChunks = [];
     localRemoteSnapshot = null;
+    localRemoteBuildInFlight = null;
+    localRemoteDirty = true;
+    remoteRoomSyncing = false;
     if (!installRemoteMessageHandler()) throw new Error("remote-message-handler-unavailable");
     scheduleLocalRemoteBuild(true);
   }
@@ -6401,9 +6487,9 @@
       parseRemoteContent, serializeRemoteEnvelope, encodeRemoteText, decodeRemoteText, splitRemoteData,
       createRemoteStore, setRemotePeer, setPendingRequest, pendingRequestFor, addRemoteChunk, expireRemoteAssemblies,
       acceptRemoteSnapshot, clearRemoteMember, onRemoteMessage, handleRemoteEnvelope, buildLocalRemoteSnapshot, updateLocalRemoteSnapshot,
-      enqueueRemoteEnvelope, enqueueRemoteSnapshotBatch, pumpRemoteSendQueue, cancelRemoteTransport, acceptRequestedRemoteChunk, announceLocalRemoteState,
+      enqueueRemoteEnvelope, enqueueRemoteSnapshotBatch, pumpRemoteSendQueue, cancelRemoteTransport, acceptRequestedRemoteChunk, scheduleLocalRemoteBuild, announceLocalRemoteState,
       getRemoteStoreForTest: () => remoteStore,
-      getLocalRemoteStateForTest: () => ({ session: localPeerSessionId, revision: localRemoteRevision, hash: localRemoteHash, canonical: localRemoteCanonical, encoded: localRemoteEncoded, chunks: localRemoteChunks.slice(), snapshot: localRemoteSnapshot, buildToken: localRemoteBuildToken }),
+      getLocalRemoteStateForTest: () => ({ session: localPeerSessionId, revision: localRemoteRevision, hash: localRemoteHash, canonical: localRemoteCanonical, encoded: localRemoteEncoded, chunks: localRemoteChunks.slice(), snapshot: localRemoteSnapshot, buildToken: localRemoteBuildToken, dirty: localRemoteDirty }),
       resetRemoteRoomForTest: resetRemoteRoom,
       setRemotePrefsForTest: value => { remotePrefs = { sharingEnabled: value?.sharingEnabled === true, receivingEnabled: value?.receivingEnabled === true }; },
       setLocalRemoteStateForTest: value => {
@@ -6415,6 +6501,8 @@
         localRemoteChunks = value.chunks ?? (localRemoteEncoded ? splitRemoteData(localRemoteEncoded) : []);
         localRemoteSnapshot = value.snapshot;
         localRemoteBuildToken = value.buildToken ?? localRemoteBuildToken;
+        localRemoteBuildInFlight = null;
+        localRemoteDirty = value.dirty ?? false;
       },
       setActiveCompositionForTest: value => { activeComposition = value; },
       setPreviewCompositionForTest: (character, value) => { if (value) previewCompositionByCharacter.set(character, value); else previewCompositionByCharacter.delete(character); },

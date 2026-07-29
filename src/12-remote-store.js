@@ -136,6 +136,7 @@
     }
     assembly.parts.set(envelope.index, envelope.data);
     assembly.encodedBytes += envelope.data.length;
+    pending.lastProgressAt = now;
     if (assembly.encodedBytes > REMOTE_LIMITS.chunks * REMOTE_LIMITS.chunkData) {
       remoteStore.assemblies.delete(key);
       throw new Error("remote-assembly-budget");

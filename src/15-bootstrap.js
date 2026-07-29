@@ -173,9 +173,9 @@
       parseRemoteContent, serializeRemoteEnvelope, encodeRemoteText, decodeRemoteText, splitRemoteData,
       createRemoteStore, setRemotePeer, setPendingRequest, pendingRequestFor, addRemoteChunk, expireRemoteAssemblies,
       acceptRemoteSnapshot, clearRemoteMember, onRemoteMessage, handleRemoteEnvelope, buildLocalRemoteSnapshot, updateLocalRemoteSnapshot,
-      enqueueRemoteEnvelope, enqueueRemoteSnapshotBatch, pumpRemoteSendQueue, cancelRemoteTransport, acceptRequestedRemoteChunk, announceLocalRemoteState,
+      enqueueRemoteEnvelope, enqueueRemoteSnapshotBatch, pumpRemoteSendQueue, cancelRemoteTransport, acceptRequestedRemoteChunk, scheduleLocalRemoteBuild, announceLocalRemoteState,
       getRemoteStoreForTest: () => remoteStore,
-      getLocalRemoteStateForTest: () => ({ session: localPeerSessionId, revision: localRemoteRevision, hash: localRemoteHash, canonical: localRemoteCanonical, encoded: localRemoteEncoded, chunks: localRemoteChunks.slice(), snapshot: localRemoteSnapshot, buildToken: localRemoteBuildToken }),
+      getLocalRemoteStateForTest: () => ({ session: localPeerSessionId, revision: localRemoteRevision, hash: localRemoteHash, canonical: localRemoteCanonical, encoded: localRemoteEncoded, chunks: localRemoteChunks.slice(), snapshot: localRemoteSnapshot, buildToken: localRemoteBuildToken, dirty: localRemoteDirty }),
       resetRemoteRoomForTest: resetRemoteRoom,
       setRemotePrefsForTest: value => { remotePrefs = { sharingEnabled: value?.sharingEnabled === true, receivingEnabled: value?.receivingEnabled === true }; },
       setLocalRemoteStateForTest: value => {
@@ -187,6 +187,8 @@
         localRemoteChunks = value.chunks ?? (localRemoteEncoded ? splitRemoteData(localRemoteEncoded) : []);
         localRemoteSnapshot = value.snapshot;
         localRemoteBuildToken = value.buildToken ?? localRemoteBuildToken;
+        localRemoteBuildInFlight = null;
+        localRemoteDirty = value.dirty ?? false;
       },
       setActiveCompositionForTest: value => { activeComposition = value; },
       setPreviewCompositionForTest: (character, value) => { if (value) previewCompositionByCharacter.set(character, value); else previewCompositionByCharacter.delete(character); },

@@ -1,9 +1,13 @@
   const REMOTE_BURST_SIZE = 8;
   const REMOTE_NEXT_BURST_DELAY = 250;
+  const REMOTE_SEND_WINDOW_MS = 1200;
+  const REMOTE_SEND_WINDOW_CAPACITY = 12;
   let remoteControlQueue = [];
   let remoteSnapshotQueue = [];
   let remoteSendTimer = 0;
   let remoteSendPumping = false;
+  let remoteSendWindowAt = 0;
+  let remoteSendWindowCount = 0;
   let remoteMessageHandlerDispose = null;
 
   function remoteRoomMember(memberNumber) {
@@ -22,6 +26,29 @@
     remoteSnapshotQueue = [];
     clearRemoteSendTimer();
     remoteSendPumping = false;
+    remoteSendWindowAt = 0;
+    remoteSendWindowCount = 0;
+  }
+
+  function refreshRemoteSendWindow(now = remoteNow()) {
+    if (!remoteSendWindowAt || now - remoteSendWindowAt >= REMOTE_SEND_WINDOW_MS) {
+      remoteSendWindowAt = now;
+      remoteSendWindowCount = 0;
+    }
+    return now;
+  }
+
+  function remoteSendCapacity(now = remoteNow()) {
+    refreshRemoteSendWindow(now);
+    return Math.max(0, REMOTE_SEND_WINDOW_CAPACITY - remoteSendWindowCount);
+  }
+
+  function scheduleRemoteSendPump(delay) {
+    if (remoteSendTimer) return;
+    remoteSendTimer = scheduleRemoteTimer(() => {
+      remoteSendTimer = 0;
+      pumpRemoteSendQueue();
+    }, Math.max(0, delay));
   }
 
   function remoteSendEntry(entry) {
@@ -29,6 +56,7 @@
     try {
       const packet = { Type: "Hidden", Content: entry.content };
       if (entry.target != null) packet.Target = entry.target;
+      remoteSendWindowCount++;
       ServerSend("ChatRoomChat", packet);
       remoteStore.stats.messagesSent++;
       remoteStore.stats.bytesSent += utf8Bytes(entry.content);
@@ -76,14 +104,24 @@
     remoteSendPumping = true;
     try {
       pruneRemoteSendQueues();
-      // STATE / REQUEST / CLEAR are tiny and deduplicated by the controller. Send
-      // all currently queued control messages in this execution turn so hidden-tab
-      // timer alignment cannot add one second to every handshake step.
-      while (remoteControlQueue.length) remoteSendEntry(remoteControlQueue.shift());
+      const now = refreshRemoteSendWindow();
+      // Keep the plugin below BC's native 14 messages / 1200 ms client queue.
+      // Twelve slots leave headroom for unrelated game traffic while allowing one
+      // ordinary snapshot burst to finish in the current execution turn.
+      while (remoteControlQueue.length && remoteSendCapacity(now) > 0) remoteSendEntry(remoteControlQueue.shift());
+      if (remoteControlQueue.length) {
+        scheduleRemoteSendPump(Math.max(1, REMOTE_SEND_WINDOW_MS - (now - remoteSendWindowAt)));
+        return;
+      }
       if (!remoteSnapshotQueue.length || remoteSendTimer) return;
+      const capacity = remoteSendCapacity(now);
+      if (capacity <= 0) {
+        scheduleRemoteSendPump(Math.max(1, REMOTE_SEND_WINDOW_MS - (now - remoteSendWindowAt)));
+        return;
+      }
 
       const batch = remoteSnapshotQueue.shift();
-      const end = Math.min(batch.cursor + REMOTE_BURST_SIZE, batch.chunks.length);
+      const end = Math.min(batch.cursor + REMOTE_BURST_SIZE, batch.cursor + capacity, batch.chunks.length);
       while (batch.cursor < end) {
         const index = batch.cursor++;
         const envelope = {
@@ -103,10 +141,11 @@
       // another target can receive its first burst before this target continues.
       if (batch.cursor < batch.chunks.length) remoteSnapshotQueue.push(batch);
       if (remoteSnapshotQueue.length) {
-        remoteSendTimer = scheduleRemoteTimer(() => {
-          remoteSendTimer = 0;
-          pumpRemoteSendQueue();
-        }, REMOTE_NEXT_BURST_DELAY);
+        const after = remoteNow();
+        const delay = remoteSendCapacity(after) > 0
+          ? REMOTE_NEXT_BURST_DELAY
+          : Math.max(1, REMOTE_SEND_WINDOW_MS - (after - remoteSendWindowAt));
+        scheduleRemoteSendPump(delay);
       }
     } finally {
       remoteSendPumping = false;

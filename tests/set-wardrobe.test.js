@@ -1,5 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const { load, makeAsset } = require('./helpers');
 
 function plain(value) { return JSON.parse(JSON.stringify(value)); }
@@ -17,6 +19,16 @@ function compositionFor(asset, name = '服装') {
 function appearanceAsset(group, name, allowNone = true) {
   return makeAsset(group, name, { Group: { Name: group, Family: 'Female3DCG', Category: 'Appearance', AllowNone: allowNone } });
 }
+
+test('set preview slots enter the DOM before their preview jobs are queued', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', '09-set-wardrobe.js'), 'utf8');
+  const renderSource = source.slice(source.indexOf('function renderSetWardrobe'));
+  const appendIndex = renderSource.indexOf('grid.appendChild(element);');
+  const queueIndex = renderSource.indexOf('queueSetPreview(set, element');
+  assert.ok(appendIndex >= 0, 'set slot must be appended to the grid');
+  assert.ok(queueIndex >= 0, 'populated set slot must queue its preview');
+  assert.ok(appendIndex < queueIndex, 'queue rejects canvases whose isConnected flag is still false');
+});
 
 test('wardrobe v1 migrates to v3 with fixed set slots initialized and outfit state preserved', () => {
   const { api } = load();

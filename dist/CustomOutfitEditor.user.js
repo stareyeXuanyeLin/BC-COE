@@ -3665,13 +3665,24 @@
         const job = setPreviewQueue.shift();
         if (!job || job.generation !== setPreviewGeneration || !job.canvas.isConnected) continue;
         const cached = setPreviewCache.get(job.fingerprint);
-        if (cached) { paintSetPreview(job.canvas, cached); job.slot.classList.remove("coe-loading"); continue; }
+        if (cached) {
+          paintSetPreview(job.canvas, cached);
+          job.slot.classList.remove("coe-loading", "coe-preview-failed");
+          continue;
+        }
         const result = await buildSetPreviewSnapshot(job.set, job.generation);
-        if (!result || job.generation !== setPreviewGeneration || !job.canvas.isConnected) continue;
+        if (!result) {
+          if (job.generation === setPreviewGeneration && job.canvas.isConnected) {
+            job.slot.classList.remove("coe-loading");
+            job.slot.classList.add("coe-preview-failed");
+          }
+          continue;
+        }
+        if (job.generation !== setPreviewGeneration || !job.canvas.isConnected) continue;
         setPreviewCache.set(job.fingerprint, result.snapshot);
         if (setPreviewCache.size > MAX_SETS * 2) setPreviewCache.delete(setPreviewCache.keys().next().value);
         paintSetPreview(job.canvas, result.snapshot);
-        job.slot.classList.remove("coe-loading");
+        job.slot.classList.remove("coe-loading", "coe-preview-failed");
       }
     } finally { setPreviewRunning = false; }
   }
@@ -3679,9 +3690,17 @@
   function queueSetPreview(set, slotElement, canvas, generation) {
     let fingerprint;
     try { fingerprint = setPreviewFingerprint(set); }
-    catch (error) { slotElement.classList.add("coe-preview-failed"); return; }
+    catch (error) {
+      slotElement.classList.remove("coe-loading");
+      slotElement.classList.add("coe-preview-failed");
+      return;
+    }
     const cached = setPreviewCache.get(fingerprint);
-    if (cached) { paintSetPreview(canvas, cached); slotElement.classList.remove("coe-loading"); return; }
+    if (cached) {
+      paintSetPreview(canvas, cached);
+      slotElement.classList.remove("coe-loading", "coe-preview-failed");
+      return;
+    }
     setPreviewQueue.push({ set: cloneJSON(set), slot: slotElement, canvas, fingerprint, generation });
     runSetPreviewQueue();
   }
@@ -3771,6 +3790,7 @@
       element.tabIndex = 0;
       element.setAttribute("role", "button");
       element.dataset.setSlot = String(slot);
+      grid.appendChild(element);
       if (!set) {
         element.innerHTML = `<button type="button" class="coe-set-plus" title="把当前完整外观储存到第 ${slot + 1} 格">＋</button><span class="coe-set-slot-name">第 ${slot + 1} 格</span>`;
         element.addEventListener("click", () => { selectedSetSlot = slot; updateSetSelectionUI(body); });
@@ -3796,7 +3816,6 @@
         selectedSetSlot = slot;
         updateSetSelectionUI(body);
       });
-      grid.appendChild(element);
     }
     updateSetSelectionUI(body);
   }

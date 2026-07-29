@@ -164,6 +164,7 @@
       migrateWardrobeData, readWardrobeSchemaVersion, packWardrobe, unpackWardrobeDetailed,
       createOutfitExchangeString, parseOutfitExchangeString, createSetExchangeString, parseSetExchangeString, buildSetImportPlan, commitSetImportPlan, createWardrobeExchangeDocument, parseWardrobeExchangeDocument, wardrobeExportFilename, localTimestamp, sanitizeFilenamePart,
       removeSchemeAndSetReferences, deleteSetTransaction, saveCurrentSetTransaction, saveCurrentSetToSlotTransaction, overwriteCurrentSetTransaction, setAtSlot, firstEmptySetSlot, applySetTransaction,
+      setAppearanceFingerprint, isSetCurrentlyWorn, captureSetReconnectIntent, restoreSetReconnectIntent, scheduleSetReconnectRestore,
       serverSyncMessageBytes, storageFingerprint, loadWardrobe, persistWardrobe,
       computeDefaultOverallCenter, resolveOverallTransform, resolveRenderableOverallTransform, resolveNumericOrigin, transformPointAroundOverallPivot, transformPointAroundOverallPivotAxes,
       stableInsertSyntheticLayers, coeAssetLayerSort: stableInsertSyntheticLayers, analyzeSourceAsset, sanitizePlainRecord,

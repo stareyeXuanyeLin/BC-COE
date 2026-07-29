@@ -285,8 +285,19 @@
       if (Number.isInteger(memberNumber)) clearRemoteMember(memberNumber);
       return result;
     });
-    for (const name of ["ChatRoomLeave", "ServerDisconnect"]) modApi.hookFunction(name, 1000, (args, next) => { cancelRemoteTransport(); resetRemoteRoom(); return next(args); });
-    modApi.hookFunction("CharacterLoadOnline", 1000, (args, next) => { const result = next(args); syntheticByCharacter = new WeakMap(); return result; });
+    modApi.hookFunction("ChatRoomLeave", 1000, (args, next) => { cancelRemoteTransport(); resetRemoteRoom(); return next(args); });
+    modApi.hookFunction("ServerDisconnect", 1000, (args, next) => {
+      captureSetReconnectIntent();
+      cancelRemoteTransport();
+      resetRemoteRoom();
+      return next(args);
+    });
+    modApi.hookFunction("CharacterLoadOnline", 1000, (args, next) => {
+      const result = next(args);
+      syntheticByCharacter = new WeakMap();
+      if (result === globalThis.Player) scheduleSetReconnectRestore();
+      return result;
+    });
     modApi.hookFunction("CharacterRefresh", 1000, (args, next) => {
       const result = next(args);
       if (args[0] === globalThis.Player && activeComposition) scheduleLocalRemoteBuild();

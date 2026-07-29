@@ -312,6 +312,51 @@ test('set apply keeps required body Appearance fallback when an old set omitted 
   assert.deepEqual(plain(player.Appearance[0].Property), { TypeRecord: { body: 1 } });
 });
 
+test('reconnect restores the complete worn set after the server reloads an older formal appearance', () => {
+  const eyes = appearanceAsset('Eyes', 'AnimeEyes', false);
+  const dress = appearanceAsset('Cloth', 'SetDress');
+  const oldDress = appearanceAsset('Cloth', 'OldDress');
+  const oldCoat = appearanceAsset('ClothOuter', 'OldCoat');
+  const player = { AccountName: 'A', MemberNumber: 1, AssetFamily: 'Female3DCG', Appearance: [
+    { Asset: eyes, Color: ['#55aaff'], Property: {} },
+    { Asset: oldDress, Color: ['#111111'], Property: {} },
+    { Asset: oldCoat, Color: ['#222222'], Property: {} },
+  ], AppearanceLayers: [], ExtensionSettings: {} };
+  const { api } = load({ assets: [eyes, dress, oldDress, oldCoat], player });
+  api.setWardrobeForTest({
+    schemaVersion: 3,
+    schemes: [],
+    sets: [{ id: 'set', slot: 0, name: '重连套装', appearance: [
+      { group: 'Eyes', asset: 'AnimeEyes', color: ['#55aaff'], property: {} },
+      { group: 'Cloth', asset: 'SetDress', color: ['#ffffff'], property: {} },
+    ], customOutfits: [] }],
+    equippedIds: [],
+  });
+  const set = api.setAtSlot(0);
+  assert.equal(api.captureSetReconnectIntent(), null, 'a merely selectable saved set must not count as worn');
+  api.applySetTransaction(set, { persist() {} });
+  assert.equal(api.captureSetReconnectIntent(), 'set');
+
+  player.Appearance = [
+    { Asset: eyes, Color: ['#55aaff'], Property: {} },
+    { Asset: oldDress, Color: ['#111111'], Property: {} },
+    { Asset: oldCoat, Color: ['#222222'], Property: {} },
+  ];
+  assert.equal(api.restoreSetReconnectIntent({ persist() {} }), true);
+  assert.deepEqual(plain(player.Appearance.map(item => `${item.Asset.Group.Name}/${item.Asset.Name}`).sort()), [
+    'Cloth/SetDress', 'Eyes/AnimeEyes',
+  ]);
+});
+
+test('disconnect lifecycle captures a worn set and schedules restoration after Player reload', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', '14-remote-controller.js'), 'utf8');
+  const disconnectHook = source.slice(source.indexOf('modApi.hookFunction("ServerDisconnect"'), source.indexOf('modApi.hookFunction("CharacterLoadOnline"'));
+  const onlineHook = source.slice(source.indexOf('modApi.hookFunction("CharacterLoadOnline"'), source.indexOf('modApi.hookFunction("CharacterRefresh"'));
+  assert.match(disconnectHook, /captureSetReconnectIntent\(\)/);
+  assert.match(onlineHook, /result === globalThis\.Player/);
+  assert.match(onlineHook, /scheduleSetReconnectRestore\(\)/);
+});
+
 test('set application restores Appearance and equipped ids when persistence fails', () => {
   const body = appearanceAsset('BodyUpper', 'FemaleBody', false);
   const old = appearanceAsset('BodyUpper', 'OldBody', false);

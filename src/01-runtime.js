@@ -59,6 +59,9 @@
   let wardrobe = { schemaVersion: 3, schemes: [], sets: [], equippedIds: [] };
   let wardrobeView = "outfits";
   let selectedSetSlot = null;
+  let lastAppliedSetId = null;
+  let reconnectSetId = null;
+  let reconnectSetRestoreScheduled = false;
   let setWardrobePage = 0;
   let setPreviewGeneration = 0;
   let setPreviewQueue = [];

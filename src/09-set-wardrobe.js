@@ -72,13 +72,22 @@
 
   function deleteSetTransaction(setId, options = {}) {
     const previous = cloneJSON(wardrobe);
+    const previousAppliedSetId = lastAppliedSetId;
+    const previousReconnectSetId = reconnectSetId;
     try {
       const candidate = normalizeWardrobe({ ...wardrobe, sets: wardrobe.sets.filter(set => set.id !== setId) }, { validateReferences: false });
       if (candidate.sets.length === wardrobe.sets.length) return false;
       wardrobe = candidate;
+      if (lastAppliedSetId === setId) lastAppliedSetId = null;
+      if (reconnectSetId === setId) reconnectSetId = null;
       (options.persist || persistWardrobe)();
       return true;
-    } catch (error) { wardrobe = previous; throw error; }
+    } catch (error) {
+      wardrobe = previous;
+      lastAppliedSetId = previousAppliedSetId;
+      reconnectSetId = previousReconnectSetId;
+      throw error;
+    }
   }
 
   function setAtSlot(slot, data = wardrobe) {
@@ -125,23 +134,90 @@
     return saveCurrentSetToSlotTransaction(slot, existing.name, { ...options, overwrite: true, keepName: true });
   }
 
+  function setAppearanceFingerprint(character, data, equippedIds) {
+    const captureData = { ...data, equippedIds: Array.isArray(equippedIds) ? equippedIds : data?.equippedIds || [] };
+    const captured = captureAppearanceForSet(character, captureData);
+    if (captured.anomalies.length) return null;
+    const appearance = captured.appearance
+      .map(bundle => compactAppearanceBundle(bundle))
+      .sort((left, right) => `${left.g}/${left.a}`.localeCompare(`${right.g}/${right.a}`));
+    const customOutfits = captured.customOutfits
+      .map(reference => ({ slotGroup: reference.slotGroup, schemeId: reference.schemeId }))
+      .sort((left, right) => left.slotGroup.localeCompare(right.slotGroup));
+    return JSON.stringify({ appearance, customOutfits });
+  }
+
+  function isSetCurrentlyWorn(set, character = globalThis.Player, data = wardrobe) {
+    if (!set || !character) return false;
+    try {
+      const plan = buildSetApplyPlan(set, character, data);
+      if (plan.missingAppearance.length || plan.missingSchemes.length) return false;
+      const expected = { Appearance: plan.appearance };
+      return setAppearanceFingerprint(character, data, plan.equippedIds) === setAppearanceFingerprint(expected, data, plan.equippedIds);
+    } catch (_) { return false; }
+  }
+
+  function captureSetReconnectIntent() {
+    reconnectSetId = null;
+    reconnectSetRestoreScheduled = false;
+    if (!globalThis.Player) return null;
+    const selected = Number.isInteger(selectedSetSlot) ? setAtSlot(selectedSetSlot) : null;
+    const lastApplied = lastAppliedSetId ? wardrobe.sets.find(set => set.id === lastAppliedSetId) : null;
+    const candidates = [selected, lastApplied, ...wardrobe.sets].filter(Boolean);
+    const seen = new Set();
+    for (const set of candidates) {
+      if (seen.has(set.id)) continue;
+      seen.add(set.id);
+      if (!isSetCurrentlyWorn(set, Player, wardrobe)) continue;
+      reconnectSetId = set.id;
+      return reconnectSetId;
+    }
+    return null;
+  }
+
+  function restoreSetReconnectIntent(options = {}) {
+    reconnectSetRestoreScheduled = false;
+    const setId = reconnectSetId;
+    reconnectSetId = null;
+    if (!setId || !globalThis.Player) return false;
+    const set = wardrobe.sets.find(entry => entry.id === setId);
+    if (!set) return false;
+    try {
+      applySetTransaction(set, options);
+      return true;
+    } catch (error) {
+      warn(`重连后恢复套装「${set.name}」失败`, error);
+      return false;
+    }
+  }
+
+  function scheduleSetReconnectRestore() {
+    if (!reconnectSetId || reconnectSetRestoreScheduled) return false;
+    reconnectSetRestoreScheduled = true;
+    setTimeout(() => restoreSetReconnectIntent(), 0);
+    return true;
+  }
+
   function applySetTransaction(set, options = {}) {
     if (!globalThis.Player) throw new Error("当前角色不可用");
     const plan = buildSetApplyPlan(set, globalThis.Player, wardrobe);
     const previousWardrobe = cloneJSON(wardrobe);
     const previousAppearance = cloneAppearanceItems(Player.Appearance);
+    const previousAppliedSetId = lastAppliedSetId;
     try {
       const candidateWardrobe = normalizeWardrobe({ ...wardrobe, equippedIds: plan.equippedIds }, { validateReferences: false });
       compactWardrobeForStorage(candidateWardrobe, { validateReferences: false });
       Player.Appearance = plan.appearance;
       wardrobe = candidateWardrobe;
       (options.persist || persistWardrobe)();
+      lastAppliedSetId = set.id;
       syncEquippedSchemes();
       syncFormalAppearance();
       return plan;
     } catch (error) {
       Player.Appearance = previousAppearance;
       wardrobe = previousWardrobe;
+      lastAppliedSetId = previousAppliedSetId;
       syncEquippedSchemes();
       try { syncFormalAppearance(); } catch (_) { /* best-effort rollback sync */ }
       throw error;

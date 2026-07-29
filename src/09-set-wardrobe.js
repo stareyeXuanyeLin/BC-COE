@@ -240,6 +240,7 @@
     if (!character) return;
     previewCompositionByCharacter.delete(character);
     syntheticByCharacter.delete(character);
+    if (typeof clearPreviewTextureTracking === "function") clearPreviewTextureTracking(character);
     try { if (typeof globalThis.CharacterDelete === "function") CharacterDelete(character, false); } catch (_) { /* best effort */ }
     try { if (character.Canvas) { character.Canvas.width = 0; character.Canvas.height = 0; } } catch (_) { /* best effort */ }
     try { if (character.CanvasBlink) { character.CanvasBlink.width = 0; character.CanvasBlink.height = 0; } } catch (_) { /* best effort */ }
@@ -263,12 +264,18 @@
       character.Appearance = plan.appearance;
       previewCompositionByCharacter.set(character, combineSchemes(plan.equippedIds, wardrobe));
       if (typeof globalThis.CharacterRefresh === "function") CharacterRefresh(character, false, false);
-      for (let attempt = 0; attempt < 12; attempt++) {
+      // Synthetic source textures are absent from the preview character's formal
+      // Appearance, so BC's DrawRefreshCharacterForImage cannot mark this isolated
+      // character dirty when their 1x1 placeholders finish loading. The renderer
+      // tracks those URLs for us; keep rebuilding until every observed texture is
+      // ready, with a bounded wait so a broken URL cannot stall the whole queue.
+      for (let attempt = 0; attempt < 22; attempt++) {
         if (generation !== setPreviewGeneration) return null;
         if (typeof globalThis.CharacterLoadCanvas === "function") CharacterLoadCanvas(character);
         await new Promise(resolve => setTimeout(resolve, attempt < 2 ? 0 : 60));
-        if (!character.MustDraw && attempt >= 1) break;
+        if (!character.MustDraw && !previewTexturesPending(character) && attempt >= 1) break;
       }
+      const cacheable = !previewTexturesPending(character);
       const snapshot = document.createElement("canvas");
       snapshot.width = 500;
       snapshot.height = 1000;
@@ -277,7 +284,7 @@
       context.clearRect(0, 0, snapshot.width, snapshot.height);
       if (typeof globalThis.DrawCharacter === "function") DrawCharacter(character, 0, 0, 1, false, context);
       else if (character.Canvas) context.drawImage(character.Canvas, 0, 0, snapshot.width, snapshot.height);
-      return { snapshot, plan };
+      return { snapshot, plan, cacheable };
     } catch (error) {
       warn(`套装「${set.name}」预览生成失败`, error);
       return null;
@@ -306,8 +313,10 @@
           continue;
         }
         if (job.generation !== setPreviewGeneration || !job.canvas.isConnected) continue;
-        setPreviewCache.set(job.fingerprint, result.snapshot);
-        if (setPreviewCache.size > MAX_SETS * 2) setPreviewCache.delete(setPreviewCache.keys().next().value);
+        if (result.cacheable) {
+          setPreviewCache.set(job.fingerprint, result.snapshot);
+          if (setPreviewCache.size > MAX_SETS * 2) setPreviewCache.delete(setPreviewCache.keys().next().value);
+        }
         paintSetPreview(job.canvas, result.snapshot);
         job.slot.classList.remove("coe-loading", "coe-preview-failed");
       }
@@ -391,9 +400,17 @@
     toolbar.querySelector('[data-set-command="export"]').addEventListener("click", () => { const set = selected(); if (set) showSetExport(set); });
     toolbar.querySelector('[data-set-command="delete"]').addEventListener("click", () => {
       const set = selected();
-      if (!set || !ensureWardrobeWritable() || !confirm(`删除套装「${set.name}」？引用的自定义服装不会被删除。`)) return;
-      try { deleteSetTransaction(set.id); selectedSetSlot = null; renderWardrobe(body); }
-      catch (error) { toast(`删除套装失败: ${error?.message || error}`, "error"); }
+      if (!set || !ensureWardrobeWritable()) return;
+      openConfirmationModal(
+        `删除套装「${set.name}」`,
+        "删除后无法恢复。这个操作只删除套装格子，套装引用的自定义服装会继续保留。",
+        "确认删除",
+        () => {
+          try { deleteSetTransaction(set.id); selectedSetSlot = null; renderWardrobe(body); }
+          catch (error) { toast(`删除套装失败: ${error?.message || error}`, "error"); return false; }
+        },
+        { danger: true },
+      );
     });
     body.appendChild(toolbar);
 

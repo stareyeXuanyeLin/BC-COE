@@ -87,6 +87,41 @@
   const CONTENT_MIN_PIXELS = 4;
   const CONTENT_SCAN_MAX_EDGE = 512;
   const textureContentPivotCache = new Map();
+  const pendingPreviewTexturesByCharacter = new WeakMap();
+
+  function trackPreviewTextureLoad(character, url, width, height) {
+    if (!isPreviewCompositionCharacter(character) || !url) return;
+    let pending = pendingPreviewTexturesByCharacter.get(character);
+    if (width > 1 && height > 1) {
+      pending?.delete(url);
+      return;
+    }
+    const image = typeof globalThis.GLDrawImageCache?.get === "function" ? globalThis.GLDrawImageCache.get(url) : null;
+    if (!image) return;
+    if (!pending) {
+      pending = new Set();
+      pendingPreviewTexturesByCharacter.set(character, pending);
+    }
+    if (image.complete === true && Number(image.naturalWidth || image.width) > 0) {
+      pending.delete(url);
+      character.MustDraw = true;
+      return;
+    }
+    if (pending.has(url)) return;
+    pending.add(url);
+    if (typeof image.addEventListener === "function") image.addEventListener("load", () => {
+      pending.delete(url);
+      character.MustDraw = true;
+    }, { once: true });
+  }
+
+  function previewTexturesPending(character) {
+    return (pendingPreviewTexturesByCharacter.get(character)?.size || 0) > 0;
+  }
+
+  function clearPreviewTextureTracking(character) {
+    if (character) pendingPreviewTexturesByCharacter.delete(character);
+  }
 
   // Asset metadata in BC R130 does not contain rendered texture dimensions.
   // Geometry discovered at GLDrawImage is therefore the authoritative source
@@ -101,8 +136,13 @@
     if (!character || materialId == null || layerKey == null || options?.__coeGeometryIsBlink === true) return;
     // BC only marks characters wearing a formal Appearance item dirty when its
     // texture finishes loading. COE layers are synthetic, so start our own load
-    // observer before rejecting the initial 1x1 placeholder geometry.
-    if (url) resolveTextureContentBounds(url);
+    // observer before rejecting the initial 1x1 placeholder geometry. Isolated
+    // wardrobe characters wear only COE tag assets, which vanilla's image loader
+    // cannot associate with the real source texture.
+    if (url) {
+      trackPreviewTextureLoad(character, url, texW, texH);
+      resolveTextureContentBounds(url);
+    }
     if (!(texW > 1) || !(texH > 1)) return;
     const materialMap = overallGeometryCache.get(character) || new Map();
     const layerMap = materialMap.get(materialId) || new Map();

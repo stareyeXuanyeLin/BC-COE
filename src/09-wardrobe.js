@@ -122,7 +122,27 @@
     panel.append(heading, content, actions);
     backdrop.appendChild(panel);
     document.getElementById(ROOT_ID)?.appendChild(backdrop);
-    return { backdrop, content, actions };
+    return { backdrop, content, actions, cancel };
+  }
+
+  function openConfirmationModal(title, message, confirmLabel, onConfirm, options = {}) {
+    const modal = openExchangeModal(title);
+    modal.cancel.textContent = "取消";
+    const text = document.createElement("p");
+    text.textContent = message;
+    const confirmButton = document.createElement("button");
+    confirmButton.className = `coe-btn ${options.danger ? "coe-danger" : "coe-primary"}`;
+    confirmButton.textContent = confirmLabel || "确定";
+    confirmButton.addEventListener("click", () => {
+      try {
+        if (onConfirm() === false) return;
+        modal.backdrop.remove();
+      } catch (error) { toast(`操作失败: ${error?.message || error}`, "error"); }
+    });
+    modal.content.appendChild(text);
+    modal.actions.appendChild(confirmButton);
+    confirmButton.focus();
+    return modal;
   }
 
   async function copyExchangeText(text, textarea) {

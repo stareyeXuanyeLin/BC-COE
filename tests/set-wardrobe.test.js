@@ -30,6 +30,37 @@ test('set preview slots enter the DOM before their preview jobs are queued', () 
   assert.ok(appendIndex < queueIndex, 'queue rejects canvases whose isConnected flag is still false');
 });
 
+test('isolated set previews stay pending until synthetic source textures load', () => {
+  const listeners = {};
+  const image = {
+    complete: false, naturalWidth: 0, width: 0,
+    addEventListener(name, listener) { listeners[name] = listener; },
+  };
+  const preview = { MustDraw: false };
+  const { api } = load({ globals: { GLDrawImageCache: new Map([['Assets/source.png', image]]) } });
+  api.setPreviewCompositionForTest(preview, emptyComposition());
+  api.trackPreviewTextureForTest(preview, 'Assets/source.png', 1, 1);
+  assert.equal(api.previewTexturesPendingForTest(preview), true);
+  listeners.load();
+  assert.equal(api.previewTexturesPendingForTest(preview), false);
+  assert.equal(preview.MustDraw, true);
+  api.clearPreviewTextureTrackingForTest(preview);
+});
+
+test('set preview cache accepts only snapshots whose observed textures finished loading', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', '09-set-wardrobe.js'), 'utf8');
+  assert.match(source, /!character\.MustDraw && !previewTexturesPending\(character\)/);
+  assert.match(source, /const cacheable = !previewTexturesPending\(character\)/);
+  assert.match(source, /if \(result\.cacheable\) \{\s*setPreviewCache\.set/);
+});
+
+test('set deletion uses the COE confirmation modal instead of the browser confirm dialog', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', '09-set-wardrobe.js'), 'utf8');
+  const deleteHandler = source.slice(source.indexOf("toolbar.querySelector('[data-set-command=\"delete\"]')"), source.indexOf('body.appendChild(toolbar)'));
+  assert.match(deleteHandler, /openConfirmationModal\(/);
+  assert.doesNotMatch(deleteHandler, /\bconfirm\s*\(/);
+});
+
 test('wardrobe v1 migrates to v3 with fixed set slots initialized and outfit state preserved', () => {
   const { api } = load();
   const result = api.migrateWardrobeData({ schemaVersion: 1, schemes: [{ id: 's', composition: emptyComposition() }], equippedIds: ['s'] });

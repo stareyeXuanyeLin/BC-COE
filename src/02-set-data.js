@@ -23,7 +23,10 @@
     const output = {};
     for (const [key, entry] of Object.entries(value)) {
       if (SET_PROPERTY_DENIED_KEYS.has(key)) continue;
-      if (!/^[A-Za-z0-9_]{1,48}$/.test(key)) throw new Error("set-property-key");
+      // BC uses both an empty string and localized layer names as keys for
+      // DrawingLeft/DrawingTop/OverridePriority records. They are valid data,
+      // so only length and prototype-pollution names are restricted here.
+      if (typeof key !== "string" || key.length > 80 || SET_PROPERTY_DENIED_KEYS.has(key)) throw new Error("set-property-key");
       budget.keys++;
       if (budget.keys > 96) throw new Error("set-property-keys");
       output[key] = sanitizeSetPropertyValue(entry, depth + 1, budget);
@@ -32,12 +35,17 @@
   }
 
   function sanitizeSetProperty(value) {
-    if (value == null) return {};
-    let output;
-    try { output = sanitizeSetPropertyValue(value); }
-    catch (_) { return {}; }
-    if (!output || Array.isArray(output) || typeof output !== "object") return {};
-    delete output.Expression;
+    if (value == null || typeof value !== "object" || Array.isArray(value)) return {};
+    const output = {};
+    // Preserve the BC appearance-difference fields individually. A malformed
+    // optional field must not erase a valid TypeRecord or Drawing offset.
+    const allowed = new Set(["Type", "TypeRecord", "DrawingLeft", "DrawingTop", "OverridePriority", "Opacity", "Tint"]);
+    for (const key of allowed) {
+      if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+      if (SET_PROPERTY_DENIED_KEYS.has(key)) continue;
+      try { output[key] = sanitizeSetPropertyValue(value[key]); }
+      catch (_) { /* drop only the malformed field */ }
+    }
     return utf8Bytes(output) <= 8192 ? output : {};
   }
 
@@ -187,20 +195,43 @@
     return { set, anomalies: captured.anomalies };
   }
 
+  function prepareSetAppearanceProperty(asset, rawProperty) {
+    const property = sanitizeSetProperty(rawProperty);
+    // BC normalizes ExtendedItem DrawingLeft/DrawingTop records against the
+    // current Asset layer table. Use that parser when available while keeping
+    // the sanitized fallback for test harnesses and older BC builds.
+    if (typeof globalThis.ExtendedItemParseProperties === "function") {
+      try { return ExtendedItemParseProperties(asset, property) || property; }
+      catch (_) { /* retain the safe serialized property */ }
+    }
+    return property;
+  }
+
   function buildSetApplyPlan(set, character = globalThis.Player, data = wardrobe) {
     const normalized = normalizeSet(set, { validSchemeIds: new Set((data?.schemes || []).map(entry => entry.id)), keepDangling: true });
     if (!normalized) throw new Error("invalid-set");
     const missingAppearance = [];
     const missingSchemes = [];
     const appearance = [];
+    const storedGroups = new Set(normalized.appearance.map(bundle => bundle.group));
     const expressions = new Map((character?.Appearance || []).map(item => [item?.Asset?.Group?.Name, item?.Property?.Expression]).filter(([, value]) => value != null));
+    // Keep the character's currently valid required body/face Appearance items
+    // as a compatibility fallback when an older set was saved without them.
+    // Clothing and AllowNone groups are intentionally excluded so old clothes
+    // cannot leak into a complete set application.
+    for (const item of character?.Appearance || []) {
+      const group = item?.Asset?.Group;
+      if (!group?.Name || group.Category !== "Appearance" || group.AllowNone === true || group.Clothing === true || storedGroups.has(group.Name)) continue;
+      appearance.push({ Asset: item.Asset, Color: cloneJSON(item.Color), Property: prepareSetAppearanceProperty(item.Asset, item.Property) });
+      storedGroups.add(group.Name);
+    }
     for (const bundle of normalized.appearance) {
       const asset = typeof globalThis.AssetGet === "function" ? AssetGet(character?.AssetFamily || "Female3DCG", bundle.group, bundle.asset) : null;
       if (!asset || asset.Group?.Category !== "Appearance" || asset.Name === TAG_ASSET_NAME) {
         missingAppearance.push({ group: bundle.group, asset: bundle.asset });
         continue;
       }
-      const property = sanitizeSetProperty(bundle.property);
+      const property = prepareSetAppearanceProperty(asset, bundle.property);
       if (expressions.has(bundle.group)) property.Expression = cloneJSON(expressions.get(bundle.group));
       appearance.push({ Asset: asset, Color: cloneJSON(bundle.color), Property: property });
     }

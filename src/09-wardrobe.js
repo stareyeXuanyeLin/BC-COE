@@ -290,13 +290,11 @@
     root.querySelector('[data-action="new"]').addEventListener("click", () => {
       if (wardrobeView === "outfits") return openEditor({ version: 2, name: "新方案", layers: [], recycle: [] }, null);
       if (!ensureWardrobeWritable()) return;
-      const name = globalThis.prompt?.("套装名称", `新套装 ${wardrobe.sets.length + 1}`);
-      if (name == null || !name.trim()) return;
-      try {
-        const result = saveCurrentSetTransaction(name.trim());
+      openSetNameModal("保存当前外观为套装", `新套装 ${wardrobe.sets.length + 1}`, name => {
+        const result = saveCurrentSetTransaction(name);
         renderWardrobe(body);
         toast(`已保存套装「${result.set.name}」`);
-      } catch (error) { toast(`保存套装失败: ${error?.message || error}`, "error"); }
+      });
     });
     root.querySelector("[data-import-outfit]").addEventListener("click", () => showOutfitImport(body));
     root.querySelector("[data-import-set]").addEventListener("click", () => showSetImport(body));
@@ -322,7 +320,12 @@
     body.appendChild(panel);
   }
 
+  function wardrobeRootBody(body) {
+    return body?.closest?.(".coe-body") || body;
+  }
+
   function renderWardrobe(body) {
+    body = wardrobeRootBody(body);
     body.innerHTML = "";
     const tabs = document.createElement("nav");
     tabs.className = "coe-tool-tabs coe-wardrobe-tabs";

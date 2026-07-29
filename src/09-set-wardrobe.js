@@ -1,3 +1,29 @@
+  function openSetNameModal(title, initialName, onAccept) {
+    const modal = openExchangeModal(title);
+    const label = document.createElement("label");
+    label.className = "coe-field";
+    label.innerHTML = '<span>名称</span>';
+    const input = document.createElement("input");
+    input.className = "coe-title-input";
+    input.maxLength = 60;
+    input.value = String(initialName || "").slice(0, 60);
+    label.appendChild(input);
+    const submit = document.createElement("button");
+    submit.className = "coe-btn coe-primary";
+    submit.textContent = "确定";
+    submit.addEventListener("click", () => {
+      const name = input.value.trim();
+      if (!name) { input.focus(); toast("名称不能为空", "warn"); return; }
+      try { if (onAccept(name) !== false) modal.backdrop.remove(); }
+      catch (error) { toast(`操作失败: ${error?.message || error}`, "error"); }
+    });
+    modal.content.appendChild(label);
+    modal.actions.appendChild(submit);
+    input.focus();
+    input.select();
+    return modal;
+  }
+
   function syncFormalAppearance() {
     if (typeof globalThis.ServerPlayerAppearanceSync === "function") ServerPlayerAppearanceSync();
   }
@@ -24,10 +50,7 @@
       const candidate = normalizeWardrobe({
         ...wardrobe,
         schemes: wardrobe.schemes.filter(entry => entry.id !== schemeId),
-        sets: wardrobe.sets.map(set => ({
-          ...set,
-          customOutfits: set.customOutfits.filter(entry => entry.schemeId !== schemeId),
-        })),
+        sets: wardrobe.sets.map(set => ({ ...set, customOutfits: set.customOutfits.filter(entry => entry.schemeId !== schemeId) })),
         equippedIds: wardrobe.equippedIds.filter(id => id !== schemeId),
       }, { validateReferences: false });
       compactWardrobeForStorage(candidate, { validateReferences: false });
@@ -37,10 +60,7 @@
         Player.Appearance = Player.Appearance.filter(item => !(item?.Asset?.Name === TAG_ASSET_NAME && item?.Asset?.Group?.Name === slotGroup));
       }
       (options.persist || persistWardrobe)();
-      if (options.sync !== false) {
-        syncEquippedSchemes();
-        syncFormalAppearance();
-      }
+      if (options.sync !== false) { syncEquippedSchemes(); syncFormalAppearance(); }
       return { removedReferences: references.length };
     } catch (error) {
       wardrobe = previous;
@@ -58,10 +78,7 @@
       wardrobe = candidate;
       (options.persist || persistWardrobe)();
       return true;
-    } catch (error) {
-      wardrobe = previous;
-      throw error;
-    }
+    } catch (error) { wardrobe = previous; throw error; }
   }
 
   function saveCurrentSetTransaction(name, options = {}) {
@@ -75,10 +92,7 @@
       wardrobe = candidate;
       (options.persist || persistWardrobe)();
       return { set: cloneJSON(captured.set), anomalies: captured.anomalies };
-    } catch (error) {
-      wardrobe = previous;
-      throw error;
-    }
+    } catch (error) { wardrobe = previous; throw error; }
   }
 
   function applySetTransaction(set, options = {}) {
@@ -151,8 +165,7 @@
         const plan = buildSetImportPlan(parsed);
         const report = plan.report;
         const warning = report.appearanceMissing || report.outfitsSkipped || report.missingLayers
-          ? `\n\n缺少原版外观 ${report.appearanceMissing} 件；跳过自定义服装 ${report.outfitsSkipped} 件；缺少图层 ${report.missingLayers} 个。其余内容仍可使用。`
-          : "";
+          ? `\n\n缺少原版外观 ${report.appearanceMissing} 件；跳过自定义服装 ${report.outfitsSkipped} 件；缺少图层 ${report.missingLayers} 个。其余内容仍可使用。` : "";
         if (!confirm(`将导入套装「${plan.set.name}」。\n新建自定义服装 ${report.outfitsCreated} 件，复用 ${report.outfitsReused} 件。${warning}\n\n导入后保持未穿着，是否继续？`)) return;
         commitSetImportPlan(plan);
         modal.backdrop.remove();
@@ -168,9 +181,7 @@
   function renderSetWardrobe(body) {
     const summary = document.createElement("div");
     summary.className = "coe-wardrobe-summary";
-    summary.textContent = persistenceBlocked
-      ? `衣柜处于只读保护：${wardrobeReadState.status}。套装不会覆盖存储。`
-      : `已保存 ${wardrobe.sets.length}/${MAX_SETS} 套完整外观。套装实时引用自定义服装，编辑服装后会自动使用新版。`;
+    summary.textContent = persistenceBlocked ? `衣柜处于只读保护：${wardrobeReadState.status}。套装不会覆盖存储。` : `已保存 ${wardrobe.sets.length}/${MAX_SETS} 套完整外观。套装实时引用自定义服装，编辑服装后会自动使用新版。`;
     body.appendChild(summary);
     if (!wardrobe.sets.length) {
       body.insertAdjacentHTML("beforeend", '<div class="coe-empty"><h3>套装衣柜还是空的</h3><p>点击顶部“保存当前外观”，记录身体、脸、发型、原版服装和当前 COE 自定义服装。</p></div>');
@@ -186,24 +197,21 @@
       card.innerHTML = `<div class="coe-card-title"><h3>${escapeHTML(set.name)}</h3><span class="coe-equipped-badge">${missing ? `缺少 ${missing} 件` : "完整"}</span></div><p class="coe-muted">原版外观 ${set.appearance.length} 件 · 自定义服装 ${set.customOutfits.length} 件</p><div class="coe-actions"><button class="coe-btn coe-primary" data-wear>穿上</button><button class="coe-btn" data-rename>重命名</button><button class="coe-btn" data-export>导出</button><button class="coe-btn coe-danger" data-delete>删除</button></div>`;
       card.querySelector("[data-wear]").addEventListener("click", () => {
         if (!ensureWardrobeWritable()) return;
-        try {
-          const plan = applySetTransaction(set);
-          toast(formatSetApplyReport(plan), plan.missingAppearance.length || plan.missingSchemes.length ? "warn" : "info");
-          renderWardrobe(body);
-        } catch (error) { toast(`穿上套装失败: ${error?.message || error}`, "error"); }
+        try { const plan = applySetTransaction(set); toast(formatSetApplyReport(plan), plan.missingAppearance.length || plan.missingSchemes.length ? "warn" : "info"); renderWardrobe(body); }
+        catch (error) { toast(`穿上套装失败: ${error?.message || error}`, "error"); }
       });
       card.querySelector("[data-rename]").addEventListener("click", () => {
         if (!ensureWardrobeWritable()) return;
-        const nextName = globalThis.prompt?.("套装名称", set.name);
-        if (nextName == null || !nextName.trim()) return;
-        const previous = cloneJSON(wardrobe);
-        try {
-          const target = wardrobe.sets.find(entry => entry.id === set.id);
-          target.name = String(nextName).trim().slice(0, 60);
-          wardrobe = normalizeWardrobe(wardrobe);
-          persistWardrobe();
-          renderWardrobe(body);
-        } catch (error) { wardrobe = previous; toast(`重命名失败: ${error?.message || error}`, "error"); }
+        openSetNameModal(`重命名套装「${set.name}」`, set.name, nextName => {
+          const previous = cloneJSON(wardrobe);
+          try {
+            const target = wardrobe.sets.find(entry => entry.id === set.id);
+            target.name = nextName.slice(0, 60);
+            wardrobe = normalizeWardrobe(wardrobe);
+            persistWardrobe();
+            renderWardrobe(body);
+          } catch (error) { wardrobe = previous; throw error; }
+        });
       });
       card.querySelector("[data-export]").addEventListener("click", () => showSetExport(set));
       card.querySelector("[data-delete]").addEventListener("click", () => {

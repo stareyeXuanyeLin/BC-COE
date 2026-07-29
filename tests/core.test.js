@@ -71,6 +71,16 @@ test('runtime source no longer contains the legacy formal-container mechanism', 
   ]) assert.equal(runtimeSource.includes(forbidden), false, forbidden);
 });
 
+test('set naming uses COE modal input instead of browser prompt and wardrobe rerender climbs to the root body', () => {
+  const wardrobeSource = fs.readFileSync(path.join(root, 'src', '09-wardrobe.js'), 'utf8');
+  const setSource = fs.readFileSync(path.join(root, 'src', '09-set-wardrobe.js'), 'utf8');
+  assert.doesNotMatch(wardrobeSource, /prompt\s*\(/);
+  assert.doesNotMatch(setSource, /prompt\s*\(/);
+  assert.match(setSource, /function openSetNameModal\s*\(/);
+  assert.match(wardrobeSource, /function wardrobeRootBody\s*\(/);
+  assert.match(wardrobeSource, /body = wardrobeRootBody\(body\)/);
+});
+
 test('editor module defines every helper used by the wardrobe entry flow', () => {
   const source = fs.readFileSync(path.join(root, 'src', '10-editor.js'), 'utf8');
   for (const name of ['openEditor', 'renderPoseControls', 'setPreviewPose']) {

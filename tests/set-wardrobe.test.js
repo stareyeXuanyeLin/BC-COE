@@ -29,6 +29,26 @@ test('wardrobe v1 migrates to v2 with sets initialized and outfit state preserve
   assert.equal(result.data.schemes[0].id, 's');
 });
 
+test('set Appearance Property keeps BC empty layer keys, offsets, priorities and TypeRecord differences', () => {
+  const { api } = load();
+  const property = api.sanitizeSetProperty({
+    DrawingLeft: { '': { Default: 12 }, '花钿': { Default: -3 } },
+    DrawingTop: { '': { Default: 8 } },
+    OverridePriority: { '': 7, '花钿': 9 },
+    Opacity: 0.75,
+    TypeRecord: { pattern: 3 },
+    Expression: 'Closed',
+    LockedBy: 42,
+  });
+  assert.deepEqual(plain(property), {
+    DrawingLeft: { '': { Default: 12 }, '花钿': { Default: -3 } },
+    DrawingTop: { '': { Default: 8 } },
+    OverridePriority: { '': 7, '花钿': 9 },
+    Opacity: 0.75,
+    TypeRecord: { pattern: 3 },
+  });
+});
+
 test('set normalization strips expressions, runtime lock fields, duplicate groups and dangling references', () => {
   const { api } = load();
   const wardrobe = api.normalizeWardrobe({
@@ -145,6 +165,20 @@ test('set apply plan replaces Appearance, preserves current expressions and repo
   assert.deepEqual(plain(api.getWardrobeForTest().equippedIds), ['dress']);
   assert.equal(plan.missingAppearance.length, 1);
   assert.equal(plan.missingSchemes.length, 1);
+});
+
+test('set apply keeps required body Appearance fallback when an old set omitted it', () => {
+  const body = appearanceAsset('BodyUpper', 'FemaleBody', false);
+  const eyes = appearanceAsset('Eyes', 'AnimeEyes', false);
+  const player = { AccountName: 'A', MemberNumber: 1, AssetFamily: 'Female3DCG', Appearance: [
+    { Asset: body, Color: ['#fff'], Property: { TypeRecord: { body: 1 } } },
+    { Asset: eyes, Color: ['#000'], Property: {} },
+  ], AppearanceLayers: [], ExtensionSettings: {} };
+  const { api } = load({ assets: [body, eyes], player });
+  api.setWardrobeForTest({ schemaVersion: 2, schemes: [], sets: [], equippedIds: [] });
+  api.applySetTransaction({ id: 'old', name: '旧套装', appearance: [{ group: 'Eyes', asset: 'AnimeEyes', color: ['#55aaff'], property: {} }], customOutfits: [] }, { persist() {} });
+  assert.deepEqual(plain(player.Appearance.map(item => item.Asset.Group.Name)), ['BodyUpper', 'Eyes']);
+  assert.deepEqual(plain(player.Appearance[0].Property), { TypeRecord: { body: 1 } });
 });
 
 test('set application restores Appearance and equipped ids when persistence fails', () => {

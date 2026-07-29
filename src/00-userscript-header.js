@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Bondage Club - Custom Outfit Editor
+// @name         Bondage Club - Custom Outfit Editor（dev 测试版）
 // @namespace    https://github.com/stareyeXuanyeLin/BC-COE
 // @version      1.1.0
-// @description  Custom Outfit Editor 正式版，自定义组合与同步已加载的服装素材。
+// @description  Custom Outfit Editor dev 测试版，自定义组合与同步已加载的服装素材。
 // @author       林宣夜 ＆ 佩菈
 // @match        https://www.bondageprojects.com/R*/*
 // @match        https://bondageprojects.com/R*/*

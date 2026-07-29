@@ -17,6 +17,8 @@ test('public installation routes all resolve to dev', () => {
     assert.doesNotMatch(content, /(?:single-layer-transform-rebuild|@layer-transform)/, `${name} must not reference an obsolete release branch`);
   }
 
+  assert.match(loader, /@name\s+Bondage Club - Custom Outfit Editor（dev 测试加载器）/);
+  assert.match(loader, /__CUSTOM_OUTFIT_EDITOR_DEV_LOADER__/);
   assert.match(loader, /@grant\s+GM_xmlhttpRequest/);
   assert.match(loader, /@grant\s+GM_addElement/);
   assert.match(loader, /@grant\s+unsafeWindow/);
@@ -43,7 +45,7 @@ test('remote loader fetches GitHub raw first and executes downloaded core throug
     GM_addElement(_parent, tag, attributes) {
       assert.equal(tag, 'script');
       assert.match(attributes.textContent, /sourceURL=https:\/\/raw\.githubusercontent\.com/);
-      unsafeWindow.__CUSTOM_OUTFIT_EDITOR_CORE_EVALUATED__ = true;
+      unsafeWindow.__CUSTOM_OUTFIT_EDITOR_DEV_CORE_EVALUATED__ = true;
       return {};
     },
     console: { info() {}, warn() {}, error() {} },
@@ -54,8 +56,8 @@ test('remote loader fetches GitHub raw first and executes downloaded core throug
 
   assert.equal(new URL(requested[0]).host, 'raw.githubusercontent.com');
   assert.equal(requested.length, 1);
-  assert.equal(unsafeWindow.__CUSTOM_OUTFIT_EDITOR_LOADER__, true);
-  assert.equal(unsafeWindow.__CUSTOM_OUTFIT_EDITOR_CORE_EVALUATED__, undefined);
+  assert.equal(unsafeWindow.__CUSTOM_OUTFIT_EDITOR_DEV_LOADER__, true);
+  assert.equal(unsafeWindow.__CUSTOM_OUTFIT_EDITOR_DEV_CORE_EVALUATED__, undefined);
 });
 
 test('remote loader falls back after invalid responses and clears its guard after total failure', () => {

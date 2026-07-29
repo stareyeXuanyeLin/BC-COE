@@ -1,10 +1,10 @@
 // ==UserScript==
-// @name         Bondage Club - Custom Outfit Editor（正式版加载器）
-// @name:zh-CN   Bondage Club - 自定义服装编辑器（正式版加载器）
+// @name         Bondage Club - Custom Outfit Editor（dev 测试加载器）
+// @name:zh-CN   Bondage Club - 自定义服装编辑器（dev 测试加载器）
 // @namespace    https://github.com/stareyeXuanyeLin/BC-COE
 // @version      1.3.0
-// @description  Fetches and executes the latest Custom Outfit Editor from the official branch with a privileged request and network fallback.
-// @description:zh-CN 每次进入页面时通过特权请求获取并执行正式分支的最新 Custom Outfit Editor，并在网络故障时自动切换备用源。
+// @description  Fetches and executes the latest Custom Outfit Editor from the dev branch with a privileged request and network fallback.
+// @description:zh-CN 每次进入页面时通过特权请求获取并执行 dev 分支的最新 Custom Outfit Editor，并在网络故障时自动切换备用源。
 // @author       林宣夜 ＆ 佩菈
 // @match        https://www.bondageprojects.com/R*/BondageClub*
 // @match        https://bondageprojects.com/R*/BondageClub*
@@ -36,8 +36,8 @@
     "use strict";
 
     const pageWindow = unsafeWindow;
-    const LOADER_GUARD = "__CUSTOM_OUTFIT_EDITOR_LOADER__";
-    const EXECUTION_MARKER = "__CUSTOM_OUTFIT_EDITOR_CORE_EVALUATED__";
+    const LOADER_GUARD = "__CUSTOM_OUTFIT_EDITOR_DEV_LOADER__";
+    const EXECUTION_MARKER = "__CUSTOM_OUTFIT_EDITOR_DEV_CORE_EVALUATED__";
     if (pageWindow[LOADER_GUARD]) return;
     pageWindow[LOADER_GUARD] = true;
 

@@ -87,6 +87,38 @@ test('LSCG per-layer translation survives set capture, storage normalization and
   });
 });
 
+test('large LSCG LayerOverrides above 8 KiB reloads without a per-item cutoff', () => {
+  const dress = appearanceAsset('Cloth', 'ManyLayerDress');
+  dress.Group.Clothing = true;
+  dress.Layer = Array.from({ length: 64 }, (_, index) => ({
+    Name: `Layer${index}`,
+    DrawingLeft: { '': index },
+    DrawingTop: { '': index },
+  }));
+  const poses = Array.from({ length: 8 }, (_, index) => `Pose${index}`);
+  const layerOverrides = dress.Layer.map((_, layerIndex) => ({
+    DrawingLeft: Object.fromEntries(poses.map((pose, poseIndex) => [pose, 100 + layerIndex + poseIndex])),
+    DrawingTop: Object.fromEntries(poses.map((pose, poseIndex) => [pose, 200 + layerIndex - poseIndex])),
+  }));
+  assert.ok(Buffer.byteLength(JSON.stringify({ LayerOverrides: layerOverrides }), 'utf8') > 8192);
+  const player = {
+    AccountName: 'A', MemberNumber: 1, AssetFamily: 'Female3DCG', Appearance: [{
+      Asset: dress,
+      Color: 'Default',
+      Property: { LayerOverrides: layerOverrides },
+    }], AppearanceLayers: [], ExtensionSettings: {},
+  };
+  const store = new Map();
+  const { api } = load({ assets: [dress], player, store, globals: { ServerPlayerExtensionSettingsSync() {} } });
+  api.loadWardrobe();
+  api.saveCurrentSetTransaction('多图层位移');
+
+  const state = api.loadWardrobe();
+  assert.equal(state.status, 'ok');
+  assert.equal(api.statusSnapshot().wardrobeRead.persistenceBlocked, false);
+  assert.equal(api.getWardrobeForTest().sets[0].appearance[0].property.LayerOverrides.length, 64);
+});
+
 test('set normalization strips expressions, runtime lock fields, duplicate groups and dangling references', () => {
   const { api } = load();
   const wardrobe = api.normalizeWardrobe({

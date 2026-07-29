@@ -104,7 +104,7 @@
       if (!entry || typeof entry.group !== "string" || typeof entry.asset !== "string" || entry.asset === TAG_ASSET_NAME) throw exchangeError("invalid-set-appearance", "套装包含无效外观项目");
       if (appearanceGroups.has(entry.group)) throw exchangeError("duplicate-set-group", "套装包含重复的外观部位");
       appearanceGroups.add(entry.group);
-      if (entry.property != null) sanitizeSetPropertyValue(entry.property);
+      if (entry.property != null) validateStoredSetProperty(entry.property);
       return normalizeAppearanceBundle(entry);
     });
     const outfitByRef = new Map();

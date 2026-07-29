@@ -697,7 +697,7 @@
     "MemberNumberList", "ItemMemberNumber", "RemoveTimer", "ChangeTimer", "Timer", "Craft", "Difficulty",
   ]));
 
-  function sanitizeSetPropertyValue(value, depth = 0, budget = { keys: 0 }) {
+  function sanitizeSetPropertyValue(value, depth = 0, budget = { keys: 0, maxKeys: 96 }) {
     if (value == null || typeof value === "boolean") return value;
     if (typeof value === "number") {
       if (!Number.isFinite(value) || Math.abs(value) > 1000000000) throw new Error("set-property-number");
@@ -721,7 +721,7 @@
       // so only length and prototype-pollution names are restricted here.
       if (typeof key !== "string" || key.length > 80 || SET_PROPERTY_DENIED_KEYS.has(key)) throw new Error("set-property-key");
       budget.keys++;
-      if (budget.keys > 96) throw new Error("set-property-keys");
+      if (budget.keys > (Number.isInteger(budget.maxKeys) ? budget.maxKeys : 96)) throw new Error("set-property-keys");
       output[key] = sanitizeSetPropertyValue(entry, depth + 1, budget);
     }
     return output;
@@ -771,7 +771,10 @@
       try { output[key] = key === "LayerOverrides" ? sanitizeSetLayerOverrides(value[key]) : sanitizeSetPropertyValue(value[key]); }
       catch (_) { /* drop only the malformed field */ }
     }
-    return utf8Bytes(output) <= 8192 ? output : {};
+    // Per-field structure limits keep parsing bounded. Capacity is enforced on
+    // the complete set and wardrobe so a legitimate complex item is not
+    // silently discarded merely because it owns many drawable layers.
+    return output;
   }
 
   function normalizeAppearanceBundle(raw) {
@@ -843,6 +846,16 @@
     }
   }
 
+  function validateStoredSetProperty(value) {
+    const property = value == null ? {} : value;
+    assertStoredSetPropertySafe(property);
+    // A fully populated 64-layer LSCG record can contain more than four
+    // thousand pose-coordinate keys. Its dedicated 64-layer/32-pose schema is
+    // the authoritative structural bound; set and wardrobe budgets enforce
+    // aggregate capacity without imposing an arbitrary per-item cutoff.
+    sanitizeSetPropertyValue(property, 0, { keys: 0, maxKeys: 5000 });
+  }
+
   function validateStoredSetShape(raw) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw wardrobeMigrationError("invalid-set", "衣柜包含无效的套装");
     if (typeof raw.id !== "string" || !raw.id) throw wardrobeMigrationError("invalid-set-id", "套装 ID 无效");
@@ -856,10 +869,8 @@
       }
       if (groups.has(entry.group)) throw wardrobeMigrationError("duplicate-set-group", "套装包含重复的外观部位");
       groups.add(entry.group);
-      try {
-        assertStoredSetPropertySafe(entry.property);
-        sanitizeSetPropertyValue(entry.property == null ? {} : entry.property);
-      } catch (_) { throw wardrobeMigrationError("invalid-set-property", "套装包含不安全的外观 Property"); }
+      try { validateStoredSetProperty(entry.property); }
+      catch (_) { throw wardrobeMigrationError("invalid-set-property", "套装包含不安全的外观 Property"); }
     }
     const slots = new Set();
     for (const entry of raw.customOutfits) {
@@ -3227,7 +3238,7 @@
       if (!entry || typeof entry.group !== "string" || typeof entry.asset !== "string" || entry.asset === TAG_ASSET_NAME) throw exchangeError("invalid-set-appearance", "套装包含无效外观项目");
       if (appearanceGroups.has(entry.group)) throw exchangeError("duplicate-set-group", "套装包含重复的外观部位");
       appearanceGroups.add(entry.group);
-      if (entry.property != null) sanitizeSetPropertyValue(entry.property);
+      if (entry.property != null) validateStoredSetProperty(entry.property);
       return normalizeAppearanceBundle(entry);
     });
     const outfitByRef = new Map();

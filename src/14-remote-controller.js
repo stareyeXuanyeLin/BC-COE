@@ -288,12 +288,14 @@
     modApi.hookFunction("ChatRoomLeave", 1000, (args, next) => { cancelRemoteTransport(); resetRemoteRoom(); return next(args); });
     modApi.hookFunction("ServerDisconnect", 1000, (args, next) => {
       captureSetReconnectIntent();
+      invalidateSetPreviewCache();
       cancelRemoteTransport();
       resetRemoteRoom();
       return next(args);
     });
     modApi.hookFunction("CharacterLoadOnline", 1000, (args, next) => {
       const result = next(args);
+      invalidateSetPreviewCache();
       syntheticByCharacter = new WeakMap();
       if (result === globalThis.Player) scheduleSetReconnectRestore();
       return result;

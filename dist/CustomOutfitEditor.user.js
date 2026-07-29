@@ -3758,6 +3758,14 @@
     setPreviewQueue = [];
   }
 
+  // A reconnect can leave the browser's image cache and the preview canvases at
+  // different points in their loading lifecycle. Never reuse a snapshot created
+  // before the new online character has finished loading its assets.
+  function invalidateSetPreviewCache() {
+    setPreviewCache.clear();
+    cancelSetPreviewQueue();
+  }
+
   async function buildSetPreviewSnapshot(set, generation) {
     if (typeof globalThis.CharacterLoadSimple !== "function" || !globalThis.Player) return null;
     const character = CharacterLoadSimple(`COESetPreview-${++setPreviewCharacterSerial}`);
@@ -3776,12 +3784,17 @@
       // character dirty when their 1x1 placeholders finish loading. The renderer
       // tracks those URLs for us; keep rebuilding until every observed texture is
       // ready, with a bounded wait so a broken URL cannot stall the whole queue.
-      for (let attempt = 0; attempt < 22; attempt++) {
+      for (let attempt = 0; attempt < 40; attempt++) {
         if (generation !== setPreviewGeneration) return null;
         if (typeof globalThis.CharacterLoadCanvas === "function") CharacterLoadCanvas(character);
         await new Promise(resolve => setTimeout(resolve, attempt < 2 ? 0 : 60));
-        if (!character.MustDraw && !previewTexturesPending(character) && attempt >= 1) break;
+        if (!character.MustDraw && !previewTexturesPending(character) && attempt >= 2) break;
       }
+      // The timeout is a safety boundary, not permission to capture a partial
+      // character. Capturing here used to poison setPreviewCache with a snapshot
+      // made from 1x1 texture placeholders; saving the same appearance to a new
+      // slot appeared to fix it only because that slot received a new fingerprint.
+      if (character.MustDraw || previewTexturesPending(character)) return null;
       const cacheable = !previewTexturesPending(character);
       const snapshot = document.createElement("canvas");
       snapshot.width = 500;
@@ -5983,12 +5996,14 @@
     modApi.hookFunction("ChatRoomLeave", 1000, (args, next) => { cancelRemoteTransport(); resetRemoteRoom(); return next(args); });
     modApi.hookFunction("ServerDisconnect", 1000, (args, next) => {
       captureSetReconnectIntent();
+      invalidateSetPreviewCache();
       cancelRemoteTransport();
       resetRemoteRoom();
       return next(args);
     });
     modApi.hookFunction("CharacterLoadOnline", 1000, (args, next) => {
       const result = next(args);
+      invalidateSetPreviewCache();
       syntheticByCharacter = new WeakMap();
       if (result === globalThis.Player) scheduleSetReconnectRestore();
       return result;

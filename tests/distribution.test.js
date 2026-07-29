@@ -7,13 +7,13 @@ const vm = require('node:vm');
 const root = path.resolve(__dirname, '..');
 const read = relative => fs.readFileSync(path.join(root, relative), 'utf8');
 
-test('public installation routes all resolve to main', () => {
+test('public installation routes all resolve to dev', () => {
   const header = read('src/00-userscript-header.js');
   const loader = read('dist/CustomOutfitEditor.loader.user.js');
   const readme = read('README.md');
 
   for (const [name, content] of Object.entries({ header, loader, readme })) {
-    assert.match(content, /stareyeXuanyeLin\/BC-COE\/(?:main|@main)/, `${name} must reference main`);
+    assert.match(content, /stareyeXuanyeLin\/BC-COE\/(?:dev|@dev)/, `${name} must reference dev`);
     assert.doesNotMatch(content, /(?:single-layer-transform-rebuild|@layer-transform)/, `${name} must not reference an obsolete release branch`);
   }
 
@@ -24,7 +24,7 @@ test('public installation routes all resolve to main', () => {
   assert.match(loader, /cdn\.jsdelivr\.net/);
   assert.match(loader, /fastly\.jsdelivr\.net/);
   assert.match(loader, /gcore\.jsdelivr\.net/);
-  assert.match(loader, /BC-COE@main\/dist\/CustomOutfitEditor\.user\.js/);
+  assert.match(loader, /BC-COE@dev\/dist\/CustomOutfitEditor\.user\.js/);
   assert.doesNotMatch(loader, /script\.src\s*=/);
 });
 

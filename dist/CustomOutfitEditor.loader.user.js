@@ -28,8 +28,8 @@
 // @connect      gcore.jsdelivr.net
 // @noframes
 // @run-at       document-end
-// @downloadURL  https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/main/dist/CustomOutfitEditor.loader.user.js
-// @updateURL    https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/main/dist/CustomOutfitEditor.loader.user.js
+// @downloadURL  https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/dev/dist/CustomOutfitEditor.loader.user.js
+// @updateURL    https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/dev/dist/CustomOutfitEditor.loader.user.js
 // ==/UserScript==
 
 (function () {
@@ -42,12 +42,12 @@
     pageWindow[LOADER_GUARD] = true;
 
     const cacheKey = Date.now();
-    const corePath = "stareyeXuanyeLin/BC-COE/main/dist/CustomOutfitEditor.user.js";
+    const corePath = "stareyeXuanyeLin/BC-COE/dev/dist/CustomOutfitEditor.user.js";
     const sources = Object.freeze([
         `https://raw.githubusercontent.com/${corePath}?timestamp=${cacheKey}`,
-        `https://cdn.jsdelivr.net/gh/stareyeXuanyeLin/BC-COE@main/dist/CustomOutfitEditor.user.js?timestamp=${cacheKey}`,
-        `https://fastly.jsdelivr.net/gh/stareyeXuanyeLin/BC-COE@main/dist/CustomOutfitEditor.user.js?timestamp=${cacheKey}`,
-        `https://gcore.jsdelivr.net/gh/stareyeXuanyeLin/BC-COE@main/dist/CustomOutfitEditor.user.js?timestamp=${cacheKey}`,
+        `https://cdn.jsdelivr.net/gh/stareyeXuanyeLin/BC-COE@dev/dist/CustomOutfitEditor.user.js?timestamp=${cacheKey}`,
+        `https://fastly.jsdelivr.net/gh/stareyeXuanyeLin/BC-COE@dev/dist/CustomOutfitEditor.user.js?timestamp=${cacheKey}`,
+        `https://gcore.jsdelivr.net/gh/stareyeXuanyeLin/BC-COE@dev/dist/CustomOutfitEditor.user.js?timestamp=${cacheKey}`,
     ]);
 
     function fail(message, detail) {

@@ -15,8 +15,8 @@
 // @match        http://localhost:*/*
 // @run-at       document-end
 // @grant        none
-// @downloadURL  https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/main/dist/CustomOutfitEditor.user.js
-// @updateURL    https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/main/dist/CustomOutfitEditor.user.js
+// @downloadURL  https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/dev/dist/CustomOutfitEditor.user.js
+// @updateURL    https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/dev/dist/CustomOutfitEditor.user.js
 // ==/UserScript==
 
 (() => {

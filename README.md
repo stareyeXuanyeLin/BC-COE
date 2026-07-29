@@ -1,6 +1,6 @@
-# Bondage Club - Custom Outfit Editor
+# BC-COE-dev | Custom Outfit Editor
 
-Custom Outfit Editor 是用于组合、编辑和同步已加载服装素材的自定义服装编辑器，包含图层复制、图层变换、素材整体变换、服装格标签以及跨玩家远端视觉同步。当前正式发布线路统一使用 `main` 分支。
+`BC-COE-dev` 是 Bondage Club 的 Custom Outfit Editor 开发项目目录，负责组合、编辑和同步已加载服装素材，包含图层复制、图层变换、素材整体变换、服装格标签以及跨玩家远端视觉同步。GitHub 仓库标识为 `BC-COE`，测试发布线路使用 `dev` 分支；正式发布仍由 `main` 分支维护。
 
 ## 功能
 
@@ -34,9 +34,9 @@ Custom Outfit Editor 是用于组合、编辑和同步已加载服装素材的�
 
 ### 加载器安装（推荐）
 
-[![Install Loader](https://img.shields.io/badge/Tampermonkey-%E2%86%95%20%E5%AE%89%E8%A3%85%E6%AD%A3%E5%BC%8F%E7%89%88-8B0000?labelColor=1c1c1c&logo=tampermonkey)](https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/main/dist/CustomOutfitEditor.loader.user.js)
+[![Install Loader](https://img.shields.io/badge/Tampermonkey-%E2%86%95%20%E5%AE%89%E8%A3%85%E6%AD%A3%E5%BC%8F%E7%89%88-8B0000?labelColor=1c1c1c&logo=tampermonkey)](https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/dev/dist/CustomOutfitEditor.loader.user.js)
 
-加载器每次进入游戏时使用 Tampermonkey 特权请求直接获取并执行 `main` 分支的最新核心脚本，避免浏览器跨域、脚本 MIME 与 CDN 分支缓存导致的旧版本问题；仅在 GitHub 原始文件网络不可达时使用 CDN 备用源。首次安装或升级到新版加载器时，请允许它访问列出的 GitHub 与 jsDelivr 域名。
+加载器每次进入游戏时使用 Tampermonkey 特权请求直接获取并执行 `dev` 分支的最新核心脚本，避免浏览器跨域、脚本 MIME 与 CDN 分支缓存导致的旧版本问题；仅在 GitHub 原始文件网络不可达时使用 CDN 备用源。首次安装或升级到新版加载器时，请允许它访问列出的 GitHub 与 jsDelivr 域名。
 
 请停用或删除其它 Custom Outfit Editor 版本，尤其是完整脚本与旧加载器，避免多个实例同时注册绘制 Hook。
 
@@ -44,7 +44,7 @@ Custom Outfit Editor 是用于组合、编辑和同步已加载服装素材的�
 
 直接安装：
 
-<https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/main/dist/CustomOutfitEditor.user.js>
+<https://raw.githubusercontent.com/stareyeXuanyeLin/BC-COE/dev/dist/CustomOutfitEditor.user.js>
 
 ## 多人验证
 

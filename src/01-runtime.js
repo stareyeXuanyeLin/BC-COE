@@ -11,7 +11,19 @@
   const MAX_MATERIAL_BYTES = 8192;
   const MAX_SCHEME_BYTES = 65536;
   const MAX_WARDROBE_BYTES = 262144;
+  // A typical full R130 Appearance bundle is well below 16 KiB. Keep each set
+  // bounded at 64 KiB and mirror vanilla's two pages of twelve fixed wardrobe
+  // slots. The measured AccountUpdate event remains authoritative and falls
+  // back to local-only storage instead of truncating data.
+  const MAX_SETS = 24;
+  const SETS_PER_PAGE = 12;
+  const MAX_SET_APPEARANCE_ITEMS = 80;
+  const MAX_SET_CUSTOM_OUTFITS = 40;
+  const MAX_SET_BYTES = 65536;
+  const MAX_SET_EXCHANGE_CHARS = 500000;
+  const MAX_SET_EXCHANGE_BYTES = 262144;
   const OUTFIT_EXCHANGE_FORMAT = "COE_OUTFIT";
+  const SET_EXCHANGE_FORMAT = "COE_SET";
   const WARDROBE_EXCHANGE_FORMAT = "COE_WARDROBE";
   const EXCHANGE_FORMAT_VERSION = 1;
   const MAX_OUTFIT_EXCHANGE_CHARS = 200000;
@@ -43,7 +55,19 @@
   let editing = null;
   let editingId = null;
   let syntheticByCharacter = new WeakMap();
-  let wardrobe = { schemaVersion: 1, schemes: [], equippedIds: [] };
+  let previewCompositionByCharacter = new WeakMap();
+  let wardrobe = { schemaVersion: 3, schemes: [], sets: [], equippedIds: [] };
+  let wardrobeView = "outfits";
+  let selectedSetSlot = null;
+  let lastAppliedSetId = null;
+  let reconnectSetId = null;
+  let reconnectSetRestoreScheduled = false;
+  let setWardrobePage = 0;
+  let setPreviewGeneration = 0;
+  let setPreviewQueue = [];
+  let setPreviewRunning = false;
+  let setPreviewCharacterSerial = 0;
+  const setPreviewCache = new Map();
   let wardrobeReadState = { status: "absent", source: null, server: null, local: null, conflict: false };
   let persistenceBlocked = false;
   let duplicateInstance = false;

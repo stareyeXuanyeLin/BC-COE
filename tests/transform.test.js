@@ -56,6 +56,29 @@ test('texture pivot scan reuses the loaded GLDraw image and caches its result', 
   assert.equal(pivot.y, 0.375);
 });
 
+test('texture pivot scan never requests a missing or virtual texture URL directly', () => {
+  let constructed = 0;
+  const cache = new Map();
+  const data = alphaData(4, 4, [[0, 0], [1, 0], [0, 1], [1, 1]]);
+  const image = { naturalWidth: 4, naturalHeight: 4, width: 4, height: 4, complete: true, addEventListener() {} };
+  const context = { clearRect() {}, drawImage() {}, getImageData() { return { data }; } };
+  const { api } = load({ globals: {
+    Image: function Image() { constructed++; },
+    GLDrawImageCache: cache,
+    document: { getElementById: () => null, createElement: tag => tag === 'canvas' ? { getContext: () => context } : {} },
+  } });
+
+  assert.equal(api.resolveTextureContentPivot('./Assets/Female3DCG/Suit/虚拟服装.png'), null);
+  assert.equal(constructed, 0);
+
+  cache.set('./Assets/Female3DCG/Suit/虚拟服装.png', image);
+  assert.equal(api.resolveTextureContentPivot('./Assets/Female3DCG/Suit/虚拟服装.png'), null);
+  const pivot = api.resolveTextureContentPivot('./Assets/Female3DCG/Suit/虚拟服装.png');
+  assert.equal(pivot.x, 0.25);
+  assert.equal(pivot.y, 0.25);
+  assert.equal(constructed, 0);
+});
+
 test('synthetic placeholder texture schedules a character refresh when the image finishes loading', () => {
   const listeners = {};
   const image = {
@@ -498,6 +521,60 @@ test('stale editor refs fall back to a structural canvas rebuild', () => {
   queuedFrame();
   assert.equal(canvasBuilds, 0);
   assert.equal(canvasLoads, 1);
+});
+
+test('GLDrawImage hook runs after image URL normalization and leaves ordinary no-transform layers on the original path', () => {
+  let textureLoads = 0;
+  let originalDraws = 0;
+  const env = load({ globals: {
+    GLDrawImage() {}, m4: {},
+    GLDrawLoadImage() { textureLoads++; return { width: 100, height: 80 }; },
+  } });
+  const hooks = {};
+  env.api.installHooksForTest({ hookFunction(name, priority, fn) { hooks[name] = { priority, fn }; } });
+
+  assert.equal(hooks.GLDrawImage.priority, -1);
+  const gl = { canvas: { height: 550 } };
+  const result = hooks.GLDrawImage.fn([
+    '@nomap/Assets/Female3DCG/Eyes/Eyes5.png', gl, 0, 0, {}, 0,
+  ], () => { originalDraws++; return 'drawn'; });
+
+  assert.equal(result, 'drawn');
+  assert.equal(originalDraws, 1);
+  assert.equal(textureLoads, 0);
+});
+
+test('GLDrawImage hook receives a normalized @nomap path before synthetic geometry texture lookup', () => {
+  const loadedUrls = [];
+  const env = load({ globals: {
+    GLDrawImage() {}, m4: {},
+    GLDrawLoadImage(_gl, url) { loadedUrls.push(url); return { width: 100, height: 80 }; },
+  } });
+  const hooks = {};
+  env.api.installHooksForTest({ hookFunction(name, priority, fn) { hooks[name] = { priority, fn }; } });
+
+  const imageMappingNoMapHook = {
+    priority: 0,
+    fn(args, next) {
+      if (typeof args[0] === 'string' && args[0].startsWith('@nomap/')) args[0] = args[0].substring(7);
+      return next(args);
+    },
+  };
+  const chain = [imageMappingNoMapHook, hooks.GLDrawImage].sort((a, b) => b.priority - a.priority);
+  const invoke = (index, args) => index < chain.length
+    ? chain[index].fn(args, nextArgs => invoke(index + 1, nextArgs))
+    : 'drawn';
+  const gl = { canvas: { height: 550 } };
+  const result = invoke(0, [
+    '@nomap/Assets/Female3DCG/Cloth/Dress.png', gl, 0, 0, {
+      __coeGeometryCharacter: env.player,
+      __coeGeometryMaterialId: 'm',
+      __coeGeometryLayerKey: '0:0',
+    }, 0,
+  ]);
+
+  assert.equal(result, 'drawn');
+  assert.deepEqual(loadedUrls, ['Assets/Female3DCG/Cloth/Dress.png']);
 });
 
 test('GLDrawImage transform hook retries after initialization race and recovers after overwrite', () => {

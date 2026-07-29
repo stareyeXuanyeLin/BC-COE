@@ -1,5 +1,5 @@
   const COMPOSITION_VERSION = 6;
-  const WARDROBE_SCHEMA_VERSION = 1;
+  const WARDROBE_SCHEMA_VERSION = 3;
   const LEGACY_WARDROBE_VERSION = 7;
 
   function materialKey(group, asset) {
@@ -439,9 +439,27 @@
       occupiedSlots.add(slotGroup);
       return true;
     });
+    const setIds = new Set();
+    const setSlots = new Set();
+    const sets = [];
+    for (const rawSet of Array.isArray(raw?.sets) ? raw.sets.slice(0, MAX_SETS) : []) {
+      const set = normalizeSet(rawSet, { validSchemeIds: validIds });
+      if (!set || setIds.has(set.id)) continue;
+      let slot = Number.isInteger(set.slot) && set.slot >= 0 && set.slot < MAX_SETS && !setSlots.has(set.slot) ? set.slot : null;
+      if (slot == null) {
+        slot = Array.from({ length: MAX_SETS }, (_, index) => index).find(index => !setSlots.has(index));
+      }
+      if (slot == null) break;
+      set.slot = slot;
+      setIds.add(set.id);
+      setSlots.add(slot);
+      sets.push(set);
+    }
+    sets.sort((a, b) => a.slot - b.slot);
     return {
       schemaVersion: WARDROBE_SCHEMA_VERSION,
       schemes,
+      sets,
       equippedIds,
     };
   }
@@ -530,9 +548,11 @@
 
   function compactWardrobeForStorage(data, options = {}) {
     const normalized = normalizeWardrobe(data, options);
+    const validSchemeIds = new Set(normalized.schemes.map(entry => entry.id));
     const compact = {
       schemaVersion: WARDROBE_SCHEMA_VERSION,
       schemes: normalized.schemes.map(entry => ({ id: entry.id, composition: compactCompositionForStorage(entry.composition, options) })),
+      sets: normalized.sets.map(set => compactSetForStorage(set, { validSchemeIds })),
       equippedIds: normalized.equippedIds,
     };
     if (utf8Bytes(compact) > MAX_WARDROBE_BYTES) throw new Error("wardrobe-byte-budget");

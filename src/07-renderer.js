@@ -31,7 +31,7 @@
 
   function buildLocalSyntheticItems(character) {
     const rawComposition = getComposition(character);
-    if (!rawComposition || !isLocalPlayer(character)) return [];
+    if (!rawComposition || (!isLocalPlayer(character) && !isPreviewCompositionCharacter(character))) return [];
     // Editor state is already normalized when opened and after structural UI edits.
     // Keep its object identities during live transforms so the lightweight redraw
     // path can reuse synthetic layers instead of cloning the whole composition.
@@ -87,6 +87,41 @@
   const CONTENT_MIN_PIXELS = 4;
   const CONTENT_SCAN_MAX_EDGE = 512;
   const textureContentPivotCache = new Map();
+  const pendingPreviewTexturesByCharacter = new WeakMap();
+
+  function trackPreviewTextureLoad(character, url, width, height) {
+    if (!isPreviewCompositionCharacter(character) || !url) return;
+    let pending = pendingPreviewTexturesByCharacter.get(character);
+    if (width > 1 && height > 1) {
+      pending?.delete(url);
+      return;
+    }
+    const image = typeof globalThis.GLDrawImageCache?.get === "function" ? globalThis.GLDrawImageCache.get(url) : null;
+    if (!image) return;
+    if (!pending) {
+      pending = new Set();
+      pendingPreviewTexturesByCharacter.set(character, pending);
+    }
+    if (image.complete === true && Number(image.naturalWidth || image.width) > 0) {
+      pending.delete(url);
+      character.MustDraw = true;
+      return;
+    }
+    if (pending.has(url)) return;
+    pending.add(url);
+    if (typeof image.addEventListener === "function") image.addEventListener("load", () => {
+      pending.delete(url);
+      character.MustDraw = true;
+    }, { once: true });
+  }
+
+  function previewTexturesPending(character) {
+    return (pendingPreviewTexturesByCharacter.get(character)?.size || 0) > 0;
+  }
+
+  function clearPreviewTextureTracking(character) {
+    if (character) pendingPreviewTexturesByCharacter.delete(character);
+  }
 
   // Asset metadata in BC R130 does not contain rendered texture dimensions.
   // Geometry discovered at GLDrawImage is therefore the authoritative source
@@ -101,8 +136,13 @@
     if (!character || materialId == null || layerKey == null || options?.__coeGeometryIsBlink === true) return;
     // BC only marks characters wearing a formal Appearance item dirty when its
     // texture finishes loading. COE layers are synthetic, so start our own load
-    // observer before rejecting the initial 1x1 placeholder geometry.
-    if (url) resolveTextureContentBounds(url);
+    // observer before rejecting the initial 1x1 placeholder geometry. Isolated
+    // wardrobe characters wear only COE tag assets, which vanilla's image loader
+    // cannot associate with the real source texture.
+    if (url) {
+      trackPreviewTextureLoad(character, url, texW, texH);
+      resolveTextureContentBounds(url);
+    }
     if (!(texW > 1) || !(texH > 1)) return;
     const materialMap = overallGeometryCache.get(character) || new Map();
     const layerMap = materialMap.get(materialId) || new Map();
@@ -330,15 +370,15 @@
     if (!url || typeof document === "undefined" || typeof document.createElement !== "function") return;
     const current = textureContentPivotCache.get(url);
     if (current) return;
+    // 只扫描 BC/素材插件已经成功登记到 GLDrawImageCache 的图片。
+    // 部分扩展素材使用虚拟 Assets 路径，并通过自己的缓存或绘制钩子提供图像；
+    // 对这类 URL 另起 Image 会绕过素材提供方，向 BC 服务器制造成批 404。
+    // 缓存尚未出现时不记录失败，让后续绘制有机会在图片就绪后重试。
+    const image = typeof globalThis.GLDrawImageCache?.get === "function"
+      ? globalThis.GLDrawImageCache.get(url) : null;
+    if (!image) return;
     textureContentPivotCache.set(url, { status: "pending" });
     try {
-      const ImageCtor = globalThis.Image;
-      // GLDrawLoadImage 已经维护了一份同 URL 的图片缓存。优先复用它，
-      // 避免另起一个 Image 导致第二份图片尚未加载，而 WebGL 原图其实已经可用。
-      const cachedImage = typeof globalThis.GLDrawImageCache?.get === "function"
-        ? globalThis.GLDrawImageCache.get(url) : null;
-      if (!cachedImage && typeof ImageCtor !== "function") throw new Error("image-constructor-unavailable");
-      const image = cachedImage || new ImageCtor();
       let settled = false;
       const fail = () => {
         if (settled) return;
@@ -380,7 +420,6 @@
         image.onload = complete;
         image.onerror = fail;
       }
-      if (!cachedImage) image.src = url;
       if (image.complete && Number(image.naturalWidth || image.width) > 0) complete();
     } catch (_) {
       const pending = textureContentPivotCache.get(url);
@@ -518,11 +557,16 @@
         var mirrorY = opts.MirrorY === true;
         var overallMirrorX = opts.OverallMirrorX === true;
         var overallMirrorY = opts.OverallMirrorY === true;
-        // 无变换时直接走原始函数，保持零开销。
+        var needsGeometryCapture = opts.__coeGeometryCharacter &&
+          opts.__coeGeometryMaterialId != null && opts.__coeGeometryLayerKey != null &&
+          opts.__coeGeometryIsBlink !== true;
+        // 普通 BC 图层没有 COE 几何身份；无变换时只走原始函数，避免为全局图层
+        // 额外调用底层纹理加载器。合成图层仍需读取一次尺寸供整体 pivot 使用。
         if (!rotation && Math.abs(scale - 1) <= 0.001 && !mirrorX && !mirrorY &&
           !overallRotation && Math.abs(overallScale - 1) <= 0.001 && !overallMirrorX && !overallMirrorY &&
           !overallOffsetX && !overallOffsetY) {
           const result = drawOriginal();
+          if (!needsGeometryCapture) return result;
           const textureInfo = typeof GLDrawLoadImage === "function" ? GLDrawLoadImage(gl, url) : null;
           cacheOverallLayerGeometry(opts, dstX, dstY, offsetX, Number(textureInfo?.width), Number(textureInfo?.height), gl.canvas.height, url);
           return result;
@@ -626,7 +670,9 @@
           try { drawOriginal(); } catch (_e2) {}
         }
         };
-        modApi.hookFunction("GLDrawImage", 10, transformHook);
+        // SugarChain ImageMapping 在优先级 10 映射 URL、优先级 0 剥离 @nomap/。
+        // COE 必须位于它们之后，避免把控制路径直接传给 GLDrawLoadImage。
+        modApi.hookFunction("GLDrawImage", -1, transformHook);
         const installedTarget = globalThis.GLDrawImage;
         if (typeof installedTarget === "function") {
           installedTarget._coeTransformHooked = true;
@@ -791,7 +837,7 @@
     modApi.hookFunction("CharacterAppearanceSortLayers", 0, (args, next) => {
       const character = args[0];
       const baseLayers = next(args) || [];
-      if (isLocalPlayer(character)) {
+      if (isLocalPlayer(character) || isPreviewCompositionCharacter(character)) {
         const workingBase = baseLayers;
         const groups = buildLocalSyntheticItems(character);
         syntheticByCharacter.set(character, groups);

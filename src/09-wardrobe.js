@@ -33,9 +33,9 @@
     return true;
   }
 
-  function combinedEquippedComposition() {
-    const equipped = new Set(ensureEquippedIds());
-    const selected = wardrobe.schemes.filter(scheme => equipped.has(scheme.id));
+  function combineSchemes(schemeIds, data = wardrobe) {
+    const equipped = new Set(Array.isArray(schemeIds) ? schemeIds : []);
+    const selected = (data?.schemes || []).filter(scheme => equipped.has(scheme.id));
     const materials = [];
     const layers = [];
     for (const scheme of selected) {
@@ -63,6 +63,10 @@
     return normalizeComposition(combined);
   }
 
+  function combinedEquippedComposition() {
+    return combineSchemes(ensureEquippedIds(), wardrobe);
+  }
+
   function refreshLocalComposition() {
     if (!globalThis.Player) return;
     try {
@@ -86,9 +90,9 @@
     return false;
   }
 
-  function uniqueImportedSchemeName(name) {
+  function uniqueImportedSchemeName(name, data = wardrobe) {
     const base = String(name || "未命名方案").slice(0, 60);
-    const names = new Set(wardrobe.schemes.map(scheme => scheme.composition.name));
+    const names = new Set((data?.schemes || []).map(scheme => scheme.composition.name));
     if (!names.has(base)) return base;
     for (let index = 1; index < 1000; index++) {
       const suffix = index === 1 ? "（导入）" : `（导入 ${index}）`;
@@ -118,7 +122,31 @@
     panel.append(heading, content, actions);
     backdrop.appendChild(panel);
     document.getElementById(ROOT_ID)?.appendChild(backdrop);
-    return { backdrop, content, actions };
+    return { backdrop, content, actions, cancel };
+  }
+
+  function openConfirmationModal(title, message, confirmLabel, onConfirm, options = {}) {
+    const modal = openExchangeModal(title);
+    modal.cancel.textContent = "取消";
+    const text = document.createElement("p");
+    // Support line breaks from browser confirm() messages;
+    // HTML-escape to prevent injection while preserving newlines.
+    text.innerHTML = options.html
+      ? message
+      : message.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').split(String.fromCharCode(10)).join('<br>');
+    const confirmButton = document.createElement("button");
+    confirmButton.className = `coe-btn ${options.danger ? "coe-danger" : "coe-primary"}`;
+    confirmButton.textContent = confirmLabel || "确定";
+    confirmButton.addEventListener("click", () => {
+      try {
+        if (onConfirm() === false) return;
+        modal.backdrop.remove();
+      } catch (error) { toast(`操作失败: ${error?.message || error}`, "error"); }
+    });
+    modal.content.appendChild(text);
+    modal.actions.appendChild(confirmButton);
+    confirmButton.focus();
+    return modal;
   }
 
   async function copyExchangeText(text, textarea) {
@@ -162,13 +190,26 @@
     if (wardrobe.schemes.length >= MAX_SCHEMES) throw new Error(`衣柜最多保存 ${MAX_SCHEMES} 套方案`);
     const parsed = parseOutfitExchangeString(text);
     const missing = parsed.missingLayers + parsed.missingRecycle;
-    if (missing && !confirm(`当前环境缺少 ${missing} 个图层引用。继续导入后，这些部分不会显示，是否继续？`)) return false;
+    if (parsed.allAssetsMissing) throw new Error("这件服装没有任何可用图层，已跳过");
+    if (missing) {
+      openConfirmationModal(
+        "缺少图层",
+        `当前环境缺少 ${missing} 个图层引用。继续导入后，这些部分不会显示，是否继续？`,
+        "继续导入",
+        () => { doImportOutfit(parsed, text, body); },
+      );
+      return null;
+    }
+    return doImportOutfit(parsed, text, body);
+  }
+
+  function doImportOutfit(parsed, text, body) {
     const previous = cloneJSON(wardrobe);
     try {
       const composition = cloneJSON(parsed.composition);
       composition.name = uniqueImportedSchemeName(composition.name);
       const candidate = normalizeWardrobe({
-        version: WARDROBE_VERSION,
+        ...wardrobe,
         schemes: [{ id: uid(), composition }, ...wardrobe.schemes],
         equippedIds: wardrobe.equippedIds,
       });
@@ -177,7 +218,8 @@
       persistWardrobe();
       syncEquippedSchemes();
       renderWardrobe(body);
-      toast(`已导入「${composition.name}」，当前保持未启用`);
+      const missing = parsed.missingLayers + parsed.missingRecycle;
+      toast(missing ? `已导入「${composition.name}」；缺少 ${missing} 个图层，已保留可用部分` : `已导入「${composition.name}」，当前保持未启用`);
       return true;
     } catch (error) {
       wardrobe = previous;
@@ -198,7 +240,8 @@
     submit.textContent = "检查并导入";
     submit.addEventListener("click", () => {
       try {
-        if (importSingleOutfitString(textarea.value, body)) modal.backdrop.remove();
+        const result = importSingleOutfitString(textarea.value, body);
+        if (result === true) modal.backdrop.remove();
       } catch (error) {
         toast(`导入失败: ${error?.message || error}`, "error");
       }
@@ -209,7 +252,19 @@
   }
 
   function downloadWardrobeFile() {
-    if (persistenceBlocked && !confirm(`衣柜当前处于「${wardrobeReadState.status}」状态。将只导出当前界面选中的 ${wardrobeReadState.source || "内存"} 版本，不包含另一份冲突数据。是否继续？`)) return;
+    if (persistenceBlocked) {
+      openConfirmationModal(
+        "导出衣柜",
+        `衣柜当前处于「${wardrobeReadState.status}」状态。将只导出当前界面选中的 ${wardrobeReadState.source || "内存"} 版本，不包含另一份冲突数据。是否继续？`,
+        "继续导出",
+        doDownloadWardrobe,
+      );
+      return;
+    }
+    doDownloadWardrobe();
+  }
+
+  function doDownloadWardrobe() {
     try {
       const documentData = createWardrobeExchangeDocument(wardrobe);
       const text = JSON.stringify(documentData, null, 2);
@@ -223,9 +278,28 @@
       link.click();
       link.remove();
       setTimeout(() => URL.revokeObjectURL(url), 0);
-      toast(`已导出 ${wardrobe.schemes.length} 套服装`);
+      toast(`已导出 ${wardrobe.schemes.length} 件自定义服装和 ${wardrobe.sets.length} 套套装`);
     } catch (error) {
       toast(`导出衣柜失败: ${error?.message || error}`, "error");
+    }
+  }
+
+  function doImportWardrobe(parsed, body) {
+    const previous = cloneJSON(wardrobe);
+    const previousBlocked = persistenceBlocked;
+    try {
+      wardrobe = normalizeWardrobe({ ...parsed.wardrobe, equippedIds: [] });
+      persistenceBlocked = false;
+      persistWardrobe({ force: true });
+      syncEquippedSchemes();
+      renderWardrobe(body);
+      const localOnly = wardrobeReadState.sync?.mode === "local-only";
+      const countText = `${wardrobe.schemes.length} 件自定义服装和 ${wardrobe.sets.length} 套套装`;
+      toast(localOnly ? `已导入 ${countText}，仅保存到本机` : `已导入 ${countText}`, localOnly ? "warn" : "info");
+    } catch (error) {
+      wardrobe = previous;
+      persistenceBlocked = previousBlocked;
+      throw error;
     }
   }
 
@@ -246,24 +320,18 @@
           : "未知玩家";
         const warning = persistenceBlocked ? `\n当前衣柜处于「${wardrobeReadState.status}」保护状态，本次操作会明确覆盖该状态。` : "";
         const missingWarning = parsed.missingLayers
-          ? `\n当前环境缺少 ${parsed.missingLayers} 个图层引用，影响 ${parsed.affectedSchemes} 套服装；导入后这些部分不会显示。`
+          ? `\n当前环境缺少 ${parsed.missingLayers} 个图层引用，影响 ${parsed.affectedSchemes} 件自定义服装；导入后这些部分不会显示。`
           : "";
-        if (!confirm(`文件来源：${source}\n文件包含：${parsed.wardrobe.schemes.length} 套服装\n当前衣柜：${wardrobe.schemes.length} 套服装\n\n导入会替换整个衣柜，并将所有方案设为未启用。${missingWarning}${warning}\n建议先导出当前衣柜。是否继续？`)) return;
-        const previous = wardrobe;
-        const previousBlocked = persistenceBlocked;
-        try {
-          wardrobe = normalizeWardrobe({ ...parsed.wardrobe, equippedIds: [] });
-          persistenceBlocked = false;
-          persistWardrobe({ force: true });
-          syncEquippedSchemes();
-          renderWardrobe(body);
-          const localOnly = wardrobeReadState.sync?.mode === "local-only";
-          toast(localOnly ? `已导入 ${wardrobe.schemes.length} 套服装，仅保存到本机` : `已导入 ${wardrobe.schemes.length} 套服装`, localOnly ? "warn" : "info");
-        } catch (error) {
-          wardrobe = previous;
-          persistenceBlocked = previousBlocked;
-          throw error;
-        }
+        const danglingWarning = parsed.missingSetReferences ? `\n另有 ${parsed.missingSetReferences} 个失效的套装引用会被清除。` : "";
+        const importMessage = `文件来源：${source}\n文件包含：${parsed.wardrobe.schemes.length} 件自定义服装、${parsed.wardrobe.sets.length} 套套装\n当前衣柜：${wardrobe.schemes.length} 件自定义服装、${wardrobe.sets.length} 套套装\n\n导入会替换整个衣柜，并将所有自定义服装设为未启用。${missingWarning}${danglingWarning}${warning}\n建议先导出当前衣柜。是否继续？`;
+        openConfirmationModal(
+          "导入衣柜",
+          importMessage,
+          "继续导入",
+          () => {
+            doImportWardrobe(parsed, body);
+          },
+        );
       } catch (error) {
         toast(`导入衣柜失败: ${error?.message || error}`, "error");
       }
@@ -272,21 +340,26 @@
     input.click();
   }
 
-  function openWardrobe() {
+  function openWardrobe(view = wardrobeView) {
     restoreEditorAppearance();
+    wardrobeView = view === "sets" ? "sets" : "outfits";
     loadWardrobe();
     ensureEquippedIds();
     syncEquippedSchemes();
-    const exchangeMenu = '<details class="coe-menu"><summary class="coe-btn">导入导出 ▾</summary><div class="coe-menu-panel"><button data-import-outfit>导入单件服装</button><button data-import-wardrobe>导入整个衣柜</button><button data-export-wardrobe>导出整个衣柜</button></div></details>';
-    const body = rootShell("自定义服装衣柜", `<button class="coe-btn coe-primary" data-action="new">＋ 新建方案</button>${exchangeMenu}<button class="coe-btn" data-action="unequip-all">全部卸下</button><button class="coe-btn" data-action="close">关闭</button>`);
+    const exchangeMenu = '<details class="coe-menu"><summary class="coe-btn">导入导出 ▾</summary><div class="coe-menu-panel"><button data-import-outfit>导入单件服装</button><button data-import-set>导入套装到所选格</button><button data-import-wardrobe>导入整个衣柜</button><button data-export-wardrobe>导出整个衣柜</button></div></details>';
+    const outfitActions = wardrobeView === "outfits" ? '<button class="coe-btn coe-primary" data-action="new">＋ 新建自定义服装</button><button class="coe-btn" data-action="unequip-all">全部卸下</button>' : "";
+    const setNavigation = wardrobeView === "sets" ? '<button class="coe-btn" data-action="show-outfits">自定义服装</button><button class="coe-btn coe-primary" disabled>套装衣柜</button>' : "";
+    const body = rootShell("COE 衣柜", `${setNavigation}${outfitActions}${exchangeMenu}<button class="coe-btn" data-action="close">返回</button>`, wardrobeView === "sets" ? { variant: "set-gallery" } : undefined);
     uiMode = "wardrobe";
     const root = document.getElementById(ROOT_ID);
     root.classList.add("coe-wardrobe-root");
-    root.querySelector('[data-action="new"]').addEventListener("click", () => openEditor({ version: 2, name: "新方案", layers: [], recycle: [] }, null));
+    root.querySelector('[data-action="show-outfits"]')?.addEventListener("click", () => openWardrobe("outfits"));
+    root.querySelector('[data-action="new"]')?.addEventListener("click", () => openEditor({ version: 2, name: "新方案", layers: [], recycle: [] }, null));
     root.querySelector("[data-import-outfit]").addEventListener("click", () => showOutfitImport(body));
+    root.querySelector("[data-import-set]").addEventListener("click", () => showSetImport(body, selectedSetSlot));
     root.querySelector("[data-import-wardrobe]").addEventListener("click", () => importWardrobeFile(body));
     root.querySelector("[data-export-wardrobe]").addEventListener("click", downloadWardrobeFile);
-    root.querySelector('[data-action="unequip-all"]').addEventListener("click", () => {
+    root.querySelector('[data-action="unequip-all"]')?.addEventListener("click", () => {
       if (!ensureWardrobeWritable()) return;
       wardrobe.equippedIds = [];
       persistWardrobe();
@@ -306,8 +379,33 @@
     body.appendChild(panel);
   }
 
+  function wardrobeRootBody(body) {
+    return body?.closest?.(".coe-body") || body;
+  }
+
   function renderWardrobe(body) {
+    body = wardrobeRootBody(body);
     body.innerHTML = "";
+    const root = document.getElementById(ROOT_ID);
+    root?.classList.toggle("coe-set-gallery-root", wardrobeView === "sets");
+    if (wardrobeView === "sets") {
+      const workspace = document.createElement("div");
+      workspace.className = "coe-set-workspace";
+      workspace.innerHTML = '<aside class="coe-set-character-stage" aria-label="当前正在穿着的角色外观"></aside><section class="coe-set-gallery-pane"><div class="coe-wardrobe-content"></div></section>';
+      body.appendChild(workspace);
+      return renderSetWardrobe(workspace.querySelector(".coe-wardrobe-content"));
+    }
+    const tabs = document.createElement("nav");
+    tabs.className = "coe-tool-tabs coe-wardrobe-tabs";
+    tabs.innerHTML = '<button class="coe-btn coe-primary" data-view="outfits">自定义服装</button><button class="coe-btn" data-view="sets">套装衣柜</button>';
+    const content = document.createElement("div");
+    content.className = "coe-wardrobe-content";
+    tabs.querySelectorAll("[data-view]").forEach(button => button.addEventListener("click", () => openWardrobe(button.dataset.view === "sets" ? "sets" : "outfits")));
+    body.append(tabs, content);
+    return renderOutfitWardrobe(content);
+  }
+
+  function renderOutfitWardrobe(body) {
     ensureEquippedIds();
     const equipped = new Set(wardrobe.equippedIds);
     const summary = document.createElement("div");
@@ -345,12 +443,34 @@
       card.querySelector("[data-export]").addEventListener("click", () => showOutfitExport(scheme));
       card.querySelector("[data-delete]").addEventListener("click", () => {
         if (!ensureWardrobeWritable()) return;
-        if (!confirm(`删除方案「${scheme.composition.name}」？此操作无法撤销。`)) return;
-        wardrobe.schemes = wardrobe.schemes.filter(entry => entry.id !== scheme.id);
-        wardrobe.equippedIds = wardrobe.equippedIds.filter(id => id !== scheme.id);
-        persistWardrobe();
-        syncEquippedSchemes();
-        renderWardrobe(body);
+        const references = findSetsReferencingScheme(scheme.id);
+        if (references.length) {
+          openConfirmationModal(
+            "删除自定义服装",
+            `自定义服装「${scheme.composition.name}」正在被 ${references.length} 套套装使用。\n\n继续删除后，这件自定义服装也会从这些套装中移除；套装中的其他服装和外貌不会改变。\n\n是否继续？`,
+            "确认删除",
+            () => {
+              try {
+                removeSchemeAndSetReferences(scheme.id);
+                renderWardrobe(body);
+              } catch (error) { toast(`删除失败: ${error?.message || error}`, "error"); return false; }
+            },
+            { danger: true },
+          );
+        } else {
+          openConfirmationModal(
+            "删除自定义服装",
+            `删除自定义服装「${scheme.composition.name}」？此操作无法撤销。`,
+            "确认删除",
+            () => {
+              try {
+                removeSchemeAndSetReferences(scheme.id);
+                renderWardrobe(body);
+              } catch (error) { toast(`删除失败: ${error?.message || error}`, "error"); return false; }
+            },
+            { danger: true },
+          );
+        }
       });
       grid.appendChild(card);
     }

@@ -19,6 +19,25 @@
     if (!Array.isArray(raw.schemes) || !Array.isArray(raw.equippedIds)) {
       throw wardrobeMigrationError("wardrobe-shape", "衣柜缺少方案列表或启用列表");
     }
+    const schemaVersion = readWardrobeSchemaVersion(raw);
+    if (schemaVersion >= 2 && !Array.isArray(raw.sets)) {
+      throw wardrobeMigrationError("wardrobe-sets-shape", "衣柜缺少套装列表");
+    }
+    if (Array.isArray(raw.sets) && raw.sets.length > MAX_SETS) {
+      throw wardrobeMigrationError("too-many-sets", `套装衣柜超过 ${MAX_SETS} 套`);
+    }
+    const setIds = new Set();
+    const setSlots = new Set();
+    for (const set of Array.isArray(raw.sets) ? raw.sets : []) {
+      validateStoredSetShape(set);
+      if (setIds.has(set.id)) throw wardrobeMigrationError("duplicate-set-id", "衣柜包含重复的套装 ID");
+      if (schemaVersion >= 3) {
+        if (!Number.isInteger(set.slot) || set.slot < 0 || set.slot >= MAX_SETS) throw wardrobeMigrationError("invalid-set-storage-slot", "套装储存格无效");
+        if (setSlots.has(set.slot)) throw wardrobeMigrationError("duplicate-set-storage-slot", "衣柜包含重复的套装储存格");
+        setSlots.add(set.slot);
+      }
+      setIds.add(set.id);
+    }
     if (raw.schemes.length > MAX_SCHEMES) {
       throw wardrobeMigrationError("too-many-schemes", `衣柜服装超过 ${MAX_SCHEMES} 套`);
     }
@@ -64,6 +83,18 @@
         equippedIds: cloneJSON(raw.equippedIds),
       };
     },
+    2: raw => ({
+      schemaVersion: 2,
+      schemes: cloneJSON(raw.schemes),
+      sets: [],
+      equippedIds: cloneJSON(raw.equippedIds),
+    }),
+    3: raw => ({
+      schemaVersion: 3,
+      schemes: cloneJSON(raw.schemes),
+      sets: (raw.sets || []).slice(0, MAX_SETS).map((set, slot) => ({ ...cloneJSON(set), slot })),
+      equippedIds: cloneJSON(raw.equippedIds),
+    }),
   });
 
   function migrateWardrobeData(raw) {
@@ -89,6 +120,8 @@
     }
 
     validateStoredWardrobeShape(current);
+    const storedSchemeIds = new Set(current.schemes.map(entry => entry.id));
+    const missingSetReferences = (current.sets || []).reduce((count, set) => count + set.customOutfits.filter(entry => !storedSchemeIds.has(entry.schemeId)).length, 0);
     const normalized = normalizeWardrobe(current, { validateReferences: false });
     const compact = compactWardrobeForStorage(normalized, { validateReferences: false });
     if (compact.schemaVersion !== WARDROBE_SCHEMA_VERSION) {
@@ -100,5 +133,6 @@
       migrated: fromVersion !== WARDROBE_SCHEMA_VERSION,
       fromVersion,
       toVersion: WARDROBE_SCHEMA_VERSION,
+      missingSetReferences,
     };
   }

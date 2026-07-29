@@ -8,8 +8,8 @@ const { webcrypto } = require('node:crypto');
 
 const root = path.resolve(__dirname, '..');
 const parts = [
-  '00-userscript-header.js','01-runtime.js','02-data.js','02-schema-migrations.js','03-storage.js','04-assets.js',
-  '05-capabilities.js','06-adapters.js','07-renderer.js','08-ui-shell.js','09-wardrobe.js',
+  '00-userscript-header.js','01-runtime.js','02-data.js','02-set-data.js','02-schema-migrations.js','03-storage.js','04-assets.js',
+  '05-capabilities.js','06-adapters.js','07-renderer.js','08-ui-shell.js','09-set-exchange.js','09-set-wardrobe.js','09-wardrobe.js',
   '10-editor.js','11-remote-protocol.js','12-remote-store.js','13-remote-transport.js',
   '14-remote-controller.js','15-bootstrap.js',
 ];
@@ -67,8 +67,32 @@ test('runtime source no longer contains the legacy formal-container mechanism', 
   for (const forbidden of [
     'CONTAINER_GROUP', 'LEGACY_CONTAINER_GROUP', 'CONTAINER_ASSET', 'APPEARANCE_SANITIZED_VERSION',
     'isLegacyContainerItem', 'getLegacyContainerItem', 'migrateLegacyContainerState',
-    'ServerPlayerAppearanceSync', 'ChatRoomCharacterUpdate', 'CustomComposition',
+    'ChatRoomCharacterUpdate', 'CustomComposition',
   ]) assert.equal(runtimeSource.includes(forbidden), false, forbidden);
+});
+
+test('set naming uses COE modal input instead of browser prompt and wardrobe rerender climbs to the root body', () => {
+  const wardrobeSource = fs.readFileSync(path.join(root, 'src', '09-wardrobe.js'), 'utf8');
+  const setSource = fs.readFileSync(path.join(root, 'src', '09-set-wardrobe.js'), 'utf8');
+  assert.doesNotMatch(wardrobeSource, /prompt\s*\(/);
+  assert.doesNotMatch(setSource, /prompt\s*\(/);
+  assert.match(setSource, /function openSetNameModal\s*\(/);
+  assert.match(wardrobeSource, /function wardrobeRootBody\s*\(/);
+  assert.match(wardrobeSource, /body = wardrobeRootBody\(body\)/);
+});
+
+test('set wardrobe uses a headerless full-screen workspace with a live character stage and constrained grid', () => {
+  const shellSource = fs.readFileSync(path.join(root, 'src', '08-ui-shell.js'), 'utf8');
+  const wardrobeSource = fs.readFileSync(path.join(root, 'src', '09-wardrobe.js'), 'utf8');
+  assert.match(shellSource, /options\.variant === "set-gallery"/);
+  assert.match(shellSource, /coe-set-global-actions/);
+  assert.match(shellSource, /uiMode === "wardrobe" && wardrobeView === "sets"/);
+  assert.match(shellSource, /\.coe-set-workspace\{[^}]*height:100%/);
+  assert.match(shellSource, /\.coe-set-grid\{[^}]*grid-template-rows:repeat\(2,minmax\(0,1fr\)\)/);
+  assert.doesNotMatch(shellSource, /\.coe-set-grid\{[^}]*calc\(100vh/);
+  assert.doesNotMatch(shellSource, /\.coe-set-grid\{[^}]*min-height:650px/);
+  assert.match(wardrobeSource, /coe-set-character-stage/);
+  assert.match(wardrobeSource, /rootShell\("COE 衣柜"[^\n]*variant: "set-gallery"/);
 });
 
 test('editor module defines every helper used by the wardrobe entry flow', () => {
@@ -204,6 +228,21 @@ test('local custom visuals require both an enabled material and its equipped tag
   assert.equal(api.buildSyntheticItems(player).length, 1);
   player.Appearance.length = 0;
   assert.equal(api.buildSyntheticItems(player).length, 0);
+});
+
+test('isolated wardrobe preview characters can render local COE compositions', () => {
+  const source = makeAsset('Cloth', 'PreviewDress');
+  source.Group.Clothing = true;
+  const tag = makeAsset('Cloth', 'COECustomOutfit', { layer: { HasImage: false } });
+  tag.Group.Clothing = true;
+  const { api } = load({ assets: [source, tag] });
+  const preview = { AssetFamily: 'Female3DCG', Appearance: [{ Asset: tag, Color: 'Default', Property: {} }] };
+  const composition = compositionFor(source);
+  composition.materials[0].wearGroup = 'Cloth';
+  api.setPreviewCompositionForTest(preview, composition);
+  assert.equal(api.buildLocalSyntheticItems(preview).length, 1);
+  api.setPreviewCompositionForTest(preview, null);
+  assert.equal(api.buildLocalSyntheticItems(preview).length, 0);
 });
 
 test('activating a scheme disables only the other enabled scheme in the same clothing slot', () => {
@@ -375,7 +414,7 @@ test('compact serializer omits redundant/UI/runtime fields', () => {
   for (const forbidden of ['updatedAt','appearanceSanitizedVersion','collapsed','defaultOffsetX','defaultOffsetY','defaultColor','defaultPriority','defaultOpacity','provider','sourceColor']) assert.equal(text.includes(forbidden), false, forbidden);
 });
 
-test('legacy wardrobe data migrates to schemaVersion 1 without losing saved outfit fields', () => {
+test('legacy wardrobe data migrates to schemaVersion 3 without losing saved outfit fields', () => {
   const asset = makeAsset();
   const { api } = load({ assets: [asset] });
   const legacy = {
@@ -395,15 +434,16 @@ test('legacy wardrobe data migrates to schemaVersion 1 without losing saved outf
   assert.equal(result.status, 'ok');
   assert.equal(result.migration.migrated, true);
   assert.equal(result.migration.fromVersion, 0);
-  assert.equal(result.migration.toVersion, 1);
-  assert.equal(result.data.schemaVersion, 1);
+  assert.equal(result.migration.toVersion, 3);
+  assert.equal(result.data.schemaVersion, 3);
+  assert.deepEqual(Array.from(result.data.sets), []);
   assert.equal(result.data.schemes[0].id, 'saved-outfit');
   assert.equal(result.data.schemes[0].composition.materials[0].overallMirrorX, true);
   assert.equal(result.data.schemes[0].composition.materials[0].overallScale, 1.25);
   assert.equal(result.data.schemes[0].composition.layers[0].mirrorY, true);
   assert.equal(result.data.schemes[0].composition.layers[0].rotation, 0.5);
   const stored = JSON.parse(api.packWardrobe(result.data).slice(5));
-  assert.equal(stored.schemaVersion, 1);
+  assert.equal(stored.schemaVersion, 3);
   assert.equal(Object.hasOwn(stored, 'version'), false);
 });
 
@@ -441,12 +481,15 @@ test('legacy single-material overall transforms migrate without overriding mater
 
 test('current and future wardrobe schemas are distinguished before normalization', () => {
   const { api } = load();
-  const current = api.unpackWardrobeDetailed('json:{"schemaVersion":1,"schemes":[],"equippedIds":[]}');
+  const current = api.unpackWardrobeDetailed('json:{"schemaVersion":3,"schemes":[],"sets":[],"equippedIds":[]}');
   assert.equal(current.status, 'ok');
   assert.equal(current.migration.migrated, false);
-  assert.equal(current.migration.fromVersion, 1);
-  assert.equal(current.migration.toVersion, 1);
-  assert.equal(api.unpackWardrobeDetailed('json:{"schemaVersion":2,"schemes":[],"equippedIds":[]}').status, 'unsupported');
+  assert.equal(current.migration.fromVersion, 3);
+  assert.equal(current.migration.toVersion, 3);
+  const previous = api.unpackWardrobeDetailed('json:{"schemaVersion":2,"schemes":[],"sets":[],"equippedIds":[]}');
+  assert.equal(previous.status, 'ok');
+  assert.equal(previous.migration.migrated, true);
+  assert.equal(api.unpackWardrobeDetailed('json:{"schemaVersion":4,"schemes":[],"sets":[],"equippedIds":[]}').status, 'unsupported');
   assert.equal(api.unpackWardrobeDetailed('json:{"version":8,"schemes":[],"equippedIds":[]}').status, 'unsupported');
 });
 

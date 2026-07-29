@@ -2,7 +2,13 @@
     return !!character && character === globalThis.Player;
   }
 
+  function isPreviewCompositionCharacter(character) {
+    return !!character && previewCompositionByCharacter.has(character);
+  }
+
   function getComposition(character) {
+    const preview = character ? previewCompositionByCharacter.get(character) : null;
+    if (preview) return preview;
     if (!isLocalPlayer(character)) return null;
     if (uiMode === "editor" && editing) return editing;
     return activeComposition;

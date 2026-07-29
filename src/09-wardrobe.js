@@ -287,10 +287,12 @@
     syncEquippedSchemes();
     const exchangeMenu = '<details class="coe-menu"><summary class="coe-btn">导入导出 ▾</summary><div class="coe-menu-panel"><button data-import-outfit>导入单件服装</button><button data-import-set>导入套装到所选格</button><button data-import-wardrobe>导入整个衣柜</button><button data-export-wardrobe>导出整个衣柜</button></div></details>';
     const outfitActions = wardrobeView === "outfits" ? '<button class="coe-btn coe-primary" data-action="new">＋ 新建自定义服装</button><button class="coe-btn" data-action="unequip-all">全部卸下</button>' : "";
-    const body = rootShell("COE 衣柜", `${outfitActions}${exchangeMenu}<button class="coe-btn" data-action="close">关闭</button>`);
+    const setNavigation = wardrobeView === "sets" ? '<button class="coe-btn" data-action="show-outfits">自定义服装</button><button class="coe-btn coe-primary" disabled>套装衣柜</button>' : "";
+    const body = rootShell("COE 衣柜", `${setNavigation}${outfitActions}${exchangeMenu}<button class="coe-btn" data-action="close">返回</button>`, wardrobeView === "sets" ? { variant: "set-gallery" } : undefined);
     uiMode = "wardrobe";
     const root = document.getElementById(ROOT_ID);
     root.classList.add("coe-wardrobe-root");
+    root.querySelector('[data-action="show-outfits"]')?.addEventListener("click", () => openWardrobe("outfits"));
     root.querySelector('[data-action="new"]')?.addEventListener("click", () => openEditor({ version: 2, name: "新方案", layers: [], recycle: [] }, null));
     root.querySelector("[data-import-outfit]").addEventListener("click", () => showOutfitImport(body));
     root.querySelector("[data-import-set]").addEventListener("click", () => showSetImport(body, selectedSetSlot));
@@ -323,19 +325,22 @@
   function renderWardrobe(body) {
     body = wardrobeRootBody(body);
     body.innerHTML = "";
-    const tabs = document.createElement("nav");
-    tabs.className = "coe-tool-tabs coe-wardrobe-tabs";
-    tabs.innerHTML = `<button class="coe-btn ${wardrobeView === "outfits" ? "coe-primary" : ""}" data-view="outfits">自定义服装</button><button class="coe-btn ${wardrobeView === "sets" ? "coe-primary" : ""}" data-view="sets">套装衣柜</button>`;
-    const content = document.createElement("div");
-    content.className = "coe-wardrobe-content";
-    tabs.querySelectorAll("[data-view]").forEach(button => button.addEventListener("click", () => {
-      wardrobeView = button.dataset.view === "sets" ? "sets" : "outfits";
-      openWardrobe(wardrobeView);
-    }));
-    body.append(tabs, content);
     const root = document.getElementById(ROOT_ID);
     root?.classList.toggle("coe-set-gallery-root", wardrobeView === "sets");
-    if (wardrobeView === "sets") return renderSetWardrobe(content);
+    if (wardrobeView === "sets") {
+      const workspace = document.createElement("div");
+      workspace.className = "coe-set-workspace";
+      workspace.innerHTML = '<aside class="coe-set-character-stage" aria-label="当前正在穿着的角色外观"></aside><section class="coe-set-gallery-pane"><div class="coe-wardrobe-content"></div></section>';
+      body.appendChild(workspace);
+      return renderSetWardrobe(workspace.querySelector(".coe-wardrobe-content"));
+    }
+    const tabs = document.createElement("nav");
+    tabs.className = "coe-tool-tabs coe-wardrobe-tabs";
+    tabs.innerHTML = '<button class="coe-btn coe-primary" data-view="outfits">自定义服装</button><button class="coe-btn" data-view="sets">套装衣柜</button>';
+    const content = document.createElement("div");
+    content.className = "coe-wardrobe-content";
+    tabs.querySelectorAll("[data-view]").forEach(button => button.addEventListener("click", () => openWardrobe(button.dataset.view === "sets" ? "sets" : "outfits")));
+    body.append(tabs, content);
     return renderOutfitWardrobe(content);
   }
 

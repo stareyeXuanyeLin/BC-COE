@@ -81,6 +81,20 @@ test('set naming uses COE modal input instead of browser prompt and wardrobe rer
   assert.match(wardrobeSource, /body = wardrobeRootBody\(body\)/);
 });
 
+test('set wardrobe uses a headerless full-screen workspace with a live character stage and constrained grid', () => {
+  const shellSource = fs.readFileSync(path.join(root, 'src', '08-ui-shell.js'), 'utf8');
+  const wardrobeSource = fs.readFileSync(path.join(root, 'src', '09-wardrobe.js'), 'utf8');
+  assert.match(shellSource, /options\.variant === "set-gallery"/);
+  assert.match(shellSource, /coe-set-global-actions/);
+  assert.match(shellSource, /uiMode === "wardrobe" && wardrobeView === "sets"/);
+  assert.match(shellSource, /\.coe-set-workspace\{[^}]*height:100%/);
+  assert.match(shellSource, /\.coe-set-grid\{[^}]*grid-template-rows:repeat\(2,minmax\(0,1fr\)\)/);
+  assert.doesNotMatch(shellSource, /\.coe-set-grid\{[^}]*calc\(100vh/);
+  assert.doesNotMatch(shellSource, /\.coe-set-grid\{[^}]*min-height:650px/);
+  assert.match(wardrobeSource, /coe-set-character-stage/);
+  assert.match(wardrobeSource, /rootShell\("COE 衣柜"[^\n]*variant: "set-gallery"/);
+});
+
 test('editor module defines every helper used by the wardrobe entry flow', () => {
   const source = fs.readFileSync(path.join(root, 'src', '10-editor.js'), 'utf8');
   for (const name of ['openEditor', 'renderPoseControls', 'setPreviewPose']) {

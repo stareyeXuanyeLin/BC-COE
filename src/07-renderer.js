@@ -330,15 +330,15 @@
     if (!url || typeof document === "undefined" || typeof document.createElement !== "function") return;
     const current = textureContentPivotCache.get(url);
     if (current) return;
+    // 只扫描 BC/素材插件已经成功登记到 GLDrawImageCache 的图片。
+    // 部分扩展素材使用虚拟 Assets 路径，并通过自己的缓存或绘制钩子提供图像；
+    // 对这类 URL 另起 Image 会绕过素材提供方，向 BC 服务器制造成批 404。
+    // 缓存尚未出现时不记录失败，让后续绘制有机会在图片就绪后重试。
+    const image = typeof globalThis.GLDrawImageCache?.get === "function"
+      ? globalThis.GLDrawImageCache.get(url) : null;
+    if (!image) return;
     textureContentPivotCache.set(url, { status: "pending" });
     try {
-      const ImageCtor = globalThis.Image;
-      // GLDrawLoadImage 已经维护了一份同 URL 的图片缓存。优先复用它，
-      // 避免另起一个 Image 导致第二份图片尚未加载，而 WebGL 原图其实已经可用。
-      const cachedImage = typeof globalThis.GLDrawImageCache?.get === "function"
-        ? globalThis.GLDrawImageCache.get(url) : null;
-      if (!cachedImage && typeof ImageCtor !== "function") throw new Error("image-constructor-unavailable");
-      const image = cachedImage || new ImageCtor();
       let settled = false;
       const fail = () => {
         if (settled) return;
@@ -380,7 +380,6 @@
         image.onload = complete;
         image.onerror = fail;
       }
-      if (!cachedImage) image.src = url;
       if (image.complete && Number(image.naturalWidth || image.width) > 0) complete();
     } catch (_) {
       const pending = textureContentPivotCache.get(url);

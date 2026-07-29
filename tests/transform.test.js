@@ -56,6 +56,29 @@ test('texture pivot scan reuses the loaded GLDraw image and caches its result', 
   assert.equal(pivot.y, 0.375);
 });
 
+test('texture pivot scan never requests a missing or virtual texture URL directly', () => {
+  let constructed = 0;
+  const cache = new Map();
+  const data = alphaData(4, 4, [[0, 0], [1, 0], [0, 1], [1, 1]]);
+  const image = { naturalWidth: 4, naturalHeight: 4, width: 4, height: 4, complete: true, addEventListener() {} };
+  const context = { clearRect() {}, drawImage() {}, getImageData() { return { data }; } };
+  const { api } = load({ globals: {
+    Image: function Image() { constructed++; },
+    GLDrawImageCache: cache,
+    document: { getElementById: () => null, createElement: tag => tag === 'canvas' ? { getContext: () => context } : {} },
+  } });
+
+  assert.equal(api.resolveTextureContentPivot('./Assets/Female3DCG/Suit/虚拟服装.png'), null);
+  assert.equal(constructed, 0);
+
+  cache.set('./Assets/Female3DCG/Suit/虚拟服装.png', image);
+  assert.equal(api.resolveTextureContentPivot('./Assets/Female3DCG/Suit/虚拟服装.png'), null);
+  const pivot = api.resolveTextureContentPivot('./Assets/Female3DCG/Suit/虚拟服装.png');
+  assert.equal(pivot.x, 0.25);
+  assert.equal(pivot.y, 0.25);
+  assert.equal(constructed, 0);
+});
+
 test('synthetic placeholder texture schedules a character refresh when the image finishes loading', () => {
   const listeners = {};
   const image = {

@@ -134,9 +134,10 @@
     };
   }
 
-  function buildSetImportPlan(parsed, data = wardrobe) {
+  function buildSetImportPlan(parsed, targetSlot, data = wardrobe) {
     if (!parsed?.set || !Array.isArray(parsed.outfits)) throw exchangeError("invalid-set-plan", "套装导入计划无效");
-    if (data.sets.length >= MAX_SETS) throw exchangeError("too-many-sets", `套装衣柜最多保存 ${MAX_SETS} 套`);
+    if (!Number.isInteger(targetSlot) || targetSlot < 0 || targetSlot >= MAX_SETS) throw exchangeError("invalid-target-slot", "请先选择一个套装格子");
+    const replacedSet = (data.sets || []).find(set => set.slot === targetSlot) || null;
     const candidateSchemes = cloneJSON(data.schemes);
     const signatures = new Map(candidateSchemes.map(scheme => [compositionSignature(scheme.composition), scheme.id]));
     const refToId = new Map();
@@ -170,10 +171,14 @@
     const customOutfits = parsed.set.customOutfits
       .filter(entry => refToId.has(entry.outfitRef))
       .map(entry => ({ slotGroup: entry.slotGroup, schemeId: refToId.get(entry.outfitRef) }));
-    const set = normalizeSet({ id: uid(), name: uniqueSetName(parsed.set.name, data), appearance, customOutfits }, { validSchemeIds: new Set(candidateSchemes.map(entry => entry.id)) });
-    const candidate = normalizeWardrobe({ ...data, schemes: candidateSchemes, sets: [set, ...data.sets], equippedIds: data.equippedIds }, { validateReferences: false });
+    const namingData = { ...data, sets: data.sets.filter(entry => entry.slot !== targetSlot) };
+    const set = normalizeSet({ id: uid(), slot: targetSlot, name: uniqueSetName(parsed.set.name, namingData), appearance, customOutfits }, { validSchemeIds: new Set(candidateSchemes.map(entry => entry.id)) });
+    const sets = replacedSet
+      ? data.sets.map(entry => entry.slot === targetSlot ? set : entry)
+      : [...data.sets, set];
+    const candidate = normalizeWardrobe({ ...data, schemes: candidateSchemes, sets, equippedIds: data.equippedIds }, { validateReferences: false });
     compactWardrobeForStorage(candidate);
-    return { wardrobe: candidate, set, report };
+    return { wardrobe: candidate, set, replacedSet: replacedSet ? cloneJSON(replacedSet) : null, targetSlot, report };
   }
 
   function commitSetImportPlan(plan, options = {}) {

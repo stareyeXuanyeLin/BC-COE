@@ -216,6 +216,21 @@ test('local custom visuals require both an enabled material and its equipped tag
   assert.equal(api.buildSyntheticItems(player).length, 0);
 });
 
+test('isolated wardrobe preview characters can render local COE compositions', () => {
+  const source = makeAsset('Cloth', 'PreviewDress');
+  source.Group.Clothing = true;
+  const tag = makeAsset('Cloth', 'COECustomOutfit', { layer: { HasImage: false } });
+  tag.Group.Clothing = true;
+  const { api } = load({ assets: [source, tag] });
+  const preview = { AssetFamily: 'Female3DCG', Appearance: [{ Asset: tag, Color: 'Default', Property: {} }] };
+  const composition = compositionFor(source);
+  composition.materials[0].wearGroup = 'Cloth';
+  api.setPreviewCompositionForTest(preview, composition);
+  assert.equal(api.buildLocalSyntheticItems(preview).length, 1);
+  api.setPreviewCompositionForTest(preview, null);
+  assert.equal(api.buildLocalSyntheticItems(preview).length, 0);
+});
+
 test('activating a scheme disables only the other enabled scheme in the same clothing slot', () => {
   const cloth = makeAsset('Cloth', 'Dress');
   cloth.Group.Clothing = true;
@@ -385,7 +400,7 @@ test('compact serializer omits redundant/UI/runtime fields', () => {
   for (const forbidden of ['updatedAt','appearanceSanitizedVersion','collapsed','defaultOffsetX','defaultOffsetY','defaultColor','defaultPriority','defaultOpacity','provider','sourceColor']) assert.equal(text.includes(forbidden), false, forbidden);
 });
 
-test('legacy wardrobe data migrates to schemaVersion 2 without losing saved outfit fields', () => {
+test('legacy wardrobe data migrates to schemaVersion 3 without losing saved outfit fields', () => {
   const asset = makeAsset();
   const { api } = load({ assets: [asset] });
   const legacy = {
@@ -405,8 +420,8 @@ test('legacy wardrobe data migrates to schemaVersion 2 without losing saved outf
   assert.equal(result.status, 'ok');
   assert.equal(result.migration.migrated, true);
   assert.equal(result.migration.fromVersion, 0);
-  assert.equal(result.migration.toVersion, 2);
-  assert.equal(result.data.schemaVersion, 2);
+  assert.equal(result.migration.toVersion, 3);
+  assert.equal(result.data.schemaVersion, 3);
   assert.deepEqual(Array.from(result.data.sets), []);
   assert.equal(result.data.schemes[0].id, 'saved-outfit');
   assert.equal(result.data.schemes[0].composition.materials[0].overallMirrorX, true);
@@ -414,7 +429,7 @@ test('legacy wardrobe data migrates to schemaVersion 2 without losing saved outf
   assert.equal(result.data.schemes[0].composition.layers[0].mirrorY, true);
   assert.equal(result.data.schemes[0].composition.layers[0].rotation, 0.5);
   const stored = JSON.parse(api.packWardrobe(result.data).slice(5));
-  assert.equal(stored.schemaVersion, 2);
+  assert.equal(stored.schemaVersion, 3);
   assert.equal(Object.hasOwn(stored, 'version'), false);
 });
 
@@ -452,15 +467,15 @@ test('legacy single-material overall transforms migrate without overriding mater
 
 test('current and future wardrobe schemas are distinguished before normalization', () => {
   const { api } = load();
-  const current = api.unpackWardrobeDetailed('json:{"schemaVersion":2,"schemes":[],"sets":[],"equippedIds":[]}');
+  const current = api.unpackWardrobeDetailed('json:{"schemaVersion":3,"schemes":[],"sets":[],"equippedIds":[]}');
   assert.equal(current.status, 'ok');
   assert.equal(current.migration.migrated, false);
-  assert.equal(current.migration.fromVersion, 2);
-  assert.equal(current.migration.toVersion, 2);
-  const previous = api.unpackWardrobeDetailed('json:{"schemaVersion":1,"schemes":[],"equippedIds":[]}');
+  assert.equal(current.migration.fromVersion, 3);
+  assert.equal(current.migration.toVersion, 3);
+  const previous = api.unpackWardrobeDetailed('json:{"schemaVersion":2,"schemes":[],"sets":[],"equippedIds":[]}');
   assert.equal(previous.status, 'ok');
   assert.equal(previous.migration.migrated, true);
-  assert.equal(api.unpackWardrobeDetailed('json:{"schemaVersion":3,"schemes":[],"sets":[],"equippedIds":[]}').status, 'unsupported');
+  assert.equal(api.unpackWardrobeDetailed('json:{"schemaVersion":4,"schemes":[],"sets":[],"equippedIds":[]}').status, 'unsupported');
   assert.equal(api.unpackWardrobeDetailed('json:{"version":8,"schemes":[],"equippedIds":[]}').status, 'unsupported');
 });
 

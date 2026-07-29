@@ -31,7 +31,7 @@
 
   function buildLocalSyntheticItems(character) {
     const rawComposition = getComposition(character);
-    if (!rawComposition || !isLocalPlayer(character)) return [];
+    if (!rawComposition || (!isLocalPlayer(character) && !isPreviewCompositionCharacter(character))) return [];
     // Editor state is already normalized when opened and after structural UI edits.
     // Keep its object identities during live transforms so the lightweight redraw
     // path can reuse synthetic layers instead of cloning the whole composition.
@@ -790,7 +790,7 @@
     modApi.hookFunction("CharacterAppearanceSortLayers", 0, (args, next) => {
       const character = args[0];
       const baseLayers = next(args) || [];
-      if (isLocalPlayer(character)) {
+      if (isLocalPlayer(character) || isPreviewCompositionCharacter(character)) {
         const workingBase = baseLayers;
         const groups = buildLocalSyntheticItems(character);
         syntheticByCharacter.set(character, groups);

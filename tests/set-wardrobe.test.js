@@ -18,15 +18,33 @@ function appearanceAsset(group, name, allowNone = true) {
   return makeAsset(group, name, { Group: { Name: group, Family: 'Female3DCG', Category: 'Appearance', AllowNone: allowNone } });
 }
 
-test('wardrobe v1 migrates to v2 with sets initialized and outfit state preserved', () => {
+test('wardrobe v1 migrates to v3 with fixed set slots initialized and outfit state preserved', () => {
   const { api } = load();
   const result = api.migrateWardrobeData({ schemaVersion: 1, schemes: [{ id: 's', composition: emptyComposition() }], equippedIds: ['s'] });
   assert.equal(result.fromVersion, 1);
-  assert.equal(result.toVersion, 2);
-  assert.equal(result.data.schemaVersion, 2);
+  assert.equal(result.toVersion, 3);
+  assert.equal(result.data.schemaVersion, 3);
   assert.deepEqual(plain(result.data.sets), []);
   assert.deepEqual(plain(result.data.equippedIds), ['s']);
   assert.equal(result.data.schemes[0].id, 's');
+});
+
+test('wardrobe v2 migration assigns stable slots in existing display order', () => {
+  const { api } = load();
+  const result = api.migrateWardrobeData({
+    schemaVersion: 2,
+    schemes: [],
+    sets: [
+      { id: 'a', name: 'A', appearance: [], customOutfits: [] },
+      { id: 'b', name: 'B', appearance: [], customOutfits: [] },
+    ],
+    equippedIds: [],
+  });
+  assert.equal(result.toVersion, 3);
+  assert.deepEqual(plain(result.data.sets.map(set => ({ id: set.id, slot: set.slot }))), [
+    { id: 'a', slot: 0 },
+    { id: 'b', slot: 1 },
+  ]);
 });
 
 test('set Appearance Property keeps BC empty layer keys, offsets, priorities and TypeRecord differences', () => {
@@ -280,7 +298,7 @@ test('COE-SET round trip packages each dependency once and remaps ids on import'
   const target = load({ assets: [dress, eyes] });
   target.api.setWardrobeForTest({ schemaVersion: 2, schemes: [], sets: [], equippedIds: [] });
   const parsed = target.api.parseSetExchangeString(text);
-  const plan = target.api.buildSetImportPlan(parsed);
+  const plan = target.api.buildSetImportPlan(parsed, 7);
   assert.equal(plan.report.outfitsCreated, 1);
   assert.notEqual(plan.set.customOutfits[0].schemeId, 'sender-id');
   target.api.commitSetImportPlan(plan, { persist() {} });
@@ -303,7 +321,7 @@ test('set import reuses identical composition and skips an all-missing dependenc
   const text = source.api.createSetExchangeString('set');
   const target = load({ assets: [dress] });
   target.api.setWardrobeForTest({ schemaVersion: 2, schemes: [{ id: 'existing', composition: compositionFor(dress, '本地名字') }], sets: [], equippedIds: [] });
-  const plan = target.api.buildSetImportPlan(target.api.parseSetExchangeString(text));
+  const plan = target.api.buildSetImportPlan(target.api.parseSetExchangeString(text), 5);
   assert.equal(plan.report.outfitsReused, 1);
   assert.equal(plan.report.outfitsSkipped, 1);
   assert.equal(plan.report.missingLayers, 1);
@@ -324,9 +342,67 @@ test('set import commit is atomic when persistence fails', () => {
   const target = load({ assets: [dress] });
   const initial = { schemaVersion: 2, schemes: [], sets: [], equippedIds: [] };
   target.api.setWardrobeForTest(initial);
-  const plan = target.api.buildSetImportPlan(target.api.parseSetExchangeString(text));
+  const plan = target.api.buildSetImportPlan(target.api.parseSetExchangeString(text), 3);
   assert.throws(() => target.api.commitSetImportPlan(plan, { persist() { throw new Error('quota'); } }), /quota/);
   assert.deepEqual(plain(target.api.getWardrobeForTest()), plain(target.api.normalizeWardrobe(initial)));
+});
+
+test('fixed wardrobe slots save, overwrite and delete without moving neighboring sets', () => {
+  const eyes = appearanceAsset('Eyes', 'AnimeEyes', false);
+  const player = { AccountName: 'A', MemberNumber: 1, AssetFamily: 'Female3DCG', Appearance: [
+    { Asset: eyes, Color: ['#55aaff'], Property: {} },
+  ], AppearanceLayers: [], ExtensionSettings: {} };
+  const { api } = load({ assets: [eyes], player });
+  api.setWardrobeForTest({
+    schemaVersion: 3, schemes: [], equippedIds: [],
+    sets: [{ id: 'neighbor', slot: 8, name: '邻居', appearance: [], customOutfits: [] }],
+  });
+  const saved = api.saveCurrentSetToSlotTransaction(3, '第三格', { persist() {} }).set;
+  assert.equal(saved.slot, 3);
+  assert.equal(api.firstEmptySetSlot(), 0);
+  player.Appearance[0].Color = ['#ff0000'];
+  const overwritten = api.overwriteCurrentSetTransaction(3, { persist() {} }).set;
+  assert.equal(overwritten.id, saved.id);
+  assert.deepEqual(plain(overwritten.appearance[0].color), ['#ff0000']);
+  api.deleteSetTransaction(saved.id, { persist() {} });
+  assert.equal(api.setAtSlot(3), null);
+  assert.equal(api.setAtSlot(8).id, 'neighbor');
+});
+
+test('single set import requires a target slot and replaces only that slot', () => {
+  const eyes = appearanceAsset('Eyes', 'AnimeEyes', false);
+  const source = load({ assets: [eyes] });
+  source.api.setWardrobeForTest({
+    schemaVersion: 3, schemes: [], equippedIds: [],
+    sets: [{ id: 'source', slot: 0, name: '导入套装', appearance: [{ group: 'Eyes', asset: 'AnimeEyes' }], customOutfits: [] }],
+  });
+  const text = source.api.createSetExchangeString('source');
+  const target = load({ assets: [eyes] });
+  target.api.setWardrobeForTest({
+    schemaVersion: 3,
+    schemes: [{ id: 'kept-outfit', composition: emptyComposition('保留服装') }],
+    sets: [
+      { id: 'old', slot: 4, name: '旧套装', appearance: [], customOutfits: [{ slotGroup: 'Cloth', schemeId: 'kept-outfit' }] },
+      { id: 'neighbor', slot: 5, name: '邻居', appearance: [], customOutfits: [] },
+    ],
+    equippedIds: [],
+  });
+  const parsed = target.api.parseSetExchangeString(text);
+  assert.throws(() => target.api.buildSetImportPlan(parsed), /选择一个套装格子/);
+  const plan = target.api.buildSetImportPlan(parsed, 4);
+  assert.equal(plan.replacedSet.id, 'old');
+  target.api.commitSetImportPlan(plan, { persist() {} });
+  assert.equal(target.api.setAtSlot(4).name, '导入套装');
+  assert.equal(target.api.setAtSlot(5).id, 'neighbor');
+  assert.deepEqual(plain(target.api.getWardrobeForTest().schemes.map(entry => entry.id)), ['kept-outfit']);
+});
+
+test('wardrobe accepts 24 fixed slots and rejects a twenty-fifth stored set', () => {
+  const { api } = load();
+  const sets = Array.from({ length: 24 }, (_, slot) => ({ id: `s${slot}`, slot, name: `S${slot}`, appearance: [], customOutfits: [] }));
+  const migrated = api.migrateWardrobeData({ schemaVersion: 3, schemes: [], sets, equippedIds: [] });
+  assert.equal(migrated.data.sets.length, 24);
+  assert.throws(() => api.migrateWardrobeData({ schemaVersion: 3, schemes: [], sets: [...sets, { id: 'extra', slot: 0, name: 'X', appearance: [], customOutfits: [] }], equippedIds: [] }), /超过 24 套/);
 });
 
 test('deleting a set never deletes its referenced custom outfit', () => {

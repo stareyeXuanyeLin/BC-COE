@@ -33,9 +33,9 @@
     return true;
   }
 
-  function combinedEquippedComposition() {
-    const equipped = new Set(ensureEquippedIds());
-    const selected = wardrobe.schemes.filter(scheme => equipped.has(scheme.id));
+  function combineSchemes(schemeIds, data = wardrobe) {
+    const equipped = new Set(Array.isArray(schemeIds) ? schemeIds : []);
+    const selected = (data?.schemes || []).filter(scheme => equipped.has(scheme.id));
     const materials = [];
     const layers = [];
     for (const scheme of selected) {
@@ -61,6 +61,10 @@
     // above preserves independent per-asset rotation/scale even when schemes are
     // equipped together. There is deliberately no composition-wide transform.
     return normalizeComposition(combined);
+  }
+
+  function combinedEquippedComposition() {
+    return combineSchemes(ensureEquippedIds(), wardrobe);
   }
 
   function refreshLocalComposition() {
@@ -281,26 +285,18 @@
     loadWardrobe();
     ensureEquippedIds();
     syncEquippedSchemes();
-    const exchangeMenu = '<details class="coe-menu"><summary class="coe-btn">导入导出 ▾</summary><div class="coe-menu-panel"><button data-import-outfit>导入单件服装</button><button data-import-set>导入套装</button><button data-import-wardrobe>导入整个衣柜</button><button data-export-wardrobe>导出整个衣柜</button></div></details>';
-    const primary = wardrobeView === "sets" ? "保存当前外观" : "＋ 新建自定义服装";
-    const body = rootShell("COE 衣柜", `<button class="coe-btn coe-primary" data-action="new">${primary}</button>${exchangeMenu}<button class="coe-btn" data-action="unequip-all">全部卸下</button><button class="coe-btn" data-action="close">关闭</button>`);
+    const exchangeMenu = '<details class="coe-menu"><summary class="coe-btn">导入导出 ▾</summary><div class="coe-menu-panel"><button data-import-outfit>导入单件服装</button><button data-import-set>导入套装到所选格</button><button data-import-wardrobe>导入整个衣柜</button><button data-export-wardrobe>导出整个衣柜</button></div></details>';
+    const outfitActions = wardrobeView === "outfits" ? '<button class="coe-btn coe-primary" data-action="new">＋ 新建自定义服装</button><button class="coe-btn" data-action="unequip-all">全部卸下</button>' : "";
+    const body = rootShell("COE 衣柜", `${outfitActions}${exchangeMenu}<button class="coe-btn" data-action="close">关闭</button>`);
     uiMode = "wardrobe";
     const root = document.getElementById(ROOT_ID);
     root.classList.add("coe-wardrobe-root");
-    root.querySelector('[data-action="new"]').addEventListener("click", () => {
-      if (wardrobeView === "outfits") return openEditor({ version: 2, name: "新方案", layers: [], recycle: [] }, null);
-      if (!ensureWardrobeWritable()) return;
-      openSetNameModal("保存当前外观为套装", `新套装 ${wardrobe.sets.length + 1}`, name => {
-        const result = saveCurrentSetTransaction(name);
-        renderWardrobe(body);
-        toast(`已保存套装「${result.set.name}」`);
-      });
-    });
+    root.querySelector('[data-action="new"]')?.addEventListener("click", () => openEditor({ version: 2, name: "新方案", layers: [], recycle: [] }, null));
     root.querySelector("[data-import-outfit]").addEventListener("click", () => showOutfitImport(body));
-    root.querySelector("[data-import-set]").addEventListener("click", () => showSetImport(body));
+    root.querySelector("[data-import-set]").addEventListener("click", () => showSetImport(body, selectedSetSlot));
     root.querySelector("[data-import-wardrobe]").addEventListener("click", () => importWardrobeFile(body));
     root.querySelector("[data-export-wardrobe]").addEventListener("click", downloadWardrobeFile);
-    root.querySelector('[data-action="unequip-all"]').addEventListener("click", () => {
+    root.querySelector('[data-action="unequip-all"]')?.addEventListener("click", () => {
       if (!ensureWardrobeWritable()) return;
       wardrobe.equippedIds = [];
       persistWardrobe();
@@ -334,11 +330,11 @@
     content.className = "coe-wardrobe-content";
     tabs.querySelectorAll("[data-view]").forEach(button => button.addEventListener("click", () => {
       wardrobeView = button.dataset.view === "sets" ? "sets" : "outfits";
-      const primary = document.querySelector(`#${ROOT_ID} [data-action="new"]`);
-      if (primary) primary.textContent = wardrobeView === "sets" ? "保存当前外观" : "＋ 新建自定义服装";
-      renderWardrobe(body);
+      openWardrobe(wardrobeView);
     }));
     body.append(tabs, content);
+    const root = document.getElementById(ROOT_ID);
+    root?.classList.toggle("coe-set-gallery-root", wardrobeView === "sets");
     if (wardrobeView === "sets") return renderSetWardrobe(content);
     return renderOutfitWardrobe(content);
   }

@@ -1,5 +1,5 @@
   const COMPOSITION_VERSION = 6;
-  const WARDROBE_SCHEMA_VERSION = 2;
+  const WARDROBE_SCHEMA_VERSION = 3;
   const LEGACY_WARDROBE_VERSION = 7;
 
   function materialKey(group, asset) {
@@ -440,13 +440,22 @@
       return true;
     });
     const setIds = new Set();
+    const setSlots = new Set();
     const sets = [];
     for (const rawSet of Array.isArray(raw?.sets) ? raw.sets.slice(0, MAX_SETS) : []) {
       const set = normalizeSet(rawSet, { validSchemeIds: validIds });
       if (!set || setIds.has(set.id)) continue;
+      let slot = Number.isInteger(set.slot) && set.slot >= 0 && set.slot < MAX_SETS && !setSlots.has(set.slot) ? set.slot : null;
+      if (slot == null) {
+        slot = Array.from({ length: MAX_SETS }, (_, index) => index).find(index => !setSlots.has(index));
+      }
+      if (slot == null) break;
+      set.slot = slot;
       setIds.add(set.id);
+      setSlots.add(slot);
       sets.push(set);
     }
+    sets.sort((a, b) => a.slot - b.slot);
     return {
       schemaVersion: WARDROBE_SCHEMA_VERSION,
       schemes,

@@ -27,9 +27,15 @@
       throw wardrobeMigrationError("too-many-sets", `套装衣柜超过 ${MAX_SETS} 套`);
     }
     const setIds = new Set();
+    const setSlots = new Set();
     for (const set of Array.isArray(raw.sets) ? raw.sets : []) {
       validateStoredSetShape(set);
       if (setIds.has(set.id)) throw wardrobeMigrationError("duplicate-set-id", "衣柜包含重复的套装 ID");
+      if (schemaVersion >= 3) {
+        if (!Number.isInteger(set.slot) || set.slot < 0 || set.slot >= MAX_SETS) throw wardrobeMigrationError("invalid-set-storage-slot", "套装储存格无效");
+        if (setSlots.has(set.slot)) throw wardrobeMigrationError("duplicate-set-storage-slot", "衣柜包含重复的套装储存格");
+        setSlots.add(set.slot);
+      }
       setIds.add(set.id);
     }
     if (raw.schemes.length > MAX_SCHEMES) {
@@ -81,6 +87,12 @@
       schemaVersion: 2,
       schemes: cloneJSON(raw.schemes),
       sets: [],
+      equippedIds: cloneJSON(raw.equippedIds),
+    }),
+    3: raw => ({
+      schemaVersion: 3,
+      schemes: cloneJSON(raw.schemes),
+      sets: (raw.sets || []).slice(0, MAX_SETS).map((set, slot) => ({ ...cloneJSON(set), slot })),
       equippedIds: cloneJSON(raw.equippedIds),
     }),
   });

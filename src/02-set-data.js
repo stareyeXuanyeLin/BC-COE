@@ -125,6 +125,7 @@
     }
     return {
       id: typeof raw.id === "string" && raw.id ? raw.id.slice(0, 100) : uid(),
+      slot: Number.isInteger(raw.slot) && raw.slot >= 0 && raw.slot < MAX_SETS ? raw.slot : null,
       name: String(raw.name || "未命名套装").slice(0, 60),
       appearance,
       customOutfits,
@@ -140,6 +141,7 @@
       appearance: normalized.appearance.map(compactAppearanceBundle).filter(Boolean),
       customOutfits: normalized.customOutfits.map(entry => ({ slotGroup: entry.slotGroup, schemeId: entry.schemeId })),
     };
+    if (Number.isInteger(normalized.slot)) compact.slot = normalized.slot;
     if (utf8Bytes(compact) > MAX_SET_BYTES) throw new Error("set-byte-budget");
     return compact;
   }
@@ -166,6 +168,7 @@
   function validateStoredSetShape(raw) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw wardrobeMigrationError("invalid-set", "衣柜包含无效的套装");
     if (typeof raw.id !== "string" || !raw.id) throw wardrobeMigrationError("invalid-set-id", "套装 ID 无效");
+    if (raw.slot != null && (!Number.isInteger(raw.slot) || raw.slot < 0 || raw.slot >= MAX_SETS)) throw wardrobeMigrationError("invalid-set-storage-slot", "套装储存格无效");
     if (!Array.isArray(raw.appearance) || !Array.isArray(raw.customOutfits)) throw wardrobeMigrationError("invalid-set-shape", "套装缺少外观或自定义服装列表");
     if (raw.appearance.length > MAX_SET_APPEARANCE_ITEMS) throw wardrobeMigrationError("too-many-set-appearance", `套装外观超过 ${MAX_SET_APPEARANCE_ITEMS} 件`);
     if (raw.customOutfits.length > MAX_SET_CUSTOM_OUTFITS) throw wardrobeMigrationError("too-many-set-outfits", `套装自定义服装超过 ${MAX_SET_CUSTOM_OUTFITS} 件`);
@@ -229,9 +232,9 @@
     return { appearance, customOutfits, anomalies };
   }
 
-  function captureCurrentSet(name, character = globalThis.Player, data = wardrobe) {
+  function captureCurrentSet(name, character = globalThis.Player, data = wardrobe, slot = null) {
     const captured = captureAppearanceForSet(character, data);
-    const set = normalizeSet({ id: uid(), name, appearance: captured.appearance, customOutfits: captured.customOutfits }, {
+    const set = normalizeSet({ id: uid(), slot, name, appearance: captured.appearance, customOutfits: captured.customOutfits }, {
       validSchemeIds: new Set((data?.schemes || []).map(entry => entry.id)),
     });
     compactSetForStorage(set, { validSchemeIds: new Set((data?.schemes || []).map(entry => entry.id)) });

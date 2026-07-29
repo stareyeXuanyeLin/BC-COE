@@ -34,16 +34,48 @@
     return output;
   }
 
+  function sanitizeSetLayerOrigin(value) {
+    if (Object.prototype.toString.call(value) !== "[object Object]") throw new Error("set-layer-origin-not-plain");
+    const output = {};
+    const entries = Object.entries(value);
+    if (entries.length > 32) throw new Error("set-layer-origin-keys");
+    for (const [poseName, coordinate] of entries) {
+      if (poseName.length > 80 || SET_PROPERTY_DENIED_KEYS.has(poseName)) throw new Error("set-layer-origin-key");
+      if (typeof coordinate !== "number" || !Number.isFinite(coordinate) || Math.abs(coordinate) > 1000000000) {
+        throw new Error("set-layer-origin-coordinate");
+      }
+      output[poseName] = coordinate;
+    }
+    return output;
+  }
+
+  function sanitizeSetLayerOverrides(value) {
+    if (!Array.isArray(value) || value.length > 64) throw new Error("set-layer-overrides-array");
+    // LSCG stores per-layer translation as absolute coordinates indexed by
+    // Asset.Layer position. Keep array indexes stable while accepting only the
+    // two fields consumed by its BeforeDraw hook.
+    return value.map(entry => {
+      if (Object.prototype.toString.call(entry) !== "[object Object]") return {};
+      const output = {};
+      for (const field of ["DrawingLeft", "DrawingTop"]) {
+        if (!Object.prototype.hasOwnProperty.call(entry, field)) continue;
+        try { output[field] = sanitizeSetLayerOrigin(entry[field]); }
+        catch (_) { /* drop only the malformed axis */ }
+      }
+      return output;
+    });
+  }
+
   function sanitizeSetProperty(value) {
     if (value == null || typeof value !== "object" || Array.isArray(value)) return {};
     const output = {};
     // Preserve the BC appearance-difference fields individually. A malformed
     // optional field must not erase a valid TypeRecord or Drawing offset.
-    const allowed = new Set(["Type", "TypeRecord", "DrawingLeft", "DrawingTop", "OverridePriority", "Opacity", "Tint"]);
+    const allowed = new Set(["Type", "TypeRecord", "DrawingLeft", "DrawingTop", "OverridePriority", "Opacity", "Tint", "LayerOverrides"]);
     for (const key of allowed) {
       if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
       if (SET_PROPERTY_DENIED_KEYS.has(key)) continue;
-      try { output[key] = sanitizeSetPropertyValue(value[key]); }
+      try { output[key] = key === "LayerOverrides" ? sanitizeSetLayerOverrides(value[key]) : sanitizeSetPropertyValue(value[key]); }
       catch (_) { /* drop only the malformed field */ }
     }
     return utf8Bytes(output) <= 8192 ? output : {};

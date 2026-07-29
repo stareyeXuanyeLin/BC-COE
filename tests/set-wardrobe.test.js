@@ -49,6 +49,44 @@ test('set Appearance Property keeps BC empty layer keys, offsets, priorities and
   });
 });
 
+test('LSCG per-layer translation survives set capture, storage normalization and application', () => {
+  const dress = appearanceAsset('Cloth', 'Dress');
+  dress.Group.Clothing = true;
+  dress.Layer = [
+    { Name: 'Base', DrawingLeft: { '': 10 }, DrawingTop: { '': 20 } },
+    { Name: 'Trim', DrawingLeft: { '': 30 }, DrawingTop: { '': 40 } },
+  ];
+  const layerOverrides = [
+    { DrawingLeft: { '': 135, Kneel: 125 }, DrawingTop: { '': 246 }, Rotation: 0.5 },
+    { DrawingLeft: { '': -20 }, DrawingTop: { '': 80 }, ArbitraryPluginData: { unsafe: true } },
+  ];
+  const player = {
+    AccountName: 'A', MemberNumber: 1, AssetFamily: 'Female3DCG', Appearance: [
+      { Asset: dress, Color: ['#ffffff'], Property: { LayerOverrides: layerOverrides } },
+    ], AppearanceLayers: [], ExtensionSettings: {},
+  };
+  const { api } = load({ assets: [dress], player });
+  api.setWardrobeForTest({ schemaVersion: 2, schemes: [], sets: [], equippedIds: [] });
+
+  const saved = api.saveCurrentSetTransaction('位移套装', { persist() {}, sync: false }).set;
+  assert.deepEqual(plain(saved.appearance[0].property), {
+    LayerOverrides: [
+      { DrawingLeft: { '': 135, Kneel: 125 }, DrawingTop: { '': 246 } },
+      { DrawingLeft: { '': -20 }, DrawingTop: { '': 80 } },
+    ],
+  });
+  assert.match(JSON.stringify(api.compactSetForStorage(saved)), /LayerOverrides/);
+
+  player.Appearance[0].Property = {};
+  api.applySetTransaction(saved, { persist() {}, sync: false });
+  assert.deepEqual(plain(player.Appearance[0].Property), {
+    LayerOverrides: [
+      { DrawingLeft: { '': 135, Kneel: 125 }, DrawingTop: { '': 246 } },
+      { DrawingLeft: { '': -20 }, DrawingTop: { '': 80 } },
+    ],
+  });
+});
+
 test('set normalization strips expressions, runtime lock fields, duplicate groups and dangling references', () => {
   const { api } = load();
   const wardrobe = api.normalizeWardrobe({

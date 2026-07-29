@@ -517,11 +517,16 @@
         var mirrorY = opts.MirrorY === true;
         var overallMirrorX = opts.OverallMirrorX === true;
         var overallMirrorY = opts.OverallMirrorY === true;
-        // 无变换时直接走原始函数，保持零开销。
+        var needsGeometryCapture = opts.__coeGeometryCharacter &&
+          opts.__coeGeometryMaterialId != null && opts.__coeGeometryLayerKey != null &&
+          opts.__coeGeometryIsBlink !== true;
+        // 普通 BC 图层没有 COE 几何身份；无变换时只走原始函数，避免为全局图层
+        // 额外调用底层纹理加载器。合成图层仍需读取一次尺寸供整体 pivot 使用。
         if (!rotation && Math.abs(scale - 1) <= 0.001 && !mirrorX && !mirrorY &&
           !overallRotation && Math.abs(overallScale - 1) <= 0.001 && !overallMirrorX && !overallMirrorY &&
           !overallOffsetX && !overallOffsetY) {
           const result = drawOriginal();
+          if (!needsGeometryCapture) return result;
           const textureInfo = typeof GLDrawLoadImage === "function" ? GLDrawLoadImage(gl, url) : null;
           cacheOverallLayerGeometry(opts, dstX, dstY, offsetX, Number(textureInfo?.width), Number(textureInfo?.height), gl.canvas.height, url);
           return result;
@@ -625,7 +630,9 @@
           try { drawOriginal(); } catch (_e2) {}
         }
         };
-        modApi.hookFunction("GLDrawImage", 10, transformHook);
+        // SugarChain ImageMapping 在优先级 10 映射 URL、优先级 0 剥离 @nomap/。
+        // COE 必须位于它们之后，避免把控制路径直接传给 GLDrawLoadImage。
+        modApi.hookFunction("GLDrawImage", -1, transformHook);
         const installedTarget = globalThis.GLDrawImage;
         if (typeof installedTarget === "function") {
           installedTarget._coeTransformHooked = true;

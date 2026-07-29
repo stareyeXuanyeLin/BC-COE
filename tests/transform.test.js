@@ -523,6 +523,60 @@ test('stale editor refs fall back to a structural canvas rebuild', () => {
   assert.equal(canvasLoads, 1);
 });
 
+test('GLDrawImage hook runs after image URL normalization and leaves ordinary no-transform layers on the original path', () => {
+  let textureLoads = 0;
+  let originalDraws = 0;
+  const env = load({ globals: {
+    GLDrawImage() {}, m4: {},
+    GLDrawLoadImage() { textureLoads++; return { width: 100, height: 80 }; },
+  } });
+  const hooks = {};
+  env.api.installHooksForTest({ hookFunction(name, priority, fn) { hooks[name] = { priority, fn }; } });
+
+  assert.equal(hooks.GLDrawImage.priority, -1);
+  const gl = { canvas: { height: 550 } };
+  const result = hooks.GLDrawImage.fn([
+    '@nomap/Assets/Female3DCG/Eyes/Eyes5.png', gl, 0, 0, {}, 0,
+  ], () => { originalDraws++; return 'drawn'; });
+
+  assert.equal(result, 'drawn');
+  assert.equal(originalDraws, 1);
+  assert.equal(textureLoads, 0);
+});
+
+test('GLDrawImage hook receives a normalized @nomap path before synthetic geometry texture lookup', () => {
+  const loadedUrls = [];
+  const env = load({ globals: {
+    GLDrawImage() {}, m4: {},
+    GLDrawLoadImage(_gl, url) { loadedUrls.push(url); return { width: 100, height: 80 }; },
+  } });
+  const hooks = {};
+  env.api.installHooksForTest({ hookFunction(name, priority, fn) { hooks[name] = { priority, fn }; } });
+
+  const imageMappingNoMapHook = {
+    priority: 0,
+    fn(args, next) {
+      if (typeof args[0] === 'string' && args[0].startsWith('@nomap/')) args[0] = args[0].substring(7);
+      return next(args);
+    },
+  };
+  const chain = [imageMappingNoMapHook, hooks.GLDrawImage].sort((a, b) => b.priority - a.priority);
+  const invoke = (index, args) => index < chain.length
+    ? chain[index].fn(args, nextArgs => invoke(index + 1, nextArgs))
+    : 'drawn';
+  const gl = { canvas: { height: 550 } };
+  const result = invoke(0, [
+    '@nomap/Assets/Female3DCG/Cloth/Dress.png', gl, 0, 0, {
+      __coeGeometryCharacter: env.player,
+      __coeGeometryMaterialId: 'm',
+      __coeGeometryLayerKey: '0:0',
+    }, 0,
+  ]);
+
+  assert.equal(result, 'drawn');
+  assert.deepEqual(loadedUrls, ['Assets/Female3DCG/Cloth/Dress.png']);
+});
+
 test('GLDrawImage transform hook retries after initialization race and recovers after overwrite', () => {
   let retry;
   const original = () => {};

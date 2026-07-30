@@ -404,13 +404,16 @@
       const context = snapshot.getContext?.("2d");
       if (!context) return null;
       context.clearRect(0, 0, snapshot.width, snapshot.height);
-      // Copy only the already-stabilized character canvas. Calling DrawCharacter
-      // here could run dynamic asset scripts and start a new, untracked rebuild
-      // between validation and cache commit.
-      if (!character.Canvas) return null;
-      const sourceHeight = Math.min(1000, Number(character.Canvas.height) || 1000);
-      const sourceTop = Math.max(0, (Number(character.Canvas.height) || sourceHeight) - sourceHeight);
-      context.drawImage(character.Canvas, 0, sourceTop, Number(character.Canvas.width) || 500, sourceHeight, 0, 0, snapshot.width, snapshot.height);
+      // BC's DrawCharacter handles CanvasUpperOverflow, HeightRatio,
+      // blink canvas selection and Invert offsets. Echo 服装扩展 and
+      // other appearance mods may change these dimensions; only the
+      // native draw path keeps the correct coordinate space.
+      // MustDraw is already false after the fixed-point loop, so this
+      // composes the cached canvas without rebuilding or triggering
+      // dynamic asset scripts.
+      if (typeof globalThis.DrawCharacter === "function") DrawCharacter(character, 0, 0, 1, false, context);
+      else if (character.Canvas) context.drawImage(character.Canvas, 0, 0, snapshot.width, snapshot.height);
+      else return null;
       return { snapshot, plan, cacheable: true, resources: finalResources };
     } catch (error) {
       warn(`套装「${set.name}」预览生成失败`, error);

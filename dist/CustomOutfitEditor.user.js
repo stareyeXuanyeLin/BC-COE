@@ -93,6 +93,7 @@
   let setPreviewQueue = [];
   let setPreviewRunning = false;
   let setPreviewCharacterSerial = 0;
+  let setPreviewWorkerCharacter = null;
   const setPreviewCache = new Map();
   let wardrobeReadState = { status: "absent", source: null, server: null, local: null, conflict: false };
   let persistenceBlocked = false;
@@ -2201,40 +2202,118 @@
   const CONTENT_MIN_PIXELS = 4;
   const CONTENT_SCAN_MAX_EDGE = 512;
   const textureContentPivotCache = new Map();
-  const pendingPreviewTexturesByCharacter = new WeakMap();
+  const previewResourcesByCharacter = new WeakMap();
+
+  function previewResourceState(character) {
+    let state = previewResourcesByCharacter.get(character);
+    if (!state) {
+      state = { resources: new Map(), observed: new Set(), pass: 0 };
+      previewResourcesByCharacter.set(character, state);
+    }
+    return state;
+  }
+
+  function settlePreviewResource(character, entry, status, error = null) {
+    if (!entry || previewResourcesByCharacter.get(character)?.resources.get(entry.url) !== entry) return;
+    if (entry.status === status && entry.error === error) return;
+    entry.status = status;
+    entry.error = error;
+    entry.settle?.();
+    entry.settle = null;
+    if (status === "ready") character.MustDraw = true;
+  }
+
+  function beginPreviewResourcePass(character) {
+    if (!isPreviewCompositionCharacter(character)) return;
+    const state = previewResourceState(character);
+    state.pass++;
+    state.observed = new Set();
+  }
 
   function trackPreviewTextureLoad(character, url, width, height) {
     if (!isPreviewCompositionCharacter(character) || !url) return;
-    let pending = pendingPreviewTexturesByCharacter.get(character);
+    const state = previewResourceState(character);
+    state.observed.add(url);
+    let entry = state.resources.get(url);
+    if (!entry) {
+      entry = { url, status: "unknown", error: null, image: null, promise: null, settle: null };
+      state.resources.set(url, entry);
+    }
     if (width > 1 && height > 1) {
-      pending?.delete(url);
+      settlePreviewResource(character, entry, "ready");
       return;
     }
     const image = typeof globalThis.GLDrawImageCache?.get === "function" ? globalThis.GLDrawImageCache.get(url) : null;
-    if (!image) return;
-    if (!pending) {
-      pending = new Set();
-      pendingPreviewTexturesByCharacter.set(character, pending);
-    }
-    if (image.complete === true && Number(image.naturalWidth || image.width) > 0) {
-      pending.delete(url);
-      character.MustDraw = true;
+    if (!image) {
+      entry.status = "unknown";
       return;
     }
-    if (pending.has(url)) return;
-    pending.add(url);
-    if (typeof image.addEventListener === "function") image.addEventListener("load", () => {
-      pending.delete(url);
-      character.MustDraw = true;
+    entry.image = image;
+    const naturalWidth = Number(image.naturalWidth || 0);
+    const naturalHeight = Number(image.naturalHeight || 0);
+    if (image.complete === true && naturalWidth > 0 && naturalHeight > 0) {
+      if (typeof image.decode === "function" && entry.status !== "ready") {
+        entry.status = "pending";
+        entry.promise ||= Promise.resolve().then(() => image.decode()).then(
+          () => settlePreviewResource(character, entry, "ready"),
+          error => settlePreviewResource(character, entry, "failed", error),
+        );
+      } else settlePreviewResource(character, entry, "ready");
+      return;
+    }
+    if (image.complete === true && "naturalWidth" in image && naturalWidth === 0) {
+      settlePreviewResource(character, entry, "failed", new Error("image-load-failed"));
+      return;
+    }
+    if (entry.status === "pending" && entry.image === image) return;
+    entry.status = "pending";
+    entry.promise = new Promise(resolve => { entry.settle = resolve; });
+    if (typeof image.addEventListener !== "function") return;
+    image.addEventListener("load", () => {
+      if (typeof image.decode === "function") {
+        Promise.resolve().then(() => image.decode()).then(
+          () => settlePreviewResource(character, entry, "ready"),
+          error => settlePreviewResource(character, entry, "failed", error),
+        );
+      } else settlePreviewResource(character, entry, "ready");
     }, { once: true });
+    image.addEventListener("error", error => settlePreviewResource(character, entry, "failed", error || new Error("image-load-failed")), { once: true });
+  }
+
+  function previewResourcePassSummary(character) {
+    const state = previewResourcesByCharacter.get(character);
+    if (!state) return { key: "", total: 0, ready: 0, pending: 0, unknown: 0, failed: 0, promises: [] };
+    const urls = [...state.observed].sort();
+    const summary = { key: JSON.stringify(urls), total: urls.length, ready: 0, pending: 0, unknown: 0, failed: 0, promises: [] };
+    for (const url of urls) {
+      const entry = state.resources.get(url);
+      const status = entry?.status || "unknown";
+      summary[status] = (summary[status] || 0) + 1;
+      if (status === "pending" && entry?.promise) summary.promises.push(entry.promise);
+    }
+    return summary;
+  }
+
+  async function waitForPreviewResourcePass(character, timeoutMs = 6000) {
+    let summary = previewResourcePassSummary(character);
+    if (!summary.pending) return summary;
+    let timer = 0;
+    await Promise.race([
+      Promise.allSettled(summary.promises),
+      new Promise(resolve => { timer = setTimeout(resolve, Math.max(0, timeoutMs)); }),
+    ]);
+    if (timer) clearTimeout(timer);
+    summary = previewResourcePassSummary(character);
+    return summary;
   }
 
   function previewTexturesPending(character) {
-    return (pendingPreviewTexturesByCharacter.get(character)?.size || 0) > 0;
+    const summary = previewResourcePassSummary(character);
+    return summary.pending > 0 || summary.unknown > 0;
   }
 
   function clearPreviewTextureTracking(character) {
-    if (character) pendingPreviewTexturesByCharacter.delete(character);
+    if (character) previewResourcesByCharacter.delete(character);
   }
 
   // Asset metadata in BC R130 does not contain rendered texture dimensions.
@@ -2674,15 +2753,20 @@
         var needsGeometryCapture = opts.__coeGeometryCharacter &&
           opts.__coeGeometryMaterialId != null && opts.__coeGeometryLayerKey != null &&
           opts.__coeGeometryIsBlink !== true;
-        // 普通 BC 图层没有 COE 几何身份；无变换时只走原始函数，避免为全局图层
-        // 额外调用底层纹理加载器。合成图层仍需读取一次尺寸供整体 pivot 使用。
+        var previewCharacter = opts.__coePreviewCharacter;
+        // 普通 BC 图层没有 COE 几何身份；只有套装预览事务需要额外读取
+        // 纹理状态，用来把身体、脸、普通服装与合成图层纳入同一资源屏障。
         if (!rotation && Math.abs(scale - 1) <= 0.001 && !mirrorX && !mirrorY &&
           !overallRotation && Math.abs(overallScale - 1) <= 0.001 && !overallMirrorX && !overallMirrorY &&
           !overallOffsetX && !overallOffsetY) {
           const result = drawOriginal();
-          if (!needsGeometryCapture) return result;
-          const textureInfo = typeof GLDrawLoadImage === "function" ? GLDrawLoadImage(gl, url) : null;
-          cacheOverallLayerGeometry(opts, dstX, dstY, offsetX, Number(textureInfo?.width), Number(textureInfo?.height), gl.canvas.height, url);
+          if (!needsGeometryCapture && !previewCharacter) return result;
+          const cachedImage = previewCharacter && typeof globalThis.GLDrawImageCache?.get === "function" ? globalThis.GLDrawImageCache.get(url) : null;
+          const textureInfo = needsGeometryCapture && typeof GLDrawLoadImage === "function" ? GLDrawLoadImage(gl, url) : null;
+          if (previewCharacter) trackPreviewTextureLoad(previewCharacter, url,
+            Number(textureInfo?.width || cachedImage?.naturalWidth || cachedImage?.width),
+            Number(textureInfo?.height || cachedImage?.naturalHeight || cachedImage?.height));
+          if (needsGeometryCapture) cacheOverallLayerGeometry(opts, dstX, dstY, offsetX, Number(textureInfo?.width), Number(textureInfo?.height), gl.canvas.height, url);
           return result;
         }
 
@@ -2701,6 +2785,7 @@
         // GLDrawLoadImage 返回的缓存尺寸才是可靠来源；URL 中通常是 Dress_Base.png，
         // 不能直接把完整文件名当作 AssetLayer.Name。
         var textureInfo = typeof GLDrawLoadImage === "function" ? GLDrawLoadImage(gl, url) : null;
+        if (previewCharacter) trackPreviewTextureLoad(previewCharacter, url, Number(textureInfo?.width), Number(textureInfo?.height));
         var dim = textureInfo && Number(textureInfo.width) > 0 && Number(textureInfo.height) > 0
           ? { w: textureInfo.width, h: textureInfo.height }
           : resolveTextureDimensions(url);
@@ -2981,7 +3066,8 @@
     modApi.hookFunction("CommonDrawAppearanceBuild", 10, (args, next) => {
       const character = args[0];
       const groups = syntheticByCharacter.get(character) || [];
-      if (!groups.length) return next(args);
+      const previewTransaction = isPreviewCompositionCharacter(character);
+      if (!groups.length && !previewTransaction) return next(args);
       const originalAppearance = character.Appearance;
       const originalLayers = character.AppearanceLayers;
       const originalCallbacks = args[1];
@@ -2992,7 +3078,7 @@
         const renderableAppearance = previewAssets
           ? (originalAppearance || []).filter(item => !(previewAssets.has(item?.Asset) && isEditorRemovableAsset(item?.Asset)))
           : (originalAppearance || []);
-        character.Appearance = groups.map(group => group.item).concat(renderableAppearance);
+        character.Appearance = groups.length ? groups.map(group => group.item).concat(renderableAppearance) : renderableAppearance;
         const drawLayers = (originalLayers || []).map(layer => {
           const marker = layer.__coeSyntheticLayer;
           if (!marker) return layer;
@@ -3029,9 +3115,12 @@
             callbacks[name] = function (...callbackArgs) {
               const marker = currentDrawLayer?.__coeSyntheticLayer;
               const ref = marker?.ref;
-              if (!ref) return callback.apply(this, callbackArgs);
               const options = callbackArgs[3] || {};
-              const transformed = { ...options };
+              const transformed = previewTransaction ? { ...options, __coePreviewCharacter: character } : { ...options };
+              if (!ref) {
+                if (previewTransaction) callbackArgs[3] = transformed;
+                return callback.apply(this, callbackArgs);
+              }
               if (typeof ref.rotation === "number" && isFinite(ref.rotation) && ref.rotation !== 0)
                 transformed.Rotation = clamp(ref.rotation, -Math.PI, Math.PI);
               if (typeof ref.scale === "number" && isFinite(ref.scale) && Math.abs(ref.scale - 1) > 0.001)
@@ -3194,7 +3283,7 @@
 
   function closeUI() {
     closeOwnedColorPicker();
-    if (typeof cancelSetPreviewQueue === "function") cancelSetPreviewQueue();
+    if (typeof cancelSetPreviewQueue === "function") cancelSetPreviewQueue({ dispose: true });
     restoreEditorAppearance();
     document.getElementById(ROOT_ID)?.remove();
     // Closing the local editor must not discard texture/geometry refreshes already
@@ -3826,9 +3915,23 @@
     try { if (character.CanvasBlink) { character.CanvasBlink.width = 0; character.CanvasBlink.height = 0; } } catch (_) { /* best effort */ }
   }
 
-  function cancelSetPreviewQueue() {
+  function getSetPreviewWorkerCharacter() {
+    if (setPreviewWorkerCharacter) return setPreviewWorkerCharacter;
+    if (typeof globalThis.CharacterLoadSimple !== "function") return null;
+    setPreviewWorkerCharacter = CharacterLoadSimple(`COESetPreviewWorker-${++setPreviewCharacterSerial}`);
+    return setPreviewWorkerCharacter;
+  }
+
+  function disposeSetPreviewWorker() {
+    const character = setPreviewWorkerCharacter;
+    setPreviewWorkerCharacter = null;
+    releaseSetPreviewCharacter(character);
+  }
+
+  function cancelSetPreviewQueue(options = {}) {
     setPreviewGeneration++;
     setPreviewQueue = [];
+    if (options.dispose === true) disposeSetPreviewWorker();
   }
 
   // A reconnect can leave the browser's image cache and the preview canvases at
@@ -3840,8 +3943,9 @@
   }
 
   async function buildSetPreviewSnapshot(set, generation) {
-    if (typeof globalThis.CharacterLoadSimple !== "function" || !globalThis.Player) return null;
-    const character = CharacterLoadSimple(`COESetPreview-${++setPreviewCharacterSerial}`);
+    if (!globalThis.Player) return null;
+    const character = getSetPreviewWorkerCharacter();
+    if (!character) return null;
     try {
       character.AssetFamily = Player.AssetFamily || "Female3DCG";
       character.Appearance = cloneAppearanceItems(Player.Appearance || []);
@@ -3851,37 +3955,54 @@
       const plan = buildSetApplyPlan(set, character, wardrobe);
       character.Appearance = plan.appearance;
       previewCompositionByCharacter.set(character, combineSchemes(plan.equippedIds, wardrobe));
+      clearPreviewTextureTracking(character);
       if (typeof globalThis.CharacterRefresh === "function") CharacterRefresh(character, false, false);
-      // Synthetic source textures are absent from the preview character's formal
-      // Appearance, so BC's DrawRefreshCharacterForImage cannot mark this isolated
-      // character dirty when their 1x1 placeholders finish loading. The renderer
-      // tracks those URLs for us; keep rebuilding until every observed texture is
-      // ready, with a bounded wait so a broken URL cannot stall the whole queue.
-      for (let attempt = 0; attempt < 40; attempt++) {
-        if (generation !== setPreviewGeneration) return null;
+
+      // CharacterLoadCanvas is a synchronous draw over asynchronous image caches.
+      // A quiet MustDraw flag cannot prove completeness, so each pass records every
+      // native and synthetic URL actually consumed by BC. Only two consecutive,
+      // identical, fully-ready dependency sets form a render fixed point.
+      const deadline = Date.now() + 10000;
+      let previousKey = null;
+      let stablePasses = 0;
+      for (let pass = 0; pass < 64 && Date.now() < deadline; pass++) {
+        if (generation !== setPreviewGeneration || character !== setPreviewWorkerCharacter) return null;
+        beginPreviewResourcePass(character);
+        character.MustDraw = true;
         if (typeof globalThis.CharacterLoadCanvas === "function") CharacterLoadCanvas(character);
-        await new Promise(resolve => setTimeout(resolve, attempt < 2 ? 0 : 60));
-        if (!character.MustDraw && !previewTexturesPending(character) && attempt >= 2) break;
+        character.MustDraw = false;
+        let resources = await waitForPreviewResourcePass(character, Math.max(0, deadline - Date.now()));
+        if (generation !== setPreviewGeneration || character !== setPreviewWorkerCharacter) return null;
+        if (resources.failed > 0) return null;
+        const complete = resources.total > 0 && resources.pending === 0 && resources.unknown === 0 && resources.ready === resources.total;
+        if (complete && resources.key === previousKey && !character.MustDraw) stablePasses++;
+        else stablePasses = 0;
+        previousKey = resources.key;
+        if (stablePasses >= 1) break;
+        if (resources.unknown > 0) await new Promise(resolve => setTimeout(resolve, 100));
+        else await new Promise(resolve => requestAnimationFrame(resolve));
       }
-      // The timeout is a safety boundary, not permission to capture a partial
-      // character. Capturing here used to poison setPreviewCache with a snapshot
-      // made from 1x1 texture placeholders; saving the same appearance to a new
-      // slot appeared to fix it only because that slot received a new fingerprint.
-      if (character.MustDraw || previewTexturesPending(character)) return null;
-      const cacheable = !previewTexturesPending(character);
+      const finalResources = previewResourcePassSummary(character);
+      if (stablePasses < 1 || character.MustDraw || finalResources.pending || finalResources.unknown || finalResources.failed) return null;
+
       const snapshot = document.createElement("canvas");
       snapshot.width = 500;
       snapshot.height = 1000;
       const context = snapshot.getContext?.("2d");
       if (!context) return null;
       context.clearRect(0, 0, snapshot.width, snapshot.height);
-      if (typeof globalThis.DrawCharacter === "function") DrawCharacter(character, 0, 0, 1, false, context);
-      else if (character.Canvas) context.drawImage(character.Canvas, 0, 0, snapshot.width, snapshot.height);
-      return { snapshot, plan, cacheable };
+      // Copy only the already-stabilized character canvas. Calling DrawCharacter
+      // here could run dynamic asset scripts and start a new, untracked rebuild
+      // between validation and cache commit.
+      if (!character.Canvas) return null;
+      const sourceHeight = Math.min(1000, Number(character.Canvas.height) || 1000);
+      const sourceTop = Math.max(0, (Number(character.Canvas.height) || sourceHeight) - sourceHeight);
+      context.drawImage(character.Canvas, 0, sourceTop, Number(character.Canvas.width) || 500, sourceHeight, 0, 0, snapshot.width, snapshot.height);
+      return { snapshot, plan, cacheable: true, resources: finalResources };
     } catch (error) {
       warn(`套装「${set.name}」预览生成失败`, error);
       return null;
-    } finally { releaseSetPreviewCharacter(character); }
+    }
   }
 
   async function runSetPreviewQueue() {
@@ -4416,6 +4537,7 @@
   function openWardrobe(view = wardrobeView) {
     restoreEditorAppearance();
     wardrobeView = view === "sets" ? "sets" : "outfits";
+    if (wardrobeView !== "sets" && typeof cancelSetPreviewQueue === "function") cancelSetPreviewQueue({ dispose: true });
     loadWardrobe();
     ensureEquippedIds();
     syncEquippedSchemes();
@@ -6642,6 +6764,9 @@
       setActiveCompositionForTest: value => { activeComposition = value; },
       setPreviewCompositionForTest: (character, value) => { if (value) previewCompositionByCharacter.set(character, value); else previewCompositionByCharacter.delete(character); },
       trackPreviewTextureForTest: trackPreviewTextureLoad,
+      beginPreviewResourcePassForTest: beginPreviewResourcePass,
+      previewResourcePassSummaryForTest: previewResourcePassSummary,
+      waitForPreviewResourcePassForTest: waitForPreviewResourcePass,
       previewTexturesPendingForTest: previewTexturesPending,
       clearPreviewTextureTrackingForTest: clearPreviewTextureTracking,
       setWardrobeForTest: value => { wardrobe = normalizeWardrobe(value, { validateReferences: false }); },

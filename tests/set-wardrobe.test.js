@@ -47,11 +47,80 @@ test('isolated set previews stay pending until synthetic source textures load', 
   api.clearPreviewTextureTrackingForTest(preview);
 });
 
-test('set preview cache accepts only snapshots whose observed textures finished loading', () => {
+test('set preview cache commits only after a stable fully-ready resource fixed point', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'src', '09-set-wardrobe.js'), 'utf8');
-  assert.match(source, /!character\.MustDraw && !previewTexturesPending\(character\)/);
-  assert.match(source, /const cacheable = !previewTexturesPending\(character\)/);
+  assert.match(source, /beginPreviewResourcePass\(character\)/);
+  assert.match(source, /await waitForPreviewResourcePass\(character/);
+  assert.match(source, /resources\.pending === 0 && resources\.unknown === 0 && resources\.ready === resources\.total/);
+  assert.match(source, /resources\.key === previousKey/);
   assert.match(source, /if \(result\.cacheable\) \{\s*setPreviewCache\.set/);
+  assert.doesNotMatch(source, /attempt < 40/);
+});
+
+test('unknown native preview resources remain incomplete instead of poisoning the snapshot cache', () => {
+  const preview = { MustDraw: false };
+  const { api } = load({ globals: { GLDrawImageCache: new Map() } });
+  api.setPreviewCompositionForTest(preview, emptyComposition());
+  api.beginPreviewResourcePassForTest(preview);
+  api.trackPreviewTextureForTest(preview, 'Assets/Female3DCG/BodyUpper/FemaleBody_Base.png', 1, 1);
+  const summary = api.previewResourcePassSummaryForTest(preview);
+  assert.equal(summary.total, 1);
+  assert.equal(summary.unknown, 1);
+  assert.equal(api.previewTexturesPendingForTest(preview), true);
+});
+
+test('late image events from a previous worker job cannot settle the next job', () => {
+  const makePendingImage = () => {
+    const listeners = {};
+    return { image: { complete: false, naturalWidth: 0, naturalHeight: 0, addEventListener(name, listener) { listeners[name] = listener; } }, listeners };
+  };
+  const url = 'Assets/Female3DCG/BodyUpper/FemaleBody_Base.png';
+  const first = makePendingImage();
+  const second = makePendingImage();
+  const cache = new Map([[url, first.image]]);
+  const preview = { MustDraw: false };
+  const { api } = load({ globals: { GLDrawImageCache: cache } });
+  api.setPreviewCompositionForTest(preview, emptyComposition());
+  api.beginPreviewResourcePassForTest(preview);
+  api.trackPreviewTextureForTest(preview, url, 1, 1);
+  api.clearPreviewTextureTrackingForTest(preview);
+  cache.set(url, second.image);
+  api.beginPreviewResourcePassForTest(preview);
+  api.trackPreviewTextureForTest(preview, url, 1, 1);
+  first.listeners.load();
+  assert.equal(api.previewResourcePassSummaryForTest(preview).pending, 1);
+  assert.equal(preview.MustDraw, false);
+  second.listeners.load();
+  assert.equal(api.previewResourcePassSummaryForTest(preview).ready, 1);
+  assert.equal(preview.MustDraw, true);
+});
+
+test('preview resource barrier includes every native and synthetic callback URL', () => {
+  const body = appearanceAsset('BodyUpper', 'FemaleBody', false);
+  const preview = { AssetFamily: 'Female3DCG', Appearance: [{ Asset: body, Color: 'Default', Property: {} }], AppearanceLayers: [] };
+  const { api } = load({ assets: [body] });
+  api.setPreviewCompositionForTest(preview, emptyComposition());
+  const hooks = {};
+  api.installHooksForTest({ hookFunction(name, _priority, fn) { hooks[name] = fn; } });
+  preview.AppearanceLayers = hooks.CharacterAppearanceSortLayers([preview], () => [{ Asset: body, Priority: 0 }]);
+  let observedOptions;
+  const callbacks = {
+    drawImage(_src, _x, _y, options) { observedOptions = options; },
+    drawImageBlink() {}, drawImageColorize() {}, drawImageColorizeBlink() {},
+  };
+  hooks.CommonDrawAppearanceBuild([preview, callbacks], args => {
+    for (const _layer of preview.AppearanceLayers) args[1].drawImage('Assets/Female3DCG/BodyUpper/FemaleBody_Base.png', 0, 0, {});
+  });
+  assert.equal(observedOptions.__coePreviewCharacter, preview);
+});
+
+test('set thumbnails reuse one isolated worker and dispose it with the UI', () => {
+  const setSource = fs.readFileSync(path.join(__dirname, '..', 'src', '09-set-wardrobe.js'), 'utf8');
+  const shellSource = fs.readFileSync(path.join(__dirname, '..', 'src', '08-ui-shell.js'), 'utf8');
+  assert.match(setSource, /function getSetPreviewWorkerCharacter\(\)/);
+  assert.match(setSource, /setPreviewWorkerCharacter = CharacterLoadSimple/);
+  assert.match(setSource, /character !== setPreviewWorkerCharacter/);
+  assert.match(shellSource, /cancelSetPreviewQueue\(\{ dispose: true \}\)/);
 });
 
 test('set deletion uses the COE confirmation modal instead of the browser confirm dialog', () => {

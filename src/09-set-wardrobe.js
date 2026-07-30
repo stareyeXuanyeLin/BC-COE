@@ -328,9 +328,23 @@
     try { if (character.CanvasBlink) { character.CanvasBlink.width = 0; character.CanvasBlink.height = 0; } } catch (_) { /* best effort */ }
   }
 
-  function cancelSetPreviewQueue() {
+  function getSetPreviewWorkerCharacter() {
+    if (setPreviewWorkerCharacter) return setPreviewWorkerCharacter;
+    if (typeof globalThis.CharacterLoadSimple !== "function") return null;
+    setPreviewWorkerCharacter = CharacterLoadSimple(`COESetPreviewWorker-${++setPreviewCharacterSerial}`);
+    return setPreviewWorkerCharacter;
+  }
+
+  function disposeSetPreviewWorker() {
+    const character = setPreviewWorkerCharacter;
+    setPreviewWorkerCharacter = null;
+    releaseSetPreviewCharacter(character);
+  }
+
+  function cancelSetPreviewQueue(options = {}) {
     setPreviewGeneration++;
     setPreviewQueue = [];
+    if (options.dispose === true) disposeSetPreviewWorker();
   }
 
   // A reconnect can leave the browser's image cache and the preview canvases at
@@ -342,8 +356,9 @@
   }
 
   async function buildSetPreviewSnapshot(set, generation) {
-    if (typeof globalThis.CharacterLoadSimple !== "function" || !globalThis.Player) return null;
-    const character = CharacterLoadSimple(`COESetPreview-${++setPreviewCharacterSerial}`);
+    if (!globalThis.Player) return null;
+    const character = getSetPreviewWorkerCharacter();
+    if (!character) return null;
     try {
       character.AssetFamily = Player.AssetFamily || "Female3DCG";
       character.Appearance = cloneAppearanceItems(Player.Appearance || []);
@@ -353,37 +368,54 @@
       const plan = buildSetApplyPlan(set, character, wardrobe);
       character.Appearance = plan.appearance;
       previewCompositionByCharacter.set(character, combineSchemes(plan.equippedIds, wardrobe));
+      clearPreviewTextureTracking(character);
       if (typeof globalThis.CharacterRefresh === "function") CharacterRefresh(character, false, false);
-      // Synthetic source textures are absent from the preview character's formal
-      // Appearance, so BC's DrawRefreshCharacterForImage cannot mark this isolated
-      // character dirty when their 1x1 placeholders finish loading. The renderer
-      // tracks those URLs for us; keep rebuilding until every observed texture is
-      // ready, with a bounded wait so a broken URL cannot stall the whole queue.
-      for (let attempt = 0; attempt < 40; attempt++) {
-        if (generation !== setPreviewGeneration) return null;
+
+      // CharacterLoadCanvas is a synchronous draw over asynchronous image caches.
+      // A quiet MustDraw flag cannot prove completeness, so each pass records every
+      // native and synthetic URL actually consumed by BC. Only two consecutive,
+      // identical, fully-ready dependency sets form a render fixed point.
+      const deadline = Date.now() + 10000;
+      let previousKey = null;
+      let stablePasses = 0;
+      for (let pass = 0; pass < 64 && Date.now() < deadline; pass++) {
+        if (generation !== setPreviewGeneration || character !== setPreviewWorkerCharacter) return null;
+        beginPreviewResourcePass(character);
+        character.MustDraw = true;
         if (typeof globalThis.CharacterLoadCanvas === "function") CharacterLoadCanvas(character);
-        await new Promise(resolve => setTimeout(resolve, attempt < 2 ? 0 : 60));
-        if (!character.MustDraw && !previewTexturesPending(character) && attempt >= 2) break;
+        character.MustDraw = false;
+        let resources = await waitForPreviewResourcePass(character, Math.max(0, deadline - Date.now()));
+        if (generation !== setPreviewGeneration || character !== setPreviewWorkerCharacter) return null;
+        if (resources.failed > 0) return null;
+        const complete = resources.total > 0 && resources.pending === 0 && resources.unknown === 0 && resources.ready === resources.total;
+        if (complete && resources.key === previousKey && !character.MustDraw) stablePasses++;
+        else stablePasses = 0;
+        previousKey = resources.key;
+        if (stablePasses >= 1) break;
+        if (resources.unknown > 0) await new Promise(resolve => setTimeout(resolve, 100));
+        else await new Promise(resolve => requestAnimationFrame(resolve));
       }
-      // The timeout is a safety boundary, not permission to capture a partial
-      // character. Capturing here used to poison setPreviewCache with a snapshot
-      // made from 1x1 texture placeholders; saving the same appearance to a new
-      // slot appeared to fix it only because that slot received a new fingerprint.
-      if (character.MustDraw || previewTexturesPending(character)) return null;
-      const cacheable = !previewTexturesPending(character);
+      const finalResources = previewResourcePassSummary(character);
+      if (stablePasses < 1 || character.MustDraw || finalResources.pending || finalResources.unknown || finalResources.failed) return null;
+
       const snapshot = document.createElement("canvas");
       snapshot.width = 500;
       snapshot.height = 1000;
       const context = snapshot.getContext?.("2d");
       if (!context) return null;
       context.clearRect(0, 0, snapshot.width, snapshot.height);
-      if (typeof globalThis.DrawCharacter === "function") DrawCharacter(character, 0, 0, 1, false, context);
-      else if (character.Canvas) context.drawImage(character.Canvas, 0, 0, snapshot.width, snapshot.height);
-      return { snapshot, plan, cacheable };
+      // Copy only the already-stabilized character canvas. Calling DrawCharacter
+      // here could run dynamic asset scripts and start a new, untracked rebuild
+      // between validation and cache commit.
+      if (!character.Canvas) return null;
+      const sourceHeight = Math.min(1000, Number(character.Canvas.height) || 1000);
+      const sourceTop = Math.max(0, (Number(character.Canvas.height) || sourceHeight) - sourceHeight);
+      context.drawImage(character.Canvas, 0, sourceTop, Number(character.Canvas.width) || 500, sourceHeight, 0, 0, snapshot.width, snapshot.height);
+      return { snapshot, plan, cacheable: true, resources: finalResources };
     } catch (error) {
       warn(`套装「${set.name}」预览生成失败`, error);
       return null;
-    } finally { releaseSetPreviewCharacter(character); }
+    }
   }
 
   async function runSetPreviewQueue() {

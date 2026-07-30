@@ -67,6 +67,7 @@
   let setPreviewQueue = [];
   let setPreviewRunning = false;
   let setPreviewCharacterSerial = 0;
+  let setPreviewWorkerCharacter = null;
   const setPreviewCache = new Map();
   let wardrobeReadState = { status: "absent", source: null, server: null, local: null, conflict: false };
   let persistenceBlocked = false;

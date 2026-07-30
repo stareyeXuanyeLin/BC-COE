@@ -6,6 +6,40 @@ function state(api, overrides = {}) {
   return api.serializeRemoteEnvelope({ t: 'STATE', s: 'remote_session', r: 1, h: 'remote_hash', z: 100, sharing: true, ...overrides });
 }
 
+test('remote message handler registration is idempotent', () => {
+  let registrations = 0;
+  const { api } = load({ globals: {
+    ChatRoomRegisterMessageHandler(handler) {
+      registrations++;
+      assert.equal(typeof handler.Callback, 'function');
+    },
+  } });
+  assert.equal(api.installRemoteMessageHandler(), true);
+  assert.equal(api.installRemoteMessageHandler(), true);
+  assert.equal(registrations, 1);
+});
+
+test('remote controller tolerates a late message-handler API and retries in the background', () => {
+  let retryTimer = null;
+  let registrations = 0;
+  const env = load({ globals: {
+    setInterval(fn, delay) { retryTimer = { fn, delay, cleared: false }; return retryTimer; },
+    clearInterval(timer) { if (timer) timer.cleared = true; },
+  } });
+  assert.equal(env.api.initializeRemoteController(), false);
+  assert.equal(retryTimer.delay, 1000);
+
+  env.sandbox.ChatRoomRegisterMessageHandler = handler => {
+    registrations++;
+    assert.equal(typeof handler.Callback, 'function');
+  };
+  retryTimer.fn();
+  assert.equal(registrations, 1);
+  assert.equal(retryTimer.cleared, true);
+  assert.equal(env.api.installRemoteMessageHandler(), true);
+  assert.equal(registrations, 1);
+});
+
 test('Hidden handler validates the real sender and internally consumes damaged protocol messages', () => {
   const sender = { MemberNumber: 7, Appearance: [], AppearanceLayers: [], AssetFamily: 'Female3DCG' };
   const { api } = load({ characters: [sender] });

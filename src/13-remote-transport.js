@@ -9,6 +9,7 @@
   let remoteSendWindowAt = 0;
   let remoteSendWindowCount = 0;
   let remoteMessageHandlerDispose = null;
+  let remoteMessageHandlerRetryTimer = 0;
 
   function remoteRoomMember(memberNumber) {
     return (globalThis.ChatRoomCharacter || []).find(character => Number(character?.MemberNumber) === Number(memberNumber)) || null;
@@ -207,7 +208,25 @@
   }
 
   function installRemoteMessageHandler() {
-    if (typeof globalThis.ChatRoomRegisterMessageHandler !== "function" || remoteMessageHandlerDispose) return false;
+    if (remoteMessageHandlerDispose) return true;
+    if (typeof globalThis.ChatRoomRegisterMessageHandler !== "function") return false;
     remoteMessageHandlerDispose = ChatRoomRegisterMessageHandler({ Description: "COE Remote visual snapshot protocol", Priority: -50, Callback: onRemoteMessage }) || true;
     return true;
+  }
+
+  function ensureRemoteMessageHandler() {
+    if (installRemoteMessageHandler()) {
+      if (remoteMessageHandlerRetryTimer) clearInterval(remoteMessageHandlerRetryTimer);
+      remoteMessageHandlerRetryTimer = 0;
+      return true;
+    }
+    if (!remoteMessageHandlerRetryTimer) {
+      remoteMessageHandlerRetryTimer = setInterval(() => {
+        if (!installRemoteMessageHandler()) return;
+        clearInterval(remoteMessageHandlerRetryTimer);
+        remoteMessageHandlerRetryTimer = 0;
+      }, 1000);
+      remoteMessageHandlerRetryTimer?.unref?.();
+    }
+    return false;
   }

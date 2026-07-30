@@ -146,7 +146,11 @@
       const readState = loadWardrobe();
       if (readState.status === "deferred") return;
       syncEquippedSchemes();
-      initializeRemoteController();
+      try {
+        if (!initializeRemoteController()) warn("Remote 消息处理器尚不可用，已在后台等待游戏接口就绪");
+      } catch (error) {
+        warn("Remote 初始化失败，本地衣柜仍将继续加载", error);
+      }
       exposeAPI();
       initialized = true;
       setInterval(updateEntryButton, 600);
@@ -173,7 +177,7 @@
       parseRemoteContent, serializeRemoteEnvelope, encodeRemoteText, decodeRemoteText, splitRemoteData,
       createRemoteStore, setRemotePeer, setPendingRequest, pendingRequestFor, addRemoteChunk, expireRemoteAssemblies,
       acceptRemoteSnapshot, clearRemoteMember, onRemoteMessage, handleRemoteEnvelope, buildLocalRemoteSnapshot, updateLocalRemoteSnapshot,
-      enqueueRemoteEnvelope, enqueueRemoteSnapshotBatch, pumpRemoteSendQueue, cancelRemoteTransport, acceptRequestedRemoteChunk, scheduleLocalRemoteBuild, announceLocalRemoteState,
+      enqueueRemoteEnvelope, enqueueRemoteSnapshotBatch, pumpRemoteSendQueue, cancelRemoteTransport, acceptRequestedRemoteChunk, installRemoteMessageHandler, ensureRemoteMessageHandler, initializeRemoteController, scheduleLocalRemoteBuild, announceLocalRemoteState,
       getRemoteStoreForTest: () => remoteStore,
       getLocalRemoteStateForTest: () => ({ session: localPeerSessionId, revision: localRemoteRevision, hash: localRemoteHash, canonical: localRemoteCanonical, encoded: localRemoteEncoded, chunks: localRemoteChunks.slice(), snapshot: localRemoteSnapshot, buildToken: localRemoteBuildToken, dirty: localRemoteDirty }),
       resetRemoteRoomForTest: resetRemoteRoom,

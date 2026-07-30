@@ -335,6 +335,7 @@
 
   function installRemoteLifecycleHooks() {
     modApi.hookFunction("ChatRoomSync", 1000, (args, next) => {
+      ensureRemoteMessageHandler();
       cancelRemoteTransport();
       resetRemoteRoom();
       remoteRoomSyncing = true;
@@ -398,6 +399,7 @@
     localRemoteBuildInFlight = null;
     localRemoteDirty = true;
     remoteRoomSyncing = false;
-    if (!installRemoteMessageHandler()) throw new Error("remote-message-handler-unavailable");
+    const messageHandlerReady = ensureRemoteMessageHandler();
     scheduleLocalRemoteBuild(true);
+    return messageHandlerReady;
   }

@@ -565,9 +565,33 @@ test('loadWardrobe backs up and automatically writes a legacy wardrobe in the cu
   assert.equal(local.migration.migrated, false);
   assert.equal(server.migration.migrated, false);
   assert.equal(local.data.schemes[0].id, 'friend-test');
-  const backup = JSON.parse(store.get('BC.CustomOutfitEditor.v1.1.migration-backup.v0'));
+  assert.equal(state.migration.backupKeys.length, 1);
+  const backup = JSON.parse(store.get(state.migration.backupKey));
+  assert.equal(backup.backupVersion, 2);
+  assert.deepEqual(Array.from(backup.sources), ['server', 'local']);
   assert.equal(backup.raw, oldPacked);
   assert.equal(backup.fromSchemaVersion, 0);
+});
+
+test('migration creates immutable backups for every distinct equivalent source before write-back', () => {
+  const serverRaw = 'json:{"version":7,"schemes":[],"equippedIds":[]}';
+  const localRaw = 'json:{"version":7,"schemes":[],"equippedIds":[],"legacyUiState":"ignored"}';
+  const store = new Map([['BC.CustomOutfitEditor.v1.1', localRaw]]);
+  const player = {
+    AccountName: 'A', MemberNumber: 1, AssetFamily: 'Female3DCG', Appearance: [], AppearanceLayers: [],
+    ExtensionSettings: { CustomOutfitEditor: serverRaw },
+  };
+  const syncCalls = [];
+  const { api } = load({ player, store, globals: { ServerPlayerExtensionSettingsSync: key => syncCalls.push(key) } });
+  const state = api.loadWardrobe();
+  assert.equal(state.migration.status, 'completed');
+  assert.equal(state.migration.backupKeys.length, 2);
+  const backupKeys = Array.from(state.migration.backupKeys);
+  assert.equal(new Set(backupKeys).size, 2);
+  const backups = backupKeys.map(key => JSON.parse(store.get(key)));
+  assert.deepEqual(new Set(backups.map(backup => backup.raw)), new Set([serverRaw, localRaw]));
+  assert.deepEqual(backups.map(backup => Array.from(backup.sources)).sort(), [['local'], ['server']]);
+  assert.deepEqual(syncCalls, ['CustomOutfitEditor']);
 });
 
 test('failed migration backup keeps legacy storage untouched and blocks automatic writes', () => {

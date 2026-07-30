@@ -1272,34 +1272,71 @@
     catch (_) { return null; }
   }
 
-  function migrationBackupKey(fromVersion) {
-    return `${accountStorageKey()}.migration-backup.v${fromVersion}`;
+  function migrationBackupKey(fromVersion, fingerprint) {
+    const safeFingerprint = String(fingerprint || "unknown").replace(/[^a-zA-Z0-9_-]/g, "-");
+    return `${accountStorageKey()}.migration-backup.v${fromVersion}.${safeFingerprint}`;
   }
 
-  function preserveMigrationBackup(result, source) {
-    if (!result?.migration?.migrated || typeof result.raw !== "string") return null;
-    const key = migrationBackupKey(result.migration.fromVersion);
-    const fingerprint = storageFingerprint(result.raw);
-    let existing = null;
-    try { existing = JSON.parse(localStorage.getItem(key) || "null"); }
-    catch (_) { /* replace malformed backup */ }
-    if (existing?.fingerprint === fingerprint && existing?.raw === result.raw) return key;
-    const backup = JSON.stringify({
-      backupVersion: 1,
-      source,
-      fromSchemaVersion: result.migration.fromVersion,
-      toSchemaVersion: result.migration.toVersion,
-      createdAt: new Date().toISOString(),
-      fingerprint,
-      raw: result.raw,
-    });
-    try {
-      localStorage.setItem(key, backup);
-      if (localStorage.getItem(key) !== backup) throw new Error("backup-verification-failed");
-    } catch (error) {
-      throw wardrobeMigrationError("migration-backup-failed", `无法备份旧衣柜：${String(error?.message || error)}`);
+  function preserveMigrationBackups(entries) {
+    const unique = new Map();
+    for (const entry of entries || []) {
+      const result = entry?.result;
+      if (!result?.migration?.migrated || typeof result.raw !== "string") continue;
+      const fingerprint = storageFingerprint(result.raw);
+      const identity = `${result.migration.fromVersion}\u0000${fingerprint}\u0000${result.raw}`;
+      const existing = unique.get(identity);
+      if (existing) {
+        if (!existing.sources.includes(entry.source)) existing.sources.push(entry.source);
+        continue;
+      }
+      unique.set(identity, {
+        raw: result.raw,
+        fingerprint,
+        fromVersion: result.migration.fromVersion,
+        toVersion: result.migration.toVersion,
+        sources: [entry.source],
+      });
     }
-    return key;
+
+    const keys = [];
+    for (const backupEntry of unique.values()) {
+      const key = migrationBackupKey(backupEntry.fromVersion, backupEntry.fingerprint);
+      let existingRaw = null;
+      try { existingRaw = localStorage.getItem(key); }
+      catch (error) {
+        throw wardrobeMigrationError("migration-backup-failed", `无法读取旧衣柜备份：${String(error?.message || error)}`);
+      }
+      if (existingRaw != null) {
+        try {
+          const existing = JSON.parse(existingRaw);
+          if (existing?.fingerprint !== backupEntry.fingerprint || existing?.raw !== backupEntry.raw) {
+            throw new Error("backup-key-collision");
+          }
+        } catch (error) {
+          throw wardrobeMigrationError("migration-backup-conflict", `旧衣柜备份键冲突：${String(error?.message || error)}`);
+        }
+        keys.push(key);
+        continue;
+      }
+
+      const backup = JSON.stringify({
+        backupVersion: 2,
+        sources: backupEntry.sources,
+        fromSchemaVersion: backupEntry.fromVersion,
+        toSchemaVersion: backupEntry.toVersion,
+        createdAt: new Date().toISOString(),
+        fingerprint: backupEntry.fingerprint,
+        raw: backupEntry.raw,
+      });
+      try {
+        localStorage.setItem(key, backup);
+        if (localStorage.getItem(key) !== backup) throw new Error("backup-verification-failed");
+      } catch (error) {
+        throw wardrobeMigrationError("migration-backup-failed", `无法备份旧衣柜：${String(error?.message || error)}`);
+      }
+      keys.push(key);
+    }
+    return keys;
   }
 
   function loadWardrobe() {
@@ -1336,7 +1373,7 @@
       server: { status: server.status, error: server.error, raw: server.raw, migration: server.migration || null },
       local: { status: local.status, error: local.error, raw: local.raw, migration: local.migration || null },
       conflict,
-      migration: migrations.length ? { status: "pending", fromVersion: Math.min(...migrations.map(entry => entry.result.migration.fromVersion)), toVersion: WARDROBE_SCHEMA_VERSION, backupKey: null } : null,
+      migration: migrations.length ? { status: "pending", fromVersion: Math.min(...migrations.map(entry => entry.result.migration.fromVersion)), toVersion: WARDROBE_SCHEMA_VERSION, backupKey: null, backupKeys: [] } : null,
       sync: localOnly ? { mode: "local-only", reason: marker.reason, requestBytes: marker.requestBytes, maxRequestBytes: MAX_SERVER_SYNC_MESSAGE_BYTES } : null,
     };
     if (selected) wardrobe = selected;
@@ -1344,8 +1381,21 @@
     if (!persistenceBlocked && selected && migrations.length) {
       try {
         const preferred = migrations.find(entry => entry.source === source) || migrations[0];
-        const backupKey = preserveMigrationBackup(preferred.result, preferred.source);
-        persistWardrobe({ force: true, source: "migration", migration: { status: "completed", fromVersion: preferred.result.migration.fromVersion, toVersion: WARDROBE_SCHEMA_VERSION, backupKey } });
+        // This is a write-ahead barrier: every distinct source payload must have
+        // an immutable, verified local backup before either local or server data
+        // is replaced with the migrated wardrobe.
+        const backupKeys = preserveMigrationBackups(migrations);
+        persistWardrobe({
+          force: true,
+          source: "migration",
+          migration: {
+            status: "completed",
+            fromVersion: preferred.result.migration.fromVersion,
+            toVersion: WARDROBE_SCHEMA_VERSION,
+            backupKey: backupKeys[0] || null,
+            backupKeys,
+          },
+        });
       } catch (error) {
         persistenceBlocked = true;
         wardrobeReadState.status = "migration-failed";
@@ -1354,6 +1404,7 @@
           fromVersion: Math.min(...migrations.map(entry => entry.result.migration.fromVersion)),
           toVersion: WARDROBE_SCHEMA_VERSION,
           backupKey: null,
+          backupKeys: [],
           error: error?.code || String(error?.message || error),
         };
         const message = "旧衣柜迁移写回失败，已保留原始数据并停止自动保存";
@@ -3992,8 +4043,8 @@
       if (!context) return null;
       context.clearRect(0, 0, snapshot.width, snapshot.height);
       // BC's DrawCharacter handles CanvasUpperOverflow, HeightRatio,
-      // blink canvas selection and Invert offsets. Echo 服装扩展 and
-      // other appearance mods may change these dimensions; only the
+      // blink canvas selection and Invert offsets. Third-party appearance
+      // extensions may change these dimensions; only the
       // native draw path keeps the correct coordinate space.
       // MustDraw is already false after the fixed-point loop, so this
       // composes the cached canvas without rebuilding or triggering

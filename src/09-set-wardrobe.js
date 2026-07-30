@@ -405,8 +405,8 @@
       if (!context) return null;
       context.clearRect(0, 0, snapshot.width, snapshot.height);
       // BC's DrawCharacter handles CanvasUpperOverflow, HeightRatio,
-      // blink canvas selection and Invert offsets. Echo 服装扩展 and
-      // other appearance mods may change these dimensions; only the
+      // blink canvas selection and Invert offsets. Third-party appearance
+      // extensions may change these dimensions; only the
       // native draw path keeps the correct coordinate space.
       // MustDraw is already false after the fixed-point loop, so this
       // composes the cached canvas without rebuilding or triggering

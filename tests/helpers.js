@@ -3,6 +3,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { TextEncoder, TextDecoder } = require('node:util');
 const { webcrypto } = require('node:crypto');
+const { CompressionStream, DecompressionStream } = require('node:stream/web');
 
 const root = path.resolve(__dirname, '..');
 const parts = [
@@ -30,7 +31,7 @@ function load(options = {}) {
   const sandbox = {
     __COE_TEST_MODE__: true,
     console: { log() {}, info() {}, warn() {}, error() {} }, location: { href: 'http://localhost/' },
-    TextEncoder, TextDecoder, crypto: webcrypto,
+    TextEncoder, TextDecoder, CompressionStream, DecompressionStream, crypto: webcrypto,
     btoa: value => Buffer.from(value, 'binary').toString('base64'), atob: value => Buffer.from(value, 'base64').toString('binary'),
     Player: player, ChatRoomCharacter: options.characters || [], Asset: assets,
     AssetGet: (_family, group, name) => assets.find(asset => asset.Group.Name === group && asset.Name === name) || null,

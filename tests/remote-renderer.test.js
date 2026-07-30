@@ -4,8 +4,8 @@ const { load, makeAsset, snapshot } = require('./helpers');
 
 function activate(api, member, value = snapshot()) {
   const canonical = api.canonicalRemoteSnapshot(value);
-  api.setPendingRequest(member, { requestId: 'request_A', session: `session_${member}`, revision: 1, hash: 'hash_A' });
-  api.acceptRemoteSnapshot(member, `${member}:identity`, value, canonical);
+  const publication = api.setRemotePublication(member, { session: `session_${member}`, revision: 1, hash: `hash_${member}`, uncompressedBytes: canonical.length, compressedBytes: 1, count: 1 }).publication;
+  api.acceptRemoteSnapshot(member, publication, value, canonical);
   api.setRemotePrefsForTest({ receivingEnabled: true, sharingEnabled: false });
 }
 

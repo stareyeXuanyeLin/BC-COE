@@ -102,7 +102,7 @@ test('published core, docs and runtime agree on protocol and release version', (
   assert.equal(runtimeVersion, packageVersion);
 
   for (const [name, content] of Object.entries({ sourceProtocol, distCore, protocolSpec, limitations })) {
-    assert.match(content, /COE_RVS\/4/, `${name} must declare COE_RVS/4`);
+    assert.match(content, /COE_RVP\/1/, `${name} must declare COE_RVP/1`);
   }
   assert.match(distCore, /const TAG_ASSET_NAME = "COECustomOutfit"/);
   assert.match(distCore, /registerTagAssets\(\)/);

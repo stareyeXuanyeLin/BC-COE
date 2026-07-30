@@ -175,11 +175,13 @@
       scanAlphaBounds, contentBoundsFromBounds, contentPivotFromBounds, resolveTextureContentPivot, resolveTextureContentBounds, cacheOverallLayerGeometry, cachedOverallCenter, buildSyntheticItems, buildLocalSyntheticItems, buildRemoteSyntheticItems, makeSyntheticLayers, syncLocalSyntheticRuntime, requestCharacterRefresh, statusSnapshot,
       isDrawableLayer, normalizedMaterialColors, normalizePickerColor, nextCopyLayerLabel, localizedPoseLabel, clothingSlotGroups, registerTagAssets, isTagEquipped, equipTagForGroup, activateScheme, combineSchemes, combinedEquippedComposition, validateRemoteSnapshot, canonicalRemoteSnapshot, sha256Base64Url,
       parseRemoteContent, serializeRemoteEnvelope, encodeRemoteText, decodeRemoteText, splitRemoteData,
-      createRemoteStore, setRemotePeer, setPendingRequest, pendingRequestFor, addRemoteChunk, expireRemoteAssemblies,
-      acceptRemoteSnapshot, clearRemoteMember, onRemoteMessage, handleRemoteEnvelope, buildLocalRemoteSnapshot, updateLocalRemoteSnapshot,
-      enqueueRemoteEnvelope, enqueueRemoteSnapshotBatch, pumpRemoteSendQueue, cancelRemoteTransport, acceptRequestedRemoteChunk, installRemoteMessageHandler, ensureRemoteMessageHandler, initializeRemoteController, scheduleLocalRemoteBuild, announceLocalRemoteState,
+      createRemoteStore, setRemoteDiscovery, setRemotePublication, getRemotePublication, markRemoteObjectWanted, noteRemoteWantAnnouncement,
+      addRemoteDataChunk, missingRemoteDataIndexes, expireRemoteAssemblies, cacheRemoteObject, activateRemoteObject, activateCachedRemoteObject,
+      acceptRemoteSnapshot, revokeRemotePublication, clearRemoteMember, onRemoteMessage, handleRemoteEnvelope, buildLocalRemoteSnapshot, updateLocalRemoteSnapshot,
+      enqueueRemoteEnvelope, enqueueRemoteDataBatch, cancelRemoteTransport, acceptPublishedRemoteData, clearRemoteDataBudget,
+      installRemoteMessageHandler, ensureRemoteMessageHandler, initializeRemoteController, scheduleLocalRemoteBuild, announceLocalRemotePublication, sendRemoteDiscover,
       getRemoteStoreForTest: () => remoteStore,
-      getLocalRemoteStateForTest: () => ({ session: localPeerSessionId, revision: localRemoteRevision, hash: localRemoteHash, canonical: localRemoteCanonical, encoded: localRemoteEncoded, chunks: localRemoteChunks.slice(), snapshot: localRemoteSnapshot, buildToken: localRemoteBuildToken, dirty: localRemoteDirty }),
+      getLocalRemoteStateForTest: () => ({ session: localPeerSessionId, revision: localRemoteRevision, hash: localRemoteHash, canonical: localRemoteCanonical, encoded: localRemoteEncoded, compressedBytes: localRemoteCompressedBytes, chunks: localRemoteChunks.slice(), snapshot: localRemoteSnapshot, buildToken: localRemoteBuildToken, dirty: localRemoteDirty }),
       resetRemoteRoomForTest: resetRemoteRoom,
       setRemotePrefsForTest: value => { remotePrefs = { sharingEnabled: value?.sharingEnabled === true, receivingEnabled: value?.receivingEnabled === true }; },
       setLocalRemoteStateForTest: value => {
@@ -187,7 +189,8 @@
         localRemoteRevision = value.revision;
         localRemoteHash = value.hash;
         localRemoteCanonical = value.canonical;
-        localRemoteEncoded = value.encoded ?? (value.canonical ? encodeRemoteText(value.canonical) : "");
+        localRemoteEncoded = value.encoded ?? "";
+        localRemoteCompressedBytes = value.compressedBytes ?? 0;
         localRemoteChunks = value.chunks ?? (localRemoteEncoded ? splitRemoteData(localRemoteEncoded) : []);
         localRemoteSnapshot = value.snapshot;
         localRemoteBuildToken = value.buildToken ?? localRemoteBuildToken;

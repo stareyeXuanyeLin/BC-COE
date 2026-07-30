@@ -5266,20 +5266,20 @@
 
 
 
-  const REMOTE_PROTOCOL = "COE_RVS/4";
+  const REMOTE_PROTOCOL = "COE_RVP/1";
   const REMOTE_PREFIX = `${REMOTE_PROTOCOL}|`;
+  const REMOTE_ENCODING = "gz";
   const REMOTE_LIMITS = Object.freeze({
-    content: 1800, chunkData: 1200, chunks: 32, snapshotBytes: 32768,
+    content: 1800, inlineData: 1300, chunkData: 1400, chunks: 24,
+    snapshotBytes: 32768, compressedBytes: 24576,
     materialBytes: 8192, materials: 32, layers: 120, string: 64, color: 40,
   });
-  const REMOTE_TYPES = new Set(["STATE", "REQUEST", "CHUNK", "CLEAR"]);
+  const REMOTE_TYPES = new Set(["D", "A", "W", "X", "N", "R"]);
   const POLLUTION_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 
   function remotePlainObject(value) {
     if (!value || Object.prototype.toString.call(value) !== "[object Object]") return false;
     const proto = Object.getPrototypeOf(value);
-    // JSON values created in another realm (tests/iframes) still have a plain
-    // Object prototype whose own prototype is null. Class instances do not.
     return proto === null || proto === Object.prototype || (Object.getPrototypeOf(proto) === null && proto.constructor?.name === "Object");
   }
 
@@ -5330,9 +5330,7 @@
     if (!remotePlainObject(value)) throw new Error("snapshot-property");
     const allowed = new Set(["Type", "Mirror", "Invert", "TypeRecord"]);
     const output = {};
-    for (const key of Object.keys(value)) {
-      if (!allowed.has(key) || POLLUTION_KEYS.has(key)) throw new Error("snapshot-property-key");
-    }
+    for (const key of Object.keys(value)) if (!allowed.has(key) || POLLUTION_KEYS.has(key)) throw new Error("snapshot-property-key");
     if (value.Type != null) output.Type = remoteString(value.Type, "property-type", 40);
     if (value.Mirror != null) {
       if (typeof value.Mirror !== "boolean") throw new Error("snapshot-property-mirror");
@@ -5358,8 +5356,7 @@
       if (material.w != null) output.w = remoteString(material.w, "wear-group");
       if (!Array.isArray(material.c) || material.c.length > 40) throw new Error("snapshot-colors");
       output.c = material.c.map(color => remoteString(color, "color", REMOTE_LIMITS.color));
-      const overallFields = [["r", -Math.PI, Math.PI], ["s", 0.25, 3.0], ["x", -1200, 1200], ["y", -1200, 1200]];
-      for (const [key, min, max] of overallFields) {
+      for (const [key, min, max] of [["r", -Math.PI, Math.PI], ["s", 0.25, 3.0], ["x", -1200, 1200], ["y", -1200, 1200]]) {
         if (material[key] == null) continue;
         if (typeof material[key] !== "number" || !Number.isFinite(material[key])) throw new Error(`snapshot-material-${key}`);
         output[key] = normalizeRemoteNumber(material[key], min, max);
@@ -5400,9 +5397,7 @@
       }
       return output;
     });
-    const snapshot = { v: 1 };
-    snapshot.m = materials;
-    snapshot.l = layers;
+    const snapshot = { v: 1, m: materials, l: layers };
     const canonical = JSON.stringify(snapshot);
     if (utf8Bytes(canonical) > REMOTE_LIMITS.snapshotBytes) throw new Error("snapshot-byte-budget");
     for (let index = 0; index < materials.length; index++) {
@@ -5412,15 +5407,12 @@
     return snapshot;
   }
 
-  function canonicalRemoteSnapshot(value) {
-    return JSON.stringify(validateRemoteSnapshot(value));
-  }
+  function canonicalRemoteSnapshot(value) { return JSON.stringify(validateRemoteSnapshot(value)); }
 
   async function sha256Base64Url(text) {
     const subtle = globalThis.crypto?.subtle;
     if (!subtle) throw new Error("crypto-subtle-unavailable");
-    const bytes = new TextEncoder().encode(text);
-    const digest = new Uint8Array(await subtle.digest("SHA-256", bytes));
+    const digest = new Uint8Array(await subtle.digest("SHA-256", new TextEncoder().encode(text)));
     return bytesToBase64Url(digest);
   }
 
@@ -5430,10 +5422,9 @@
     return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
   }
 
-  function base64UrlToBytes(value, maxBytes = REMOTE_LIMITS.snapshotBytes) {
+  function base64UrlToBytes(value, maxBytes = REMOTE_LIMITS.compressedBytes) {
     remoteString(value, "base64url", Math.ceil(maxBytes * 4 / 3) + 4, /^[A-Za-z0-9_-]+$/);
-    const estimated = Math.floor(value.length * 3 / 4);
-    if (estimated > maxBytes) throw new Error("remote-decoded-budget");
+    if (Math.floor(value.length * 3 / 4) > maxBytes) throw new Error("remote-decoded-budget");
     const padded = value.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((value.length + 3) % 4);
     let binary;
     try { binary = atob(padded); } catch (_) { throw new Error("remote-base64url"); }
@@ -5441,41 +5432,103 @@
     return Uint8Array.from(binary, char => char.charCodeAt(0));
   }
 
-  function encodeRemoteText(text) {
-    return bytesToBase64Url(new TextEncoder().encode(text));
+  async function remoteTransformBytes(bytes, format, outputLimit) {
+    const Constructor = format === "compress" ? globalThis.CompressionStream : globalThis.DecompressionStream;
+    if (typeof Constructor !== "function") throw new Error(`remote-${format}-unavailable`);
+    const stream = new Constructor("gzip");
+    const writer = stream.writable.getWriter();
+    const reader = stream.readable.getReader();
+    const parts = [];
+    let total = 0;
+    const reading = (async () => {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > outputLimit) throw new Error(`remote-${format}-budget`);
+        parts.push(value);
+      }
+      const output = new Uint8Array(total);
+      let offset = 0;
+      for (const part of parts) { output.set(part, offset); offset += part.byteLength; }
+      return output;
+    })();
+    let failure = null;
+    try {
+      await writer.write(bytes);
+      await writer.close();
+    } catch (error) {
+      failure = error;
+      try { await writer.abort(error); } catch (_) { /* closed */ }
+    }
+    let output = null;
+    try { output = await reading; }
+    catch (error) { failure ||= error; }
+    if (failure) {
+      try { await writer.abort(failure); } catch (_) { /* closed */ }
+      try { await reader.cancel(failure); } catch (_) { /* closed */ }
+      const wrapped = new Error(`remote-${format}-data`);
+      wrapped.cause = failure;
+      throw wrapped;
+    }
+    return output;
   }
 
-  function decodeRemoteText(value) {
-    return new TextDecoder("utf-8", { fatal: true }).decode(base64UrlToBytes(value));
+  async function encodeRemoteText(text) {
+    if (typeof text !== "string" || utf8Bytes(text) > REMOTE_LIMITS.snapshotBytes) throw new Error("remote-encode-budget");
+    const compressed = await remoteTransformBytes(new TextEncoder().encode(text), "compress", REMOTE_LIMITS.compressedBytes);
+    return { encoded: bytesToBase64Url(compressed), compressedBytes: compressed.byteLength };
+  }
+
+  async function decodeRemoteText(value, expectedBytes = null) {
+    const compressed = base64UrlToBytes(value);
+    if (expectedBytes != null && compressed.byteLength !== expectedBytes) throw new Error("remote-compressed-size");
+    const output = await remoteTransformBytes(compressed, "decompress", REMOTE_LIMITS.snapshotBytes);
+    return new TextDecoder("utf-8", { fatal: true }).decode(output);
   }
 
   function splitRemoteData(value) {
-    remoteString(value, "chunk-source", REMOTE_LIMITS.chunks * REMOTE_LIMITS.chunkData, /^[A-Za-z0-9_-]+$/);
+    remoteString(value, "chunk-source", Math.ceil(REMOTE_LIMITS.compressedBytes * 4 / 3) + 4, /^[A-Za-z0-9_-]+$/);
     const chunks = [];
     for (let index = 0; index < value.length; index += REMOTE_LIMITS.chunkData) chunks.push(value.slice(index, index + REMOTE_LIMITS.chunkData));
     if (!chunks.length || chunks.length > REMOTE_LIMITS.chunks) throw new Error("remote-chunk-count");
     return chunks;
   }
 
+  function remoteSession(value) { return remoteString(value, "session", 32, /^[A-Za-z0-9_-]+$/); }
+  function remoteHash(value) { return remoteString(value, "hash", 64, /^[A-Za-z0-9_-]+$/); }
+
   function validateRemoteEnvelope(value) {
     remoteAssertTree(value);
     if (!remotePlainObject(value) || !REMOTE_TYPES.has(value.t)) throw new Error("remote-envelope");
-    const allowed = value.t === "STATE" ? new Set(["t", "s", "r", "h", "z", "sharing"])
-      : value.t === "CLEAR" ? new Set(["t", "s"])
-      : value.t === "REQUEST" ? new Set(["t", "requestId", "session", "revision", "hash"])
-      : new Set(["t", "requestId", "session", "revision", "hash", "index", "count", "data"]);
-    for (const key of Object.keys(value)) if (!allowed.has(key)) throw new Error("remote-envelope-key");
-    if (value.t === "STATE") {
-      if (typeof value.sharing !== "boolean") throw new Error("remote-sharing");
-      const state = { t: "STATE", s: remoteString(value.s, "session", 32, /^[A-Za-z0-9_-]+$/), r: remoteInteger(value.r, "revision"), h: value.h === "" ? "" : remoteString(value.h, "hash", 64, /^[A-Za-z0-9_-]+$/), z: remoteInteger(value.z, "size", 0, REMOTE_LIMITS.snapshotBytes), sharing: value.sharing };
-      if (state.sharing !== (!!state.h && state.z > 0)) throw new Error("remote-state-consistency");
-      return state;
+    const allowedByType = {
+      D: new Set(["t", "s", "rx", "e"]), A: new Set(["t", "s", "r", "h", "u", "z", "n", "d"]),
+      W: new Set(["t", "o", "s", "r", "h"]), X: new Set(["t", "s", "r", "h", "i", "n", "d"]),
+      N: new Set(["t", "o", "s", "r", "h", "m"]), R: new Set(["t", "s", "r"]),
+    };
+    for (const key of Object.keys(value)) if (!allowedByType[value.t].has(key)) throw new Error("remote-envelope-key");
+    if (value.t === "D") {
+      if (typeof value.rx !== "boolean" || value.e !== REMOTE_ENCODING) throw new Error("remote-discover");
+      return { t: "D", s: remoteSession(value.s), rx: value.rx, e: REMOTE_ENCODING };
     }
-    if (value.t === "CLEAR") return { t: "CLEAR", s: remoteString(value.s, "session", 32, /^[A-Za-z0-9_-]+$/) };
-    if (value.t === "REQUEST") return { t: "REQUEST", requestId: remoteString(value.requestId, "request-id", 32, /^[A-Za-z0-9_-]+$/), session: remoteString(value.session, "session", 32, /^[A-Za-z0-9_-]+$/), revision: remoteInteger(value.revision, "revision"), hash: remoteString(value.hash, "hash", 64, /^[A-Za-z0-9_-]+$/) };
-    const chunk = { t: "CHUNK", requestId: remoteString(value.requestId, "request-id", 32, /^[A-Za-z0-9_-]+$/), session: remoteString(value.session, "session", 32, /^[A-Za-z0-9_-]+$/), revision: remoteInteger(value.revision, "revision"), hash: remoteString(value.hash, "hash", 64, /^[A-Za-z0-9_-]+$/), index: remoteInteger(value.index, "chunk-index", 0, REMOTE_LIMITS.chunks - 1), count: remoteInteger(value.count, "chunk-count", 1, REMOTE_LIMITS.chunks), data: remoteString(value.data, "chunk-data", REMOTE_LIMITS.chunkData, /^[A-Za-z0-9_-]+$/) };
-    if (chunk.index >= chunk.count) throw new Error("remote-chunk-index");
-    return chunk;
+    if (value.t === "A") {
+      const result = { t: "A", s: remoteSession(value.s), r: remoteInteger(value.r, "revision"), h: remoteHash(value.h), u: remoteInteger(value.u, "uncompressed-size", 1, REMOTE_LIMITS.snapshotBytes), z: remoteInteger(value.z, "compressed-size", 1, REMOTE_LIMITS.compressedBytes), n: remoteInteger(value.n, "chunk-count", 1, REMOTE_LIMITS.chunks) };
+      if (value.d != null) {
+        result.d = remoteString(value.d, "inline-data", REMOTE_LIMITS.inlineData, /^[A-Za-z0-9_-]+$/);
+        if (result.n !== 1) throw new Error("remote-inline-count");
+      }
+      return result;
+    }
+    if (value.t === "W") return { t: "W", o: remoteInteger(value.o, "owner", 1), s: remoteSession(value.s), r: remoteInteger(value.r, "revision"), h: remoteHash(value.h) };
+    if (value.t === "R") return { t: "R", s: remoteSession(value.s), r: remoteInteger(value.r, "revision") };
+    if (value.t === "N") {
+      if (!Array.isArray(value.m) || !value.m.length || value.m.length > REMOTE_LIMITS.chunks) throw new Error("remote-missing");
+      const missing = [...new Set(value.m.map(index => remoteInteger(index, "missing-index", 0, REMOTE_LIMITS.chunks - 1)))].sort((a, b) => a - b);
+      return { t: "N", o: remoteInteger(value.o, "owner", 1), s: remoteSession(value.s), r: remoteInteger(value.r, "revision"), h: remoteHash(value.h), m: missing };
+    }
+    const data = { t: "X", s: remoteSession(value.s), r: remoteInteger(value.r, "revision"), h: remoteHash(value.h), i: remoteInteger(value.i, "chunk-index", 0, REMOTE_LIMITS.chunks - 1), n: remoteInteger(value.n, "chunk-count", 1, REMOTE_LIMITS.chunks), d: remoteString(value.d, "chunk-data", REMOTE_LIMITS.chunkData, /^[A-Za-z0-9_-]+$/) };
+    if (data.i >= data.n) throw new Error("remote-chunk-index");
+    return data;
   }
 
   function parseRemoteContent(content) {
@@ -5494,15 +5547,25 @@
 
 
   function createRemoteStats() {
-    return { messagesSent: 0, messagesReceived: 0, messagesRejected: 0, rateLimited: 0, chunksExpired: 0, bytesSent: 0, bytesReceived: 0, remoteMaterialsSkipped: 0 };
+    return { messagesSent: 0, messagesReceived: 0, messagesRejected: 0, rateLimited: 0, chunksExpired: 0, bytesSent: 0, bytesReceived: 0, remoteMaterialsSkipped: 0, publicationsAccepted: 0, cacheHits: 0, wantsSuppressed: 0, repairsSent: 0 };
   }
 
   function createRemoteStore() {
+    const publications = new Map();
     return {
       roomGeneration: 0,
-      peers: new Map(), pendingRequests: new Map(), assemblies: new Map(), activeSnapshots: new Map(),
-      senderBuckets: new Map(), roomBucket: null, responseTimes: new Map(), requestTimes: new Map(),
-      helloReplied: new Set(), timers: new Set(), diagnostics: [], stats: createRemoteStats(), totalBytes: 0,
+      peers: publications,
+      publications,
+      discoveries: new Map(),
+      assemblies: new Map(),
+      objectCache: new Map(),
+      activeSnapshots: new Map(),
+      wantedObjects: new Set(),
+      announcedWants: new Set(),
+      wantRetryScheduled: new Set(),
+      dataMessageCounts: new Map(),
+      senderBuckets: new Map(), roomBucket: null,
+      timers: new Set(), diagnostics: [], stats: createRemoteStats(), totalBytes: 0,
     };
   }
 
@@ -5517,7 +5580,6 @@
       callback();
     }, delay);
     remoteStore.timers.add(timer);
-    // Node test timers support unref; browser timer ids simply ignore this.
     timer?.unref?.();
     return timer;
   }
@@ -5550,102 +5612,119 @@
 
   function acceptRemoteInboundRate(sender, now = remoteNow()) {
     const senderOk = remoteBucketConsume(remoteStore, sender, 12, 2, now);
-    const roomOk = remoteBucketConsume(remoteStore, null, 30, 5, now);
+    const roomOk = remoteBucketConsume(remoteStore, null, 40, 8, now);
     if (!senderOk || !roomOk) remoteStore.stats.rateLimited++;
     return senderOk && roomOk;
   }
 
   function remotePeerKey(memberNumber) { return Number(memberNumber); }
+  function remoteObjectKey(memberNumber, hash) { return `${remotePeerKey(memberNumber)}:${hash}`; }
+  function getRemotePublication(memberNumber) { return remoteStore.publications.get(remotePeerKey(memberNumber)) || null; }
 
-  function getRemotePeer(memberNumber) { return remoteStore.peers.get(remotePeerKey(memberNumber)) || null; }
-
-  function setRemotePeer(memberNumber, state) {
+  function setRemoteDiscovery(memberNumber, discovery) {
     const key = remotePeerKey(memberNumber);
-    if (!remoteStore.peers.has(key) && remoteStore.peers.size >= 10) throw new Error("remote-peer-limit");
-    const previous = remoteStore.peers.get(key);
+    if (!remoteStore.discoveries.has(key) && remoteStore.discoveries.size >= 20) throw new Error("remote-peer-limit");
+    const value = { memberNumber: key, session: discovery.session, receiving: discovery.receiving === true, encoding: discovery.encoding, seenAt: remoteNow() };
+    remoteStore.discoveries.set(key, value);
+    return value;
+  }
+
+  function setRemotePublication(memberNumber, state) {
+    const key = remotePeerKey(memberNumber);
+    if (!remoteStore.publications.has(key) && remoteStore.publications.size >= 20) throw new Error("remote-peer-limit");
+    const previous = remoteStore.publications.get(key);
     if (previous?.session === state.session) {
       if (state.revision < previous.revision) throw new Error("remote-stale-revision");
-      if (state.revision === previous.revision && previous.sharing && state.sharing && state.hash !== previous.hash) throw new Error("remote-revision-hash-conflict");
+      if (state.revision === previous.revision && state.hash !== previous.hash) throw new Error("remote-revision-hash-conflict");
+      if (state.revision === previous.revision && (state.uncompressedBytes !== previous.uncompressedBytes || state.compressedBytes !== previous.compressedBytes || state.count !== previous.count)) throw new Error("remote-revision-metadata-conflict");
     }
-    const peer = { memberNumber: key, session: state.session, revision: state.revision, hash: state.hash, size: state.size, sharing: state.sharing === true, seenAt: remoteNow() };
-    remoteStore.peers.set(key, peer);
-    return { peer, isNewSession: !previous || previous.session !== peer.session };
+    const publication = {
+      memberNumber: key, session: state.session, revision: state.revision, hash: state.hash,
+      uncompressedBytes: state.uncompressedBytes, compressedBytes: state.compressedBytes,
+      count: state.count, seenAt: remoteNow(),
+    };
+    remoteStore.publications.set(key, publication);
+    const changedSession = !previous || previous.session !== publication.session;
+    const changedObject = changedSession || previous.revision !== publication.revision || previous.hash !== publication.hash;
+    if (changedObject) {
+      const active = remoteStore.activeSnapshots.get(key);
+      if (active && active.hash !== publication.hash) remoteStore.activeSnapshots.delete(key);
+      for (const assemblyKey of [...remoteStore.assemblies.keys()]) if (assemblyKey.startsWith(`${key}:`)) remoteStore.assemblies.delete(assemblyKey);
+      for (const wanted of [...remoteStore.wantedObjects]) if (wanted.startsWith(`${key}:`)) remoteStore.wantedObjects.delete(wanted);
+    }
+    return { publication, changedSession, changedObject };
   }
 
-  function remoteIdentity(memberNumber, session) { return `${remoteStore.roomGeneration}:${memberNumber}:${session}`; }
-
-  function pendingRequestFor(memberNumber) { return remoteStore.pendingRequests.get(remotePeerKey(memberNumber)) || null; }
-
-  function setPendingRequest(memberNumber, request) {
-    const key = remotePeerKey(memberNumber);
-    const previous = remoteStore.pendingRequests.get(key);
-    const identityChanged = previous && (previous.session !== request.session || previous.revision !== request.revision || previous.hash !== request.hash);
-    if (identityChanged) remoteStore.assemblies.delete(key);
-    remoteStore.pendingRequests.set(key, {
-      ...request,
-      createdAt: remoteNow(),
-      retries: request.retries || 0,
-      chunkMessages: request.chunkMessages || 0,
-      generation: remoteStore.roomGeneration,
-    });
+  function publicationMatchesEnvelope(memberNumber, envelope) {
+    const publication = getRemotePublication(memberNumber);
+    return !!publication && publication.session === envelope.s && publication.revision === envelope.r && publication.hash === envelope.h && publication.count === envelope.n;
   }
 
-  function clearPendingRequest(memberNumber, requestId = null) {
-    const key = remotePeerKey(memberNumber);
-    const pending = remoteStore.pendingRequests.get(key);
-    if (pending && (requestId == null || pending.requestId === requestId)) remoteStore.pendingRequests.delete(key);
+  function markRemoteObjectWanted(memberNumber, hash) {
+    const key = remoteObjectKey(memberNumber, hash);
+    remoteStore.wantedObjects.add(key);
+    return key;
   }
 
-  function assemblyKey(memberNumber) { return remotePeerKey(memberNumber); }
+  function noteRemoteWantAnnouncement(memberNumber, hash) {
+    const key = remoteObjectKey(memberNumber, hash);
+    const existed = remoteStore.announcedWants.has(key);
+    remoteStore.announcedWants.add(key);
+    if (existed) remoteStore.stats.wantsSuppressed++;
+    return !existed;
+  }
 
-  function addRemoteChunk(memberNumber, envelope, now = remoteNow()) {
-    const key = assemblyKey(memberNumber);
-    const pending = pendingRequestFor(key);
-    if (!pending || pending.generation !== remoteStore.roomGeneration || pending.requestId !== envelope.requestId || pending.session !== envelope.session || pending.revision !== envelope.revision || pending.hash !== envelope.hash) throw new Error("remote-unsolicited-chunk");
+  function hasRemoteObject(hash) { return remoteStore.objectCache.has(hash); }
+
+  function addRemoteDataChunk(memberNumber, envelope, now = remoteNow()) {
+    const member = remotePeerKey(memberNumber);
+    if (!publicationMatchesEnvelope(member, envelope)) throw new Error("remote-unsolicited-data");
+    const publication = getRemotePublication(member);
+    const key = remoteObjectKey(member, envelope.h);
     let assembly = remoteStore.assemblies.get(key);
     if (!assembly) {
-      if (remoteStore.assemblies.size >= 4) throw new Error("remote-assembly-room-limit");
-      assembly = { requestId: envelope.requestId, session: envelope.session, revision: envelope.revision, hash: envelope.hash, count: envelope.count, parts: new Map(), encodedBytes: 0, startedAt: now, generation: remoteStore.roomGeneration };
+      if (remoteStore.assemblies.size >= 8) throw new Error("remote-assembly-room-limit");
+      assembly = {
+        memberNumber: member, session: envelope.s, revision: envelope.r, hash: envelope.h,
+        count: envelope.n, compressedBytes: publication.compressedBytes,
+        parts: new Map(), encodedChars: 0, startedAt: now, lastProgressAt: now,
+        generation: remoteStore.roomGeneration, repairAttempts: 0,
+      };
       remoteStore.assemblies.set(key, assembly);
-      const generation = remoteStore.roomGeneration;
-      const requestId = envelope.requestId;
-      scheduleRemoteTimer(() => {
-        if (generation !== remoteStore.roomGeneration) return;
-        const current = remoteStore.assemblies.get(key);
-        if (current?.requestId === requestId && remoteNow() - current.startedAt >= 20000) {
-          remoteStore.assemblies.delete(key);
-          remoteStore.stats.chunksExpired++;
-        }
-      }, 20000);
     }
-    if (assembly.requestId !== envelope.requestId || assembly.count !== envelope.count || assembly.hash !== envelope.hash) {
+    if (assembly.session !== envelope.s || assembly.revision !== envelope.r || assembly.count !== envelope.n) {
       remoteStore.assemblies.delete(key);
       throw new Error("remote-assembly-conflict");
     }
-    if (envelope.index >= assembly.count) throw new Error("remote-chunk-index");
-    const existing = assembly.parts.get(envelope.index);
+    const existing = assembly.parts.get(envelope.i);
     if (existing != null) {
-      if (existing === envelope.data) return { status: "duplicate", charged: 0 };
+      if (existing === envelope.d) return { status: "duplicate", charged: 0, assembly };
       remoteStore.assemblies.delete(key);
       throw new Error("remote-chunk-conflict");
     }
-    assembly.parts.set(envelope.index, envelope.data);
-    assembly.encodedBytes += envelope.data.length;
-    pending.lastProgressAt = now;
-    if (assembly.encodedBytes > REMOTE_LIMITS.chunks * REMOTE_LIMITS.chunkData) {
+    assembly.parts.set(envelope.i, envelope.d);
+    assembly.encodedChars += envelope.d.length;
+    assembly.lastProgressAt = now;
+    if (assembly.encodedChars > Math.ceil(REMOTE_LIMITS.compressedBytes * 4 / 3) + 4) {
       remoteStore.assemblies.delete(key);
       throw new Error("remote-assembly-budget");
     }
-    if (assembly.parts.size !== assembly.count) return { status: "partial", charged: envelope.data.length };
+    if (assembly.parts.size !== assembly.count) return { status: "partial", charged: envelope.d.length, assembly };
     const encoded = Array.from({ length: assembly.count }, (_, index) => assembly.parts.get(index)).join("");
     remoteStore.assemblies.delete(key);
-    return { status: "complete", charged: envelope.data.length, encoded };
+    return { status: "complete", charged: envelope.d.length, encoded, assembly };
+  }
+
+  function missingRemoteDataIndexes(memberNumber, hash) {
+    const assembly = remoteStore.assemblies.get(remoteObjectKey(memberNumber, hash));
+    if (!assembly) return [];
+    return Array.from({ length: assembly.count }, (_, index) => index).filter(index => !assembly.parts.has(index));
   }
 
   function expireRemoteAssemblies(now = remoteNow()) {
     let expired = 0;
     for (const [key, assembly] of remoteStore.assemblies) {
-      if (now - assembly.startedAt > 20000) {
+      if (now - assembly.lastProgressAt > 30000) {
         remoteStore.assemblies.delete(key);
         expired++;
       }
@@ -5654,31 +5733,66 @@
     return expired;
   }
 
-  function acceptRemoteSnapshot(memberNumber, identity, snapshot, canonical) {
-    const key = remotePeerKey(memberNumber);
+  function cacheRemoteObject(hash, snapshot, canonical) {
     const bytes = utf8Bytes(canonical);
-    const previous = remoteStore.activeSnapshots.get(key);
+    const previous = remoteStore.objectCache.get(hash);
     const nextTotal = remoteStore.totalBytes - (previous?.bytes || 0) + bytes;
     if (nextTotal > 262144) throw new Error("remote-room-byte-budget");
-    const pending = pendingRequestFor(key);
-    remoteStore.activeSnapshots.set(key, { identity, session: pending?.session || null, revision: pending?.revision ?? null, hash: pending?.hash || null, snapshot, canonical, bytes, acceptedAt: remoteNow() });
+    const object = { hash, snapshot, canonical, bytes, acceptedAt: remoteNow() };
+    remoteStore.objectCache.set(hash, object);
     remoteStore.totalBytes = nextTotal;
-    clearPendingRequest(key);
-    return snapshot;
+    return object;
+  }
+
+  function activateRemoteObject(memberNumber, publication, object) {
+    const key = remotePeerKey(memberNumber);
+    remoteStore.activeSnapshots.set(key, {
+      identity: `${remoteStore.roomGeneration}:${key}:${publication.session}`,
+      session: publication.session, revision: publication.revision, hash: publication.hash,
+      snapshot: object.snapshot, canonical: object.canonical, bytes: object.bytes, acceptedAt: remoteNow(),
+    });
+    remoteStore.wantedObjects.delete(remoteObjectKey(key, publication.hash));
+    remoteStore.stats.publicationsAccepted++;
+    return object.snapshot;
+  }
+
+  function activateCachedRemoteObject(memberNumber, publication) {
+    const object = remoteStore.objectCache.get(publication.hash);
+    if (!object) return null;
+    remoteStore.stats.cacheHits++;
+    return activateRemoteObject(memberNumber, publication, object);
+  }
+
+  function acceptRemoteSnapshot(memberNumber, publication, snapshot, canonical) {
+    const object = cacheRemoteObject(publication.hash, snapshot, canonical);
+    return activateRemoteObject(memberNumber, publication, object);
+  }
+
+  function revokeRemotePublication(memberNumber, session, revision = null) {
+    const key = remotePeerKey(memberNumber);
+    const publication = getRemotePublication(key);
+    if (publication && publication.session !== session) throw new Error("remote-revoke-session");
+    if (publication && revision != null && revision < publication.revision) return false;
+    remoteStore.publications.delete(key);
+    remoteStore.activeSnapshots.delete(key);
+    for (const assemblyKey of [...remoteStore.assemblies.keys()]) if (assemblyKey.startsWith(`${key}:`)) remoteStore.assemblies.delete(assemblyKey);
+    for (const wanted of [...remoteStore.wantedObjects]) if (wanted.startsWith(`${key}:`)) remoteStore.wantedObjects.delete(wanted);
+    syntheticByCharacter = new WeakMap();
+    return true;
   }
 
   function clearRemoteMember(memberNumber) {
     const key = remotePeerKey(memberNumber);
-    const previous = remoteStore.activeSnapshots.get(key);
-    if (previous) remoteStore.totalBytes -= previous.bytes;
-    remoteStore.peers.delete(key);
-    remoteStore.pendingRequests.delete(key);
-    remoteStore.assemblies.delete(key);
+    remoteStore.publications.delete(key);
+    remoteStore.discoveries.delete(key);
     remoteStore.activeSnapshots.delete(key);
     remoteStore.senderBuckets.delete(key);
-    remoteStore.responseTimes.delete(key);
-    remoteStore.requestTimes.delete(key);
-    for (const identity of remoteStore.helloReplied) if (identity.includes(`:${key}:`)) remoteStore.helloReplied.delete(identity);
+    for (const collection of [remoteStore.assemblies, remoteStore.dataMessageCounts]) {
+      for (const objectKey of [...collection.keys()]) if (objectKey.startsWith(`${key}:`)) collection.delete(objectKey);
+    }
+    for (const collection of [remoteStore.wantedObjects, remoteStore.announcedWants, remoteStore.wantRetryScheduled]) {
+      for (const objectKey of [...collection]) if (objectKey.startsWith(`${key}:`)) collection.delete(objectKey);
+    }
     syntheticByCharacter = new WeakMap();
   }
 
@@ -5690,16 +5804,6 @@
 
 
 
-  const REMOTE_BURST_SIZE = 8;
-  const REMOTE_NEXT_BURST_DELAY = 250;
-  const REMOTE_SEND_WINDOW_MS = 1200;
-  const REMOTE_SEND_WINDOW_CAPACITY = 12;
-  let remoteControlQueue = [];
-  let remoteSnapshotQueue = [];
-  let remoteSendTimer = 0;
-  let remoteSendPumping = false;
-  let remoteSendWindowAt = 0;
-  let remoteSendWindowCount = 0;
   let remoteMessageHandlerDispose = null;
   let remoteMessageHandlerRetryTimer = 0;
 
@@ -5707,155 +5811,49 @@
     return (globalThis.ChatRoomCharacter || []).find(character => Number(character?.MemberNumber) === Number(memberNumber)) || null;
   }
 
-  function clearRemoteSendTimer() {
-    if (!remoteSendTimer) return;
-    clearTimeout(remoteSendTimer);
-    remoteStore.timers.delete(remoteSendTimer);
-    remoteSendTimer = 0;
-  }
-
   function cancelRemoteTransport() {
-    remoteControlQueue = [];
-    remoteSnapshotQueue = [];
-    clearRemoteSendTimer();
-    remoteSendPumping = false;
-    remoteSendWindowAt = 0;
-    remoteSendWindowCount = 0;
-  }
-
-  function refreshRemoteSendWindow(now = remoteNow()) {
-    if (!remoteSendWindowAt || now - remoteSendWindowAt >= REMOTE_SEND_WINDOW_MS) {
-      remoteSendWindowAt = now;
-      remoteSendWindowCount = 0;
-    }
-    return now;
-  }
-
-  function remoteSendCapacity(now = remoteNow()) {
-    refreshRemoteSendWindow(now);
-    return Math.max(0, REMOTE_SEND_WINDOW_CAPACITY - remoteSendWindowCount);
-  }
-
-  function scheduleRemoteSendPump(delay) {
-    if (remoteSendTimer) return;
-    remoteSendTimer = scheduleRemoteTimer(() => {
-      remoteSendTimer = 0;
-      pumpRemoteSendQueue();
-    }, Math.max(0, delay));
-  }
-
-  function remoteSendEntry(entry) {
-    if (!entry || entry.generation !== remoteStore.roomGeneration) return false;
-    try {
-      const packet = { Type: "Hidden", Content: entry.content };
-      if (entry.target != null) packet.Target = entry.target;
-      remoteSendWindowCount++;
-      ServerSend("ChatRoomChat", packet);
-      remoteStore.stats.messagesSent++;
-      remoteStore.stats.bytesSent += utf8Bytes(entry.content);
-      return true;
-    } catch (error) {
-      remoteDiagnostic("send-failed", entry.target, error?.message || error);
-      return false;
-    }
+    // RVP/1 hands complete publication batches directly to BC's native queue.
+    // There is no plugin-owned timer queue to cancel; room generation invalidates
+    // all asynchronous protocol work in the controller and store.
   }
 
   function enqueueRemoteEnvelope(envelope, target = null) {
     const content = serializeRemoteEnvelope(envelope);
-    remoteControlQueue.push({
-      content,
-      target: Number.isInteger(target) ? target : null,
-      generation: remoteStore.roomGeneration,
-    });
-    // Control messages are latency-sensitive. If a later snapshot burst is waiting
-    // on a background-throttled timer, cancel that wait and send control now.
-    clearRemoteSendTimer();
-    pumpRemoteSendQueue();
-  }
-
-  function enqueueRemoteSnapshotBatch(baseEnvelope, chunks, target) {
-    if (!Array.isArray(chunks) || !chunks.length || !Number.isInteger(target)) return false;
-    remoteSnapshotQueue.push({
-      baseEnvelope: { ...baseEnvelope },
-      chunks: chunks.slice(),
-      target,
-      cursor: 0,
-      generation: remoteStore.roomGeneration,
-    });
-    pumpRemoteSendQueue();
-    return true;
-  }
-
-  function pruneRemoteSendQueues() {
-    const generation = remoteStore.roomGeneration;
-    remoteControlQueue = remoteControlQueue.filter(entry => entry.generation === generation);
-    remoteSnapshotQueue = remoteSnapshotQueue.filter(batch => batch.generation === generation && batch.cursor < batch.chunks.length);
-  }
-
-  function pumpRemoteSendQueue() {
-    if (remoteSendPumping) return;
-    remoteSendPumping = true;
     try {
-      pruneRemoteSendQueues();
-      const now = refreshRemoteSendWindow();
-      // Keep the plugin below BC's native 14 messages / 1200 ms client queue.
-      // Twelve slots leave headroom for unrelated game traffic while allowing one
-      // ordinary snapshot burst to finish in the current execution turn.
-      while (remoteControlQueue.length && remoteSendCapacity(now) > 0) remoteSendEntry(remoteControlQueue.shift());
-      if (remoteControlQueue.length) {
-        scheduleRemoteSendPump(Math.max(1, REMOTE_SEND_WINDOW_MS - (now - remoteSendWindowAt)));
-        return;
-      }
-      if (!remoteSnapshotQueue.length || remoteSendTimer) return;
-      const capacity = remoteSendCapacity(now);
-      if (capacity <= 0) {
-        scheduleRemoteSendPump(Math.max(1, REMOTE_SEND_WINDOW_MS - (now - remoteSendWindowAt)));
-        return;
-      }
-
-      const batch = remoteSnapshotQueue.shift();
-      const end = Math.min(batch.cursor + REMOTE_BURST_SIZE, batch.cursor + capacity, batch.chunks.length);
-      while (batch.cursor < end) {
-        const index = batch.cursor++;
-        const envelope = {
-          ...batch.baseEnvelope,
-          t: "CHUNK",
-          index,
-          count: batch.chunks.length,
-          data: batch.chunks[index],
-        };
-        remoteSendEntry({
-          content: serializeRemoteEnvelope(envelope),
-          target: batch.target,
-          generation: batch.generation,
-        });
-      }
-      // Round-robin fairness: a large response returns to the end of the queue so
-      // another target can receive its first burst before this target continues.
-      if (batch.cursor < batch.chunks.length) remoteSnapshotQueue.push(batch);
-      if (remoteSnapshotQueue.length) {
-        const after = remoteNow();
-        const delay = remoteSendCapacity(after) > 0
-          ? REMOTE_NEXT_BURST_DELAY
-          : Math.max(1, REMOTE_SEND_WINDOW_MS - (after - remoteSendWindowAt));
-        scheduleRemoteSendPump(delay);
-      }
-    } finally {
-      remoteSendPumping = false;
+      const packet = { Type: "Hidden", Content: content };
+      if (Number.isInteger(target)) packet.Target = target;
+      ServerSend("ChatRoomChat", packet);
+      remoteStore.stats.messagesSent++;
+      remoteStore.stats.bytesSent += utf8Bytes(content);
+      return true;
+    } catch (error) {
+      remoteDiagnostic("send-failed", target, error?.message || error);
+      return false;
     }
   }
 
-  function acceptRequestedRemoteChunk(senderNumber, envelope) {
-    const pending = pendingRequestFor(senderNumber);
-    if (!pending || pending.generation !== remoteStore.roomGeneration ||
-      pending.requestId !== envelope.requestId || pending.session !== envelope.session ||
-      pending.revision !== envelope.revision || pending.hash !== envelope.hash) return false;
-    // One valid request may receive every legal chunk plus a small duplicate margin.
-    // Assembly count/byte budgets remain authoritative in addRemoteChunk().
-    pending.chunkMessages = Number(pending.chunkMessages) || 0;
-    if (pending.chunkMessages >= REMOTE_LIMITS.chunks + 4) return false;
-    pending.chunkMessages++;
+  function enqueueRemoteDataBatch(baseEnvelope, chunks, target = null, indexes = null) {
+    if (!Array.isArray(chunks) || !chunks.length) return 0;
+    const selected = Array.isArray(indexes) ? [...new Set(indexes)] : chunks.map((_, index) => index);
+    let sent = 0;
+    for (const index of selected) {
+      if (!Number.isInteger(index) || index < 0 || index >= chunks.length) continue;
+      if (enqueueRemoteEnvelope({ ...baseEnvelope, t: "X", i: index, n: chunks.length, d: chunks[index] }, target)) sent++;
+    }
+    return sent;
+  }
+
+  function acceptPublishedRemoteData(senderNumber, envelope) {
+    if (!publicationMatchesEnvelope(senderNumber, envelope)) return false;
+    const key = remoteObjectKey(senderNumber, envelope.h);
+    const count = remoteStore.dataMessageCounts.get(key) || 0;
+    if (count >= envelope.n * 2 + 4) return false;
+    remoteStore.dataMessageCounts.set(key, count + 1);
     return true;
+  }
+
+  function clearRemoteDataBudget(senderNumber, hash) {
+    remoteStore.dataMessageCounts.delete(remoteObjectKey(senderNumber, hash));
   }
 
   function onRemoteMessage(data) {
@@ -5879,8 +5877,8 @@
         remoteDiagnostic("invalid-envelope", senderNumber, error?.message || error);
         return true;
       }
-      const accepted = envelope.t === "CHUNK"
-        ? acceptRequestedRemoteChunk(senderNumber, envelope)
+      const accepted = envelope.t === "X"
+        ? acceptPublishedRemoteData(senderNumber, envelope)
         : acceptRemoteInboundRate(senderNumber);
       if (!accepted) {
         remoteStore.stats.messagesRejected++;
@@ -5902,7 +5900,7 @@
   function installRemoteMessageHandler() {
     if (remoteMessageHandlerDispose) return true;
     if (typeof globalThis.ChatRoomRegisterMessageHandler !== "function") return false;
-    remoteMessageHandlerDispose = ChatRoomRegisterMessageHandler({ Description: "COE Remote visual snapshot protocol", Priority: -50, Callback: onRemoteMessage }) || true;
+    remoteMessageHandlerDispose = ChatRoomRegisterMessageHandler({ Description: "COE room visual publication protocol", Priority: -50, Callback: onRemoteMessage }) || true;
     return true;
   }
 
@@ -5926,21 +5924,23 @@
 
 
   const REMOTE_PREFS_PREFIX = "BC.CustomOutfitEditor.RemotePrefs.v1";
+  const REMOTE_PUBLICATION_COHORT_MS = 2000;
   let remotePrefs = { sharingEnabled: false, receivingEnabled: false };
   let localPeerSessionId = "";
   let localRemoteRevision = 0;
   let localRemoteHash = "";
   let localRemoteCanonical = "";
   let localRemoteEncoded = "";
+  let localRemoteCompressedBytes = 0;
   let localRemoteChunks = [];
   let localRemoteSnapshot = null;
   let localRemoteBuildToken = 0;
   let localRemoteStateTimer = 0;
   let localRemoteBuildInFlight = null;
   let localRemoteDirty = true;
-  let localRemoteLastStateKey = "";
   let localRemotePreviouslyShared = false;
   let remoteRoomSyncing = false;
+  let localPublicationFlights = new Map();
 
   function remoteRandomId(bytes = 12) {
     const data = new Uint8Array(bytes);
@@ -5966,24 +5966,27 @@
     try { localStorage.setItem(remotePrefsKey(), JSON.stringify({ sharingEnabled: remotePrefs.sharingEnabled === true, receivingEnabled: remotePrefs.receivingEnabled === true })); } catch (_) { /* privacy mode */ }
   }
 
+  function clearActiveRemotePublications() {
+    const members = [...remoteStore.activeSnapshots.keys()];
+    remoteStore.activeSnapshots.clear();
+    remoteStore.assemblies.clear();
+    remoteStore.wantedObjects.clear();
+    remoteStore.announcedWants.clear();
+    remoteStore.wantRetryScheduled.clear();
+    syntheticByCharacter = new WeakMap();
+    for (const memberNumber of members) {
+      const character = remoteRoomMember(memberNumber);
+      if (character) CharacterRefresh(character, false, false);
+    }
+  }
+
   function setRemotePrefs(next) {
     const previous = remotePrefs;
     remotePrefs = { sharingEnabled: next.sharingEnabled === true, receivingEnabled: next.receivingEnabled === true };
     saveRemotePrefs();
-    if (!remotePrefs.receivingEnabled && previous.receivingEnabled) {
-      for (const memberNumber of [...remoteStore.activeSnapshots.keys()]) {
-        remoteStore.activeSnapshots.delete(memberNumber);
-        const character = remoteRoomMember(memberNumber);
-        if (character) CharacterRefresh(character, false, false);
-      }
-      remoteStore.pendingRequests.clear();
-      remoteStore.assemblies.clear();
-      remoteStore.totalBytes = 0;
-      syntheticByCharacter = new WeakMap();
-    } else if (remotePrefs.receivingEnabled && !previous.receivingEnabled) {
-      for (const [memberNumber, peer] of remoteStore.peers) maybeRequestRemoteSnapshot(memberNumber, peer);
-    }
-    if (!remotePrefs.sharingEnabled && previous.sharingEnabled) sendRemoteClear();
+    if (!remotePrefs.receivingEnabled && previous.receivingEnabled) clearActiveRemotePublications();
+    if (remotePrefs.receivingEnabled && !previous.receivingEnabled) sendRemoteDiscover();
+    if (!remotePrefs.sharingEnabled && previous.sharingEnabled) sendRemoteRevoke();
     scheduleLocalRemoteBuild(true);
     return { ...remotePrefs };
   }
@@ -5992,14 +5995,12 @@
     if (!activeComposition) return { v: 1, m: [], l: [] };
     const composition = normalizeComposition(activeComposition);
     const visibleMaterials = [];
-    const materialIndexes = new Map();
     const layers = [];
     for (const material of composition.materials) {
       if (material.hidden || (material.wearGroup && !isTagEquipped(globalThis.Player, material.wearGroup))) continue;
       const refs = composition.layers.filter(ref => ref.materialId === material.id && !ref.hidden);
       if (!refs.length) continue;
       const index = visibleMaterials.length;
-      materialIndexes.set(material.id, index);
       const compact = { g: material.sourceGroup, a: material.sourceAsset, c: sanitizeColorArray(material.colors) };
       if (material.wearGroup) compact.w = material.wearGroup;
       if (typeof material.overallRotation === "number") compact.r = material.overallRotation;
@@ -6012,12 +6013,12 @@
       if (Object.keys(property).length) compact.p = property;
       visibleMaterials.push(compact);
       for (const ref of refs) {
-        var snapshotLayer = { m: index, n: ref.sourceLayer == null ? null : ref.sourceLayer, i: Number.isInteger(ref.sourceLayerIndex) ? ref.sourceLayerIndex : 0, p: ref.priority, x: ref.offsetX, y: ref.offsetY, o: ref.opacity };
-        if (typeof ref.rotation === "number" && ref.rotation !== 0) snapshotLayer.r = ref.rotation;
-        if (typeof ref.scale === "number" && Math.abs(ref.scale - 1) > 0.001) snapshotLayer.s = ref.scale;
-        if (ref.mirrorX === true) snapshotLayer.h = true;
-        if (ref.mirrorY === true) snapshotLayer.v = true;
-        layers.push(snapshotLayer);
+        const layer = { m: index, n: ref.sourceLayer == null ? null : ref.sourceLayer, i: Number.isInteger(ref.sourceLayerIndex) ? ref.sourceLayerIndex : 0, p: ref.priority, x: ref.offsetX, y: ref.offsetY, o: ref.opacity };
+        if (typeof ref.rotation === "number" && ref.rotation !== 0) layer.r = ref.rotation;
+        if (typeof ref.scale === "number" && Math.abs(ref.scale - 1) > 0.001) layer.s = ref.scale;
+        if (ref.mirrorX === true) layer.h = true;
+        if (ref.mirrorY === true) layer.v = true;
+        layers.push(layer);
       }
     }
     return validateRemoteSnapshot({ v: 1, m: visibleMaterials, l: layers });
@@ -6032,10 +6033,10 @@
 
   function recordLocalRemoteBuildFailure(error) {
     remoteDiagnostic("local-build-failed", null, error?.message || error);
-    if (localRemotePreviouslyShared) sendRemoteClear();
+    if (localRemotePreviouslyShared) sendRemoteRevoke();
   }
 
-  function scheduleLocalRemoteBuild(forceState = false) {
+  function scheduleLocalRemoteBuild(forcePublication = false) {
     cancelLocalRemoteBuildTimer();
     localRemoteDirty = true;
     const generation = remoteStore.roomGeneration;
@@ -6043,7 +6044,7 @@
     localRemoteStateTimer = scheduleRemoteTimer(() => {
       localRemoteStateTimer = 0;
       const record = { generation, token, promise: null };
-      record.promise = updateLocalRemoteSnapshot(generation, token, forceState).catch(error => {
+      record.promise = updateLocalRemoteSnapshot(generation, token, forcePublication).catch(error => {
         recordLocalRemoteBuildFailure(error);
         return false;
       }).finally(() => {
@@ -6056,13 +6057,11 @@
   function ensureFreshLocalRemoteSnapshot(generation) {
     if (generation !== remoteStore.roomGeneration) return Promise.resolve(false);
     if (!localRemoteDirty && localRemoteSnapshot !== null) return Promise.resolve(true);
-    if (localRemoteBuildInFlight && localRemoteBuildInFlight.generation === generation &&
-      localRemoteBuildInFlight.token === localRemoteBuildToken) return localRemoteBuildInFlight.promise;
-
-    const pendingToken = localRemoteStateTimer ? localRemoteBuildToken : ++localRemoteBuildToken;
+    if (localRemoteBuildInFlight && localRemoteBuildInFlight.generation === generation && localRemoteBuildInFlight.token === localRemoteBuildToken) return localRemoteBuildInFlight.promise;
+    const token = localRemoteStateTimer ? localRemoteBuildToken : ++localRemoteBuildToken;
     cancelLocalRemoteBuildTimer();
-    const record = { generation, token: pendingToken, promise: null };
-    record.promise = updateLocalRemoteSnapshot(generation, pendingToken, false, true).catch(error => {
+    const record = { generation, token, promise: null };
+    record.promise = updateLocalRemoteSnapshot(generation, token, false, true).catch(error => {
       recordLocalRemoteBuildFailure(error);
       return false;
     }).finally(() => {
@@ -6072,21 +6071,43 @@
     return record.promise;
   }
 
-  function announceLocalRemoteState(target = null, generation = remoteStore.roomGeneration) {
-    if (generation !== remoteStore.roomGeneration) return Promise.resolve(false);
-    if (!localRemoteDirty && localRemoteSnapshot !== null) {
-      sendRemoteState(target, true);
-      return Promise.resolve(true);
-    }
-    return ensureFreshLocalRemoteSnapshot(generation).then(updated => {
-      if (!updated) return localRemoteDirty && generation === remoteStore.roomGeneration
-        ? announceLocalRemoteState(target, generation) : false;
-      sendRemoteState(target, true);
-      return true;
-    });
+  function currentRemoteAdvertiseEnvelope(includeInline = true) {
+    if (!localRemoteHash || !localRemoteCanonical || !localRemoteChunks.length) return null;
+    const envelope = {
+      t: "A", s: localPeerSessionId, r: localRemoteRevision, h: localRemoteHash,
+      u: utf8Bytes(localRemoteCanonical), z: localRemoteCompressedBytes, n: localRemoteChunks.length,
+    };
+    if (includeInline && localRemoteChunks.length === 1 && localRemoteEncoded.length <= REMOTE_LIMITS.inlineData) envelope.d = localRemoteEncoded;
+    return envelope;
   }
 
-  async function updateLocalRemoteSnapshot(generation = remoteStore.roomGeneration, token = ++localRemoteBuildToken, forceState = false, suppressState = false) {
+  function sendRemoteDiscover() {
+    if (!localPeerSessionId) return false;
+    return enqueueRemoteEnvelope({ t: "D", s: localPeerSessionId, rx: remotePrefs.receivingEnabled, e: REMOTE_ENCODING });
+  }
+
+  function sendRemoteRevoke() {
+    if (!localPeerSessionId) return false;
+    localRemotePreviouslyShared = false;
+    localPublicationFlights.clear();
+    return enqueueRemoteEnvelope({ t: "R", s: localPeerSessionId, r: localRemoteRevision });
+  }
+
+  function sendLocalRemoteAdvertisement(target = null) {
+    if (!remotePrefs.sharingEnabled) return false;
+    const envelope = currentRemoteAdvertiseEnvelope(true);
+    if (!envelope) return false;
+    localRemotePreviouslyShared = true;
+    return enqueueRemoteEnvelope(envelope, target);
+  }
+
+  function announceLocalRemotePublication(target = null, generation = remoteStore.roomGeneration) {
+    if (generation !== remoteStore.roomGeneration) return Promise.resolve(false);
+    if (!localRemoteDirty && localRemoteSnapshot !== null) return Promise.resolve(sendLocalRemoteAdvertisement(target));
+    return ensureFreshLocalRemoteSnapshot(generation).then(updated => updated ? sendLocalRemoteAdvertisement(target) : false);
+  }
+
+  async function updateLocalRemoteSnapshot(generation = remoteStore.roomGeneration, token = ++localRemoteBuildToken, forcePublication = false, suppressPublication = false) {
     let snapshot;
     try { snapshot = buildLocalRemoteSnapshot(); }
     catch (error) {
@@ -6094,170 +6115,176 @@
       throw error;
     }
     const canonical = canonicalRemoteSnapshot(snapshot);
-    const encoded = snapshot.l.length ? encodeRemoteText(canonical) : "";
-    const chunks = encoded ? splitRemoteData(encoded) : [];
-    const hash = snapshot.l.length ? await sha256Base64Url(canonical) : "";
+    let encoded = "";
+    let compressedBytes = 0;
+    let chunks = [];
+    let hash = "";
+    if (snapshot.l.length) {
+      const compressed = await encodeRemoteText(canonical);
+      encoded = compressed.encoded;
+      compressedBytes = compressed.compressedBytes;
+      chunks = splitRemoteData(encoded);
+      hash = await sha256Base64Url(canonical);
+    }
     if (generation !== remoteStore.roomGeneration || token !== localRemoteBuildToken) return false;
     const changed = hash !== localRemoteHash;
     if (changed) localRemoteRevision++;
     localRemoteSnapshot = snapshot;
     localRemoteCanonical = canonical;
     localRemoteEncoded = encoded;
+    localRemoteCompressedBytes = compressedBytes;
     localRemoteChunks = chunks;
     localRemoteHash = hash;
     localRemoteDirty = false;
-    if (suppressState) return true;
+    if (changed) localPublicationFlights.clear();
+    if (suppressPublication) return true;
     if (!snapshot.l.length) {
-      if (localRemotePreviouslyShared) sendRemoteClear();
-      sendRemoteState(null, true);
+      if (localRemotePreviouslyShared) sendRemoteRevoke();
       return true;
     }
-    if (remotePrefs.sharingEnabled) {
-      localRemotePreviouslyShared = true;
-      sendRemoteState(null, forceState || changed);
-    } else if (forceState) sendRemoteState(null, true);
+    if (remotePrefs.sharingEnabled && (changed || forcePublication)) sendLocalRemoteAdvertisement();
     return true;
   }
 
-  function currentRemoteStateEnvelope() {
-    const sharing = remotePrefs.sharingEnabled && !!localRemoteHash && !!localRemoteSnapshot?.l.length;
-    return { t: "STATE", s: localPeerSessionId, r: localRemoteRevision, h: sharing ? localRemoteHash : "", z: sharing ? utf8Bytes(localRemoteCanonical) : 0, sharing };
+  function sendLocalRemoteData(target = null, indexes = null) {
+    if (!remotePrefs.sharingEnabled || !localRemoteHash || !localRemoteChunks.length) return 0;
+    return enqueueRemoteDataBatch({ s: localPeerSessionId, r: localRemoteRevision, h: localRemoteHash }, localRemoteChunks, target, indexes);
   }
 
-  function sendRemoteState(target = null, force = false) {
-    if (!localPeerSessionId) return;
-    const envelope = currentRemoteStateEnvelope();
-    const key = `${target ?? "*"}|${envelope.s}|${envelope.r}|${envelope.h}|${envelope.sharing}`;
-    if (!force && key === localRemoteLastStateKey) return;
-    if (target == null) localRemoteLastStateKey = key;
-    enqueueRemoteEnvelope(envelope, target);
-  }
-
-  function sendRemoteClear() {
-    if (!localPeerSessionId) return;
-    enqueueRemoteEnvelope({ t: "CLEAR", s: localPeerSessionId });
-    localRemotePreviouslyShared = false;
-    localRemoteLastStateKey = "";
-  }
-
-  function maybeRequestRemoteSnapshot(memberNumber, peer) {
-    if (!remotePrefs.receivingEnabled || !peer.sharing || !peer.hash || peer.size > REMOTE_LIMITS.snapshotBytes) return false;
-    const active = remoteStore.activeSnapshots.get(memberNumber);
-    if (active?.identity === remoteIdentity(memberNumber, peer.session) && active.revision === peer.revision && active.hash === peer.hash) return false;
-    const pending = pendingRequestFor(memberNumber);
-    if (pending && pending.session === peer.session && pending.revision === peer.revision && pending.hash === peer.hash) return false;
-    const pendingIsStale = !!pending;
-    if (pendingIsStale) {
-      clearPendingRequest(memberNumber, pending.requestId);
-      remoteStore.assemblies.delete(remotePeerKey(memberNumber));
-    }
+  function respondToRemoteWant(requester, envelope) {
+    if (envelope.o !== Number(globalThis.Player?.MemberNumber) || envelope.s !== localPeerSessionId || envelope.r !== localRemoteRevision || envelope.h !== localRemoteHash) return false;
+    if (!remotePrefs.sharingEnabled || !localRemoteChunks.length) return false;
     const now = remoteNow();
-    if (!pendingIsStale && now - (remoteStore.requestTimes.get(memberNumber) || 0) < 5000) return false;
-    const request = { requestId: remoteRandomId(9), session: peer.session, revision: peer.revision, hash: peer.hash, retries: 0 };
-    setPendingRequest(memberNumber, request);
-    remoteStore.requestTimes.set(memberNumber, now);
-    enqueueRemoteEnvelope({ t: "REQUEST", requestId: request.requestId, session: request.session, revision: request.revision, hash: request.hash }, memberNumber);
-    scheduleRemoteRequestTimeout(memberNumber, request, remoteStore.roomGeneration);
+    const previous = localPublicationFlights.get(envelope.h);
+    if (!previous) {
+      localPublicationFlights.set(envelope.h, { broadcastAt: now });
+      sendLocalRemoteData();
+      return true;
+    }
+    if (now - previous.broadcastAt <= REMOTE_PUBLICATION_COHORT_MS) return true;
+    sendLocalRemoteData(Number(requester.MemberNumber));
     return true;
   }
 
-  function scheduleRemoteRequestTimeout(memberNumber, request, generation, delay = 12000) {
-    scheduleRemoteTimer(() => {
-      if (generation !== remoteStore.roomGeneration) return;
-      const pending = pendingRequestFor(memberNumber);
-      if (!pending || pending.requestId !== request.requestId) return;
-      const lastActivity = Math.max(pending.createdAt || 0, pending.lastProgressAt || 0);
-      const idle = remoteNow() - lastActivity;
-      // A crowded room or BC's native send queue may stretch a legal burst. Never
-      // invalidate an assembly while new chunks are still making progress.
-      if (idle < 12000) {
-        scheduleRemoteRequestTimeout(memberNumber, pending, generation, 12000 - idle);
-        return;
-      }
-      remoteStore.assemblies.delete(memberNumber);
-      if (pending.retries >= 1) {
-        clearPendingRequest(memberNumber, pending.requestId);
-        remoteDiagnostic("request-timeout", memberNumber);
-        return;
-      }
-      const retry = { ...pending, requestId: remoteRandomId(9), retries: pending.retries + 1, chunkMessages: 0, lastProgressAt: 0 };
-      setPendingRequest(memberNumber, retry);
-      enqueueRemoteEnvelope({ t: "REQUEST", requestId: retry.requestId, session: retry.session, revision: retry.revision, hash: retry.hash }, memberNumber);
-      scheduleRemoteRequestTimeout(memberNumber, retry, generation);
-    }, Math.max(1, delay));
-  }
-
-  async function handleRemoteEnvelope(sender, envelope, generation) {
-    if (generation !== remoteStore.roomGeneration) return;
-    const memberNumber = Number(sender.MemberNumber);
-    if (envelope.t === "STATE") {
-      const previous = getRemotePeer(memberNumber);
-      const result = setRemotePeer(memberNumber, { session: envelope.s, revision: envelope.r, hash: envelope.h, size: envelope.z, sharing: envelope.sharing });
-      const identity = remoteIdentity(memberNumber, envelope.s);
-      if (result.isNewSession) {
-        const active = remoteStore.activeSnapshots.get(memberNumber);
-        if (active) remoteStore.totalBytes -= active.bytes;
-        remoteStore.activeSnapshots.delete(memberNumber);
-        clearPendingRequest(memberNumber);
-        remoteStore.assemblies.delete(memberNumber);
-        syntheticByCharacter = new WeakMap();
-        if (active) CharacterRefresh(sender, false, false);
-      }
-      if (!remoteStore.helloReplied.has(identity)) {
-        remoteStore.helloReplied.add(identity);
-        sendRemoteState(memberNumber, true);
-      }
-      if (!envelope.sharing) {
-        const active = remoteStore.activeSnapshots.get(memberNumber);
-        if (active) remoteStore.totalBytes -= active.bytes;
-        remoteStore.activeSnapshots.delete(memberNumber);
-        clearPendingRequest(memberNumber);
-        remoteStore.assemblies.delete(memberNumber);
-        if (active) CharacterRefresh(sender, false, false);
-      } else if (!previous || result.isNewSession || previous.revision !== envelope.r || previous.hash !== envelope.h || previous.sharing !== envelope.sharing) maybeRequestRemoteSnapshot(memberNumber, result.peer);
-      return;
-    }
-    if (envelope.t === "CLEAR") {
-      const peer = getRemotePeer(memberNumber);
-      if (peer && peer.session !== envelope.s) throw new Error("remote-clear-session");
-      if (peer) { peer.sharing = false; peer.size = 0; }
-      const previous = remoteStore.activeSnapshots.get(memberNumber);
-      if (previous) remoteStore.totalBytes -= previous.bytes;
-      remoteStore.activeSnapshots.delete(memberNumber);
-      clearPendingRequest(memberNumber);
-      syntheticByCharacter = new WeakMap();
-      CharacterRefresh(sender, false, false);
-      return;
-    }
-    if (envelope.t === "REQUEST") {
-      if (!remotePrefs.sharingEnabled || envelope.session !== localPeerSessionId || envelope.revision !== localRemoteRevision || envelope.hash !== localRemoteHash || !localRemoteCanonical || !localRemoteChunks.length) return;
-      const now = remoteNow();
-      if (now - (remoteStore.responseTimes.get(memberNumber) || 0) < 3000) return;
-      remoteStore.responseTimes.set(memberNumber, now);
-      enqueueRemoteSnapshotBatch({
-        requestId: envelope.requestId,
-        session: localPeerSessionId,
-        revision: localRemoteRevision,
-        hash: localRemoteHash,
-      }, localRemoteChunks, memberNumber);
-      return;
-    }
-    const assembled = addRemoteChunk(memberNumber, envelope);
-    if (assembled.status !== "complete") return;
-    const canonical = decodeRemoteText(assembled.encoded);
-    if (utf8Bytes(canonical) > REMOTE_LIMITS.snapshotBytes) throw new Error("remote-decoded-budget");
+  async function decodeAndAcceptRemotePublication(sender, publication, encoded, generation) {
+    const canonical = await decodeRemoteText(encoded, publication.compressedBytes);
+    if (generation !== remoteStore.roomGeneration) return false;
+    if (utf8Bytes(canonical) !== publication.uncompressedBytes) throw new Error("remote-uncompressed-size");
     let parsed;
     try { parsed = JSON.parse(canonical); } catch (_) { throw new Error("snapshot-json"); }
     const snapshot = validateRemoteSnapshot(parsed);
     const normalizedCanonical = JSON.stringify(snapshot);
     if (normalizedCanonical !== canonical) throw new Error("snapshot-not-canonical");
     const hash = await sha256Base64Url(canonical);
-    if (generation !== remoteStore.roomGeneration) return;
-    const pending = pendingRequestFor(memberNumber);
-    if (!pending || pending.requestId !== envelope.requestId || hash !== pending.hash || hash !== envelope.hash) throw new Error("snapshot-hash");
-    acceptRemoteSnapshot(memberNumber, remoteIdentity(memberNumber, envelope.session), snapshot, canonical);
+    if (generation !== remoteStore.roomGeneration) return false;
+    const current = getRemotePublication(sender.MemberNumber);
+    if (!current || current.session !== publication.session || current.revision !== publication.revision || current.hash !== hash) throw new Error("snapshot-hash");
+    acceptRemoteSnapshot(sender.MemberNumber, current, snapshot, canonical);
+    clearRemoteDataBudget(sender.MemberNumber, hash);
     syntheticByCharacter = new WeakMap();
     CharacterRefresh(sender, false, false);
+    return true;
+  }
+
+  function scheduleRemoteWantRetry(senderNumber, publication, generation) {
+    const key = remoteObjectKey(senderNumber, publication.hash);
+    if (remoteStore.wantRetryScheduled.has(key)) return;
+    remoteStore.wantRetryScheduled.add(key);
+    scheduleRemoteTimer(() => {
+      remoteStore.wantRetryScheduled.delete(key);
+      if (generation !== remoteStore.roomGeneration || !remotePrefs.receivingEnabled) return;
+      const current = getRemotePublication(senderNumber);
+      const active = remoteStore.activeSnapshots.get(senderNumber);
+      if (!current || current.session !== publication.session || current.revision !== publication.revision || current.hash !== publication.hash) return;
+      if (active?.hash === publication.hash || remoteStore.assemblies.has(key)) return;
+      enqueueRemoteEnvelope({ t: "W", o: senderNumber, s: publication.session, r: publication.revision, h: publication.hash });
+    }, 12000);
+  }
+
+  function scheduleRemoteAssemblyRepair(senderNumber, publication, generation) {
+    const key = remoteObjectKey(senderNumber, publication.hash);
+    const assembly = remoteStore.assemblies.get(key);
+    if (!assembly || assembly.repairTimer) return;
+    assembly.repairTimer = scheduleRemoteTimer(() => {
+      if (generation !== remoteStore.roomGeneration) return;
+      const current = remoteStore.assemblies.get(key);
+      if (!current || current.repairAttempts >= 1) return;
+      const missing = missingRemoteDataIndexes(senderNumber, publication.hash);
+      if (!missing.length) return;
+      current.repairAttempts++;
+      enqueueRemoteEnvelope({ t: "N", o: senderNumber, s: publication.session, r: publication.revision, h: publication.hash, m: missing });
+    }, 12000);
+  }
+
+  async function handleRemoteEnvelope(sender, envelope, generation) {
+    if (generation !== remoteStore.roomGeneration) return;
+    const memberNumber = Number(sender.MemberNumber);
+    if (envelope.t === "D") {
+      setRemoteDiscovery(memberNumber, { session: envelope.s, receiving: envelope.rx, encoding: envelope.e });
+      if (envelope.rx) await announceLocalRemotePublication(memberNumber, generation);
+      return;
+    }
+    if (envelope.t === "R") {
+      if (revokeRemotePublication(memberNumber, envelope.s, envelope.r)) CharacterRefresh(sender, false, false);
+      return;
+    }
+    if (envelope.t === "A") {
+      const hadActive = remoteStore.activeSnapshots.has(memberNumber);
+      const result = setRemotePublication(memberNumber, {
+        session: envelope.s, revision: envelope.r, hash: envelope.h,
+        uncompressedBytes: envelope.u, compressedBytes: envelope.z, count: envelope.n,
+      });
+      const publication = result.publication;
+      if (!remotePrefs.receivingEnabled) return;
+      if (activateCachedRemoteObject(memberNumber, publication)) {
+        syntheticByCharacter = new WeakMap();
+        CharacterRefresh(sender, false, false);
+        return;
+      }
+      if (result.changedObject && hadActive) {
+        syntheticByCharacter = new WeakMap();
+        CharacterRefresh(sender, false, false);
+      }
+      markRemoteObjectWanted(memberNumber, publication.hash);
+      if (envelope.d != null) {
+        await decodeAndAcceptRemotePublication(sender, publication, envelope.d, generation);
+        return;
+      }
+      if (noteRemoteWantAnnouncement(memberNumber, publication.hash)) {
+        enqueueRemoteEnvelope({ t: "W", o: memberNumber, s: publication.session, r: publication.revision, h: publication.hash });
+      }
+      scheduleRemoteWantRetry(memberNumber, publication, generation);
+      return;
+    }
+    if (envelope.t === "W") {
+      if (envelope.o === Number(globalThis.Player?.MemberNumber)) {
+        respondToRemoteWant(sender, envelope);
+        return;
+      }
+      const publication = getRemotePublication(envelope.o);
+      if (publication && publication.session === envelope.s && publication.revision === envelope.r && publication.hash === envelope.h) {
+        markRemoteObjectWanted(envelope.o, envelope.h);
+        noteRemoteWantAnnouncement(envelope.o, envelope.h);
+        scheduleRemoteWantRetry(envelope.o, publication, generation);
+      }
+      return;
+    }
+    if (envelope.t === "N") {
+      if (envelope.o !== Number(globalThis.Player?.MemberNumber) || envelope.s !== localPeerSessionId || envelope.r !== localRemoteRevision || envelope.h !== localRemoteHash) return;
+      if (!remotePrefs.sharingEnabled) return;
+      const sent = sendLocalRemoteData(null, envelope.m);
+      if (sent) remoteStore.stats.repairsSent += sent;
+      return;
+    }
+    const publication = getRemotePublication(memberNumber);
+    if (!publication || !remotePrefs.receivingEnabled) return;
+    const assembled = addRemoteDataChunk(memberNumber, envelope);
+    if (assembled.status === "partial") {
+      scheduleRemoteAssemblyRepair(memberNumber, publication, generation);
+      return;
+    }
+    if (assembled.status !== "complete") return;
+    await decodeAndAcceptRemotePublication(sender, publication, assembled.encoded, generation);
   }
 
   function installRemoteLifecycleHooks() {
@@ -6265,39 +6292,34 @@
       ensureRemoteMessageHandler();
       cancelRemoteTransport();
       resetRemoteRoom();
+      localPublicationFlights = new Map();
       remoteRoomSyncing = true;
       const generation = remoteStore.roomGeneration;
       let result;
       try { result = next(args); }
       catch (error) { remoteRoomSyncing = false; throw error; }
-      Promise.resolve(result).then(() => {
+      Promise.resolve(result).then(async () => {
         remoteRoomSyncing = false;
-        if (generation === remoteStore.roomGeneration) announceLocalRemoteState(null, generation);
+        if (generation !== remoteStore.roomGeneration) return;
+        sendRemoteDiscover();
+        await announceLocalRemotePublication(null, generation);
       }).catch(() => { remoteRoomSyncing = false; });
       return result;
     });
-    modApi.hookFunction("ChatRoomSyncMemberJoin", 1000, (args, next) => {
-      const result = next(args);
-      const memberNumber = Number(args[0]?.SourceMemberNumber ?? args[0]?.MemberNumber ?? args[0]);
-      const generation = remoteStore.roomGeneration;
-      // Initial room hydration may emit one join callback for every existing
-      // character. The broadcast STATE after ChatRoomSync covers them all; sending
-      // a targeted STATE for each entry only floods BC's native send queue.
-      if (!remoteRoomSyncing && Number.isInteger(memberNumber)) announceLocalRemoteState(memberNumber, generation);
-      return result;
-    });
+    modApi.hookFunction("ChatRoomSyncMemberJoin", 1000, (args, next) => next(args));
     modApi.hookFunction("ChatRoomSyncMemberLeave", 1000, (args, next) => {
       const memberNumber = Number(args[0]?.SourceMemberNumber ?? args[0]?.MemberNumber ?? args[0]);
       const result = next(args);
       if (Number.isInteger(memberNumber)) clearRemoteMember(memberNumber);
       return result;
     });
-    modApi.hookFunction("ChatRoomLeave", 1000, (args, next) => { cancelRemoteTransport(); resetRemoteRoom(); return next(args); });
+    modApi.hookFunction("ChatRoomLeave", 1000, (args, next) => { cancelRemoteTransport(); resetRemoteRoom(); localPublicationFlights = new Map(); return next(args); });
     modApi.hookFunction("ServerDisconnect", 1000, (args, next) => {
       captureSetReconnectIntent();
       invalidateSetPreviewCache();
       cancelRemoteTransport();
       resetRemoteRoom();
+      localPublicationFlights = new Map();
       return next(args);
     });
     modApi.hookFunction("CharacterLoadOnline", 1000, (args, next) => {
@@ -6321,11 +6343,13 @@
     localRemoteHash = "";
     localRemoteCanonical = "";
     localRemoteEncoded = "";
+    localRemoteCompressedBytes = 0;
     localRemoteChunks = [];
     localRemoteSnapshot = null;
     localRemoteBuildInFlight = null;
     localRemoteDirty = true;
     remoteRoomSyncing = false;
+    localPublicationFlights = new Map();
     const messageHandlerReady = ensureRemoteMessageHandler();
     scheduleLocalRemoteBuild(true);
     return messageHandlerReady;
@@ -6510,11 +6534,13 @@
       scanAlphaBounds, contentBoundsFromBounds, contentPivotFromBounds, resolveTextureContentPivot, resolveTextureContentBounds, cacheOverallLayerGeometry, cachedOverallCenter, buildSyntheticItems, buildLocalSyntheticItems, buildRemoteSyntheticItems, makeSyntheticLayers, syncLocalSyntheticRuntime, requestCharacterRefresh, statusSnapshot,
       isDrawableLayer, normalizedMaterialColors, normalizePickerColor, nextCopyLayerLabel, localizedPoseLabel, clothingSlotGroups, registerTagAssets, isTagEquipped, equipTagForGroup, activateScheme, combineSchemes, combinedEquippedComposition, validateRemoteSnapshot, canonicalRemoteSnapshot, sha256Base64Url,
       parseRemoteContent, serializeRemoteEnvelope, encodeRemoteText, decodeRemoteText, splitRemoteData,
-      createRemoteStore, setRemotePeer, setPendingRequest, pendingRequestFor, addRemoteChunk, expireRemoteAssemblies,
-      acceptRemoteSnapshot, clearRemoteMember, onRemoteMessage, handleRemoteEnvelope, buildLocalRemoteSnapshot, updateLocalRemoteSnapshot,
-      enqueueRemoteEnvelope, enqueueRemoteSnapshotBatch, pumpRemoteSendQueue, cancelRemoteTransport, acceptRequestedRemoteChunk, installRemoteMessageHandler, ensureRemoteMessageHandler, initializeRemoteController, scheduleLocalRemoteBuild, announceLocalRemoteState,
+      createRemoteStore, setRemoteDiscovery, setRemotePublication, getRemotePublication, markRemoteObjectWanted, noteRemoteWantAnnouncement,
+      addRemoteDataChunk, missingRemoteDataIndexes, expireRemoteAssemblies, cacheRemoteObject, activateRemoteObject, activateCachedRemoteObject,
+      acceptRemoteSnapshot, revokeRemotePublication, clearRemoteMember, onRemoteMessage, handleRemoteEnvelope, buildLocalRemoteSnapshot, updateLocalRemoteSnapshot,
+      enqueueRemoteEnvelope, enqueueRemoteDataBatch, cancelRemoteTransport, acceptPublishedRemoteData, clearRemoteDataBudget,
+      installRemoteMessageHandler, ensureRemoteMessageHandler, initializeRemoteController, scheduleLocalRemoteBuild, announceLocalRemotePublication, sendRemoteDiscover,
       getRemoteStoreForTest: () => remoteStore,
-      getLocalRemoteStateForTest: () => ({ session: localPeerSessionId, revision: localRemoteRevision, hash: localRemoteHash, canonical: localRemoteCanonical, encoded: localRemoteEncoded, chunks: localRemoteChunks.slice(), snapshot: localRemoteSnapshot, buildToken: localRemoteBuildToken, dirty: localRemoteDirty }),
+      getLocalRemoteStateForTest: () => ({ session: localPeerSessionId, revision: localRemoteRevision, hash: localRemoteHash, canonical: localRemoteCanonical, encoded: localRemoteEncoded, compressedBytes: localRemoteCompressedBytes, chunks: localRemoteChunks.slice(), snapshot: localRemoteSnapshot, buildToken: localRemoteBuildToken, dirty: localRemoteDirty }),
       resetRemoteRoomForTest: resetRemoteRoom,
       setRemotePrefsForTest: value => { remotePrefs = { sharingEnabled: value?.sharingEnabled === true, receivingEnabled: value?.receivingEnabled === true }; },
       setLocalRemoteStateForTest: value => {
@@ -6522,7 +6548,8 @@
         localRemoteRevision = value.revision;
         localRemoteHash = value.hash;
         localRemoteCanonical = value.canonical;
-        localRemoteEncoded = value.encoded ?? (value.canonical ? encodeRemoteText(value.canonical) : "");
+        localRemoteEncoded = value.encoded ?? "";
+        localRemoteCompressedBytes = value.compressedBytes ?? 0;
         localRemoteChunks = value.chunks ?? (localRemoteEncoded ? splitRemoteData(localRemoteEncoded) : []);
         localRemoteSnapshot = value.snapshot;
         localRemoteBuildToken = value.buildToken ?? localRemoteBuildToken;

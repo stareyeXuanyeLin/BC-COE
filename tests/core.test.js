@@ -745,6 +745,39 @@ test('drawable layer predicate consistently rejects missing images and locked la
   assert.equal(api.isDrawableLayer(null), false);
 });
 
+test('synthetic renderer delegates conditional layer visibility to the BC R130 predicate', () => {
+  const asset = makeAsset('Cloth', 'TypedDress');
+  const layerBase = { Priority: 10, HasImage: true, LockLayer: false, AllowColorize: true, ColorIndex: 0, Opacity: 1, MinOpacity: 0, MaxOpacity: 1, DrawingLeft: {}, DrawingTop: {}, ParentGroup: {}, PoseMapping: {}, CreateLayerTypes: ['variant'] };
+  asset.Layer = [
+    { ...layerBase, Name: 'Variant0', AllowTypes: { marker: 0 } },
+    { ...layerBase, Name: 'Variant1', AllowTypes: { marker: 1 } },
+  ];
+  const seen = [];
+  const env = load({
+    assets: [asset],
+    globals: {
+      CharacterAppearanceIsLayerVisible(_character, layer, _asset, typeRecord) {
+        seen.push({ name: layer.Name, typeRecord: { ...typeRecord } });
+        return layer.Name === `Variant${typeRecord.variant}`;
+      },
+    },
+  });
+  env.api.setEditingForTest({
+    version: 6, name: '条件图层', slotGroup: 'Cloth', recycle: [],
+    materials: [{ id: 'm1', sourceGroup: 'Cloth', sourceAsset: 'TypedDress', colors: ['#fff'], sourceProperty: { TypeRecord: { variant: 1 } } }],
+    layers: [
+      { materialId: 'm1', sourceGroup: 'Cloth', sourceAsset: 'TypedDress', sourceLayer: 'Variant0', sourceLayerIndex: 0, priority: 10, offsetX: 0, offsetY: 0, opacity: 1 },
+      { materialId: 'm1', sourceGroup: 'Cloth', sourceAsset: 'TypedDress', sourceLayer: 'Variant1', sourceLayerIndex: 1, priority: 10, offsetX: 0, offsetY: 0, opacity: 1 },
+    ],
+  });
+
+  const groups = env.api.buildSyntheticItems(env.player);
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].drawable[0].sourceLayer.Name, 'Variant1');
+  assert.deepEqual(seen.map(entry => entry.name), ['Variant0', 'Variant1']);
+  assert.deepEqual(seen[0].typeRecord, { variant: 1 });
+});
+
 test('material color normalization preserves fallback, padding and truncation behavior', () => {
   const { api } = load();
   const asset = { DefaultColor: ['#111111', '#222222', '#333333'], ColorableLayerCount: 3 };

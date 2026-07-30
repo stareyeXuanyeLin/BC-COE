@@ -262,7 +262,7 @@ test('deleting a referenced outfit removes only its references and rolls back on
   assert.deepEqual(plain(current.sets[1].customOutfits), []);
 });
 
-test('set apply plan replaces Appearance, preserves current expressions and reports missing content', () => {
+test('set apply replaces Appearance without applying expressions and reports missing content', () => {
   const body = appearanceAsset('BodyUpper', 'FemaleBody', false);
   const eyes = appearanceAsset('Eyes', 'AnimeEyes', false);
   const tag = appearanceAsset('Cloth', 'COECustomOutfit');
@@ -291,11 +291,34 @@ test('set apply plan replaces Appearance, preserves current expressions and repo
   };
   const plan = api.applySetTransaction(set, { persist() {} });
   assert.deepEqual(plain(player.Appearance.map(item => item.Asset.Group.Name).sort()), ['BodyUpper', 'Cloth', 'Eyes']);
-  assert.equal(player.Appearance.find(item => item.Asset.Group.Name === 'Eyes').Property.Expression, 'Closed');
+  assert.equal(player.Appearance.find(item => item.Asset.Group.Name === 'Eyes').Property.Expression, undefined);
   assert.equal(player.Appearance.some(item => item.Asset.Name === 'OldCoat'), false);
   assert.deepEqual(plain(api.getWardrobeForTest().equippedIds), ['dress']);
   assert.equal(plan.missingAppearance.length, 1);
   assert.equal(plan.missingSchemes.length, 1);
+});
+
+test('set apply never transfers a current genital expression to the saved target asset', () => {
+  const penis = appearanceAsset('Pussy', 'Penis', false);
+  const pussy = appearanceAsset('Pussy', 'Pussy1', false);
+  const player = {
+    AccountName: 'A', MemberNumber: 1, AssetFamily: 'Female3DCG',
+    Appearance: [{ Asset: penis, Color: 'Default', Property: { Expression: 'Hard' } }],
+    AppearanceLayers: [], ExtensionSettings: {}, Pose: ['Kneel'], Emoticon: 'Heart',
+  };
+  const { api } = load({ assets: [penis, pussy], player });
+  api.setWardrobeForTest({ schemaVersion: 3, schemes: [], sets: [], equippedIds: [] });
+
+  api.applySetTransaction({
+    id: 'set', name: '默认身体',
+    appearance: [{ group: 'Pussy', asset: 'Pussy1', color: 'Default', property: {} }],
+    customOutfits: [],
+  }, { persist() {}, sync: false });
+
+  assert.equal(player.Appearance[0].Asset.Name, 'Pussy1');
+  assert.equal(player.Appearance[0].Property.Expression, undefined);
+  assert.deepEqual(plain(player.Pose), ['Kneel']);
+  assert.equal(player.Emoticon, 'Heart');
 });
 
 test('set apply keeps required body Appearance fallback when an old set omitted it', () => {

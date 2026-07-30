@@ -974,7 +974,10 @@
     const missingSchemes = [];
     const appearance = [];
     const storedGroups = new Set(normalized.appearance.map(bundle => bundle.group));
-    const expressions = new Map((character?.Appearance || []).map(item => [item?.Asset?.Group?.Name, item?.Property?.Expression]).filter(([, value]) => value != null));
+    // Expressions are transient character state, not part of a saved set. Do not
+    // copy them from either the stored bundle or the currently worn Appearance:
+    // moving a Group expression to a different Asset can create invalid image
+    // paths such as Penis/Hard -> Pussy1/Hard.
     // Keep the character's currently valid required body/face Appearance items
     // as a compatibility fallback when an older set was saved without them.
     // Clothing and AllowNone groups are intentionally excluded so old clothes
@@ -992,7 +995,6 @@
         continue;
       }
       const property = prepareSetAppearanceProperty(asset, bundle.property);
-      if (expressions.has(bundle.group)) property.Expression = cloneJSON(expressions.get(bundle.group));
       appearance.push({ Asset: asset, Color: cloneJSON(bundle.color), Property: property });
     }
     const schemeById = new Map((data?.schemes || []).map(entry => [entry.id, entry]));
@@ -1958,6 +1960,26 @@
     return poseMapping === layer?.PoseMapping ? { ...layer } : { ...layer, PoseMapping: poseMapping };
   }
 
+  function sourceLayerVisible(character, layer, asset, sourceProperty) {
+    const typeRecord = sourceProperty?.TypeRecord || null;
+    // R130 centralizes AllowTypes, HideAs, pose and character-attribute checks in
+    // this predicate. Reuse it before COE creates a visual proxy so an invalid
+    // source layer never reaches CommonDraw or URL generation.
+    if (typeof globalThis.CharacterAppearanceIsLayerVisible === "function") {
+      try { return CharacterAppearanceIsLayerVisible(character, layer, asset, typeRecord) === true; }
+      catch (_) { return false; }
+    }
+    // Compatibility fallback for older runtimes: an unconditional layer is safe.
+    // A conditional layer must fail closed unless BC exposes its AllowTypes
+    // evaluator, because guessing modular AND/OR semantics recreates invalid URLs.
+    if (!layer?.AllowTypes) return true;
+    if (typeof globalThis.CharacterAppearanceAllowForTypes === "function") {
+      try { return CharacterAppearanceAllowForTypes(layer.AllowTypes, typeRecord) === true; }
+      catch (_) { return false; }
+    }
+    return false;
+  }
+
   function createVisualAssetProxy(asset, owner = asset) {
     const cached = visualAssetProxyCache.get(owner);
     if (cached) return cached;
@@ -1995,14 +2017,15 @@
   }
 
   function buildStaticSynthetic({ character, material, refs, asset, analysis, overall = null }) {
+    const sourceProperty = sanitizeVisualProperty(material.sourceProperty || {}, analysis, asset);
     const drawable = refs.map(ref => ({ ref, sourceLayer: resolveSourceLayer(asset, ref) }))
-      .filter(entry => isDrawableLayer(entry.sourceLayer))
+      .filter(entry => isDrawableLayer(entry.sourceLayer) && sourceLayerVisible(character, entry.sourceLayer, asset, sourceProperty))
       .sort((a, b) => (a.ref.sourceLayerIndex ?? asset.Layer.indexOf(a.sourceLayer)) - (b.ref.sourceLayerIndex ?? asset.Layer.indexOf(b.sourceLayer)));
     if (!drawable.length) throw new Error("no-drawable-layer");
     // Byte budgets are enforced at persistence and remote-protocol boundaries.
     // Avoid serializing unchanged material data on every preview frame.
     const colors = resolveMaterialColors(material, asset, refs);
-    const baseProperty = sanitizeVisualProperty(material.sourceProperty || {}, analysis, asset);
+    const baseProperty = sourceProperty;
     // 每层生成独立的 Item，Property 各自携带该层的变换
     const results = drawable.map((entry, index) => {
       const { ref, sourceLayer } = entry;

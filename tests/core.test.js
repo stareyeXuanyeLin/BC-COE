@@ -151,10 +151,58 @@ test('transform targets come from persistent list selection without dropdown or 
   assert.match(source, /data-select-layer/);
 });
 
-test('material categories default to collapsed and matching search categories expand automatically', () => {
+test('material categories default to collapsed, lazy-render cards, and expand search matches', () => {
   const source = fs.readFileSync(path.join(root, 'src', '10-editor.js'), 'utf8');
   assert.match(source, /const searching =[^;]+query\.trim\(\)\.length > 0/);
-  assert.match(source, /const collapsed = !searching && !expandedMaterialGroups\.has\(groupName\)/);
+  assert.match(source, /const collapsed = !searching && !expandedMaterialGroups\.has\(groupKey\)/);
+  assert.match(source, /if \(!collapsed\) \{[\s\S]*materialPreviewPath\(asset\)/);
+});
+
+test('material catalogue is dynamic, uncapped, and limited to clothing plus cosplay wearables', () => {
+  const assets = Array.from({ length: 805 }, (_, index) => {
+    const asset = makeAsset('Cloth', `Dress${index}`);
+    asset.Group.Clothing = true;
+    return asset;
+  });
+  const echoCloth = makeAsset('长袖子_Luzi', 'EchoSleeve');
+  echoCloth.Group.Clothing = true;
+  echoCloth.Group.Description = '🍔长袖子';
+  const cosplayEars = makeAsset('CosplayEars', 'FoxEars', { BodyCosplay: true });
+  cosplayEars.Group.Description = '兽耳';
+  const eyes = makeAsset('Eyes', 'BlueEyes');
+  eyes.Group.AllowNone = false;
+  const hair = makeAsset('额外头发_Luzi', 'LongHair');
+  const height = makeAsset('额外身高_Luzi', 'Tall');
+  height.Group.BodyCosplay = true;
+  assets.push(echoCloth, cosplayEars, eyes, hair, height);
+  const { api } = load({ assets });
+  const result = Array.from(api.getMaterialAssets());
+  assert.equal(result.length, 807);
+  assert.equal(result.includes(echoCloth), true);
+  assert.equal(result.includes(cosplayEars), true);
+  assert.equal(result.includes(eyes), false);
+  assert.equal(result.includes(hair), false);
+  assert.equal(result.includes(height), false);
+  assert.equal(Array.from(api.getMaterialAssets('EchoSleeve')).length, 1);
+});
+
+test('material previews resolve virtual asset paths through the BC image cache hook', () => {
+  const asset = makeAsset('Wings', '蝴蝶结背饰');
+  asset.Group.Clothing = true;
+  asset.DynamicGroupName = 'Wings';
+  const seen = [];
+  const { api } = load({
+    assets: [asset],
+    globals: {
+      AssetGetPreviewPath: () => 'Assets/Female3DCG/Wings/Preview',
+      DrawGetImage(path) {
+        seen.push(path);
+        return { src: 'https://cdn.example.invalid/echo/Wings/Preview/bow.png', currentSrc: '' };
+      },
+    },
+  });
+  assert.equal(api.materialPreviewPath(asset), 'https://cdn.example.invalid/echo/Wings/Preview/bow.png');
+  assert.deepEqual(seen, ['Assets/Female3DCG/Wings/Preview/蝴蝶结背饰.png']);
 });
 
 test('editor exposes only clothing or underwear appearance slots and stores the selected slot', () => {
@@ -776,6 +824,31 @@ test('synthetic renderer delegates conditional layer visibility to the BC R130 p
   assert.equal(groups[0].drawable[0].sourceLayer.Name, 'Variant1');
   assert.deepEqual(seen.map(entry => entry.name), ['Variant0', 'Variant1']);
   assert.deepEqual(seen[0].typeRecord, { variant: 1 });
+});
+
+test('third-party material keeps explicit static layers when formal visibility rejects every layer', () => {
+  const asset = makeAsset('ClothAccessory', '复杂服装');
+  asset.Group.Clothing = true;
+  const base = asset.Layer[0];
+  asset.Layer = [
+    { ...base, Name: 'VariantA', AllowTypes: { typed: 1 } },
+    { ...base, Name: 'VariantB', AllowTypes: { typed: 2 } },
+  ];
+  const env = load({
+    assets: [asset],
+    globals: { CharacterAppearanceIsLayerVisible: () => false },
+  });
+  env.api.setEditingForTest({
+    version: 6, name: '第三方条件服装', slotGroup: 'Cloth', recycle: [],
+    materials: [{ id: 'm1', sourceGroup: 'ClothAccessory', sourceAsset: '复杂服装', colors: ['#fff'], sourceProperty: {} }],
+    layers: [
+      { materialId: 'm1', sourceGroup: 'ClothAccessory', sourceAsset: '复杂服装', sourceLayer: 'VariantA', sourceLayerIndex: 0, priority: 10, offsetX: 0, offsetY: 0, opacity: 1 },
+      { materialId: 'm1', sourceGroup: 'ClothAccessory', sourceAsset: '复杂服装', sourceLayer: 'VariantB', sourceLayerIndex: 1, priority: 10, offsetX: 0, offsetY: 0, opacity: 1 },
+    ],
+  });
+  const groups = env.api.buildSyntheticItems(env.player);
+  assert.equal(groups.length, 2);
+  assert.match(env.api.statusSnapshot().lastWarnings.at(-1), /全部图层被条件判定拒绝/);
 });
 
 test('material color normalization preserves fallback, padding and truncation behavior', () => {

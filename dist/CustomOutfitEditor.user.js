@@ -1695,14 +1695,44 @@
     return !!layer?.HasImage && !layer.LockLayer;
   }
 
+  // Body-replacement and cosmetic feature groups can be removable Appearance
+  // groups too, so AllowNone alone is not enough to identify clothing. Keep the
+  // material catalogue dynamic while excluding feature-editing groups. Ears and
+  // tails are intentionally absent from this deny pattern because cosplay body
+  // parts are valid clothing materials.
+  const NON_CLOTHING_MATERIAL_GROUP_PATTERN = /^(?:Body(?:Upper|Lower|Style|Size)|Head|Hair(?:Front|Back)?|Eyes?2?|Eyebrows?|Mouth|Nose|Hands?|Height|Blush|Emoticon|Pussy|Nipples?|Breast|Butt|Skin)|(?:身体|替用身体|身高|左眼|右眼|眼睛|前发|后发|额外头发|发型|发色|妆容|化妆|纹身|液体|痕迹|外观工具)/i;
+
+  function isMaterialAsset(asset) {
+    const group = asset?.Group;
+    if (!asset?.Wear || asset.IsLock || asset.Name === TAG_ASSET_NAME) return false;
+    if (!group || group.Category !== "Appearance" || group.AllowNone !== true || group.AllowCustomize === false) return false;
+    if (!asset.Layer?.some(isDrawableLayer)) return false;
+    if (group.Clothing === true || group.Underwear === true) return true;
+    if (group.BodyCosplay !== true && asset.BodyCosplay !== true) return false;
+    const semanticName = `${group.Name || ""} ${group.Description || ""}`;
+    return !NON_CLOTHING_MATERIAL_GROUP_PATTERN.test(semanticName);
+  }
+
+  function getMaterialAssetGroups(query = "") {
+    const q = String(query || "").trim().toLowerCase();
+    const groups = new Map();
+    for (const asset of globalThis.Asset || []) {
+      if (!isMaterialAsset(asset)) continue;
+      const text = `${asset.Group?.Name || ""} ${asset.Group?.Description || ""} ${asset.Name || ""} ${asset.Description || ""}`.toLowerCase();
+      if (q && !text.includes(q)) continue;
+      const key = asset.Group.Name;
+      let entry = groups.get(key);
+      if (!entry) {
+        entry = { key, label: asset.Group.Description || key, assets: [] };
+        groups.set(key, entry);
+      }
+      entry.assets.push(asset);
+    }
+    return [...groups.values()];
+  }
+
   function getMaterialAssets(query = "") {
-    const q = query.trim().toLowerCase();
-    return (globalThis.Asset || []).filter(asset => {
-      if (!asset?.Wear || asset.IsLock || asset.Name === TAG_ASSET_NAME) return false;
-      if (!asset.Layer?.some(isDrawableLayer)) return false;
-      const text = `${asset.Group?.Name || ""} ${asset.Name || ""} ${asset.Description || ""}`.toLowerCase();
-      return !q || text.includes(q);
-    }).slice(0, 800);
+    return getMaterialAssetGroups(query).flatMap(group => group.assets);
   }
 
   function clothingSlotGroups() {
@@ -1960,6 +1990,14 @@
     return poseMapping === layer?.PoseMapping ? { ...layer } : { ...layer, PoseMapping: poseMapping };
   }
 
+  function noteLayerVisibilityFallback(asset, layer, reason) {
+    const message = `素材图层判定回退：${asset?.Group?.Name || "?"}/${asset?.Name || "?"}/${layer?.Name || "默认层"}：${String(reason?.message || reason)}`;
+    if (!diagnostics.lastWarnings.includes(message)) {
+      diagnostics.lastWarnings.push(message);
+      diagnostics.lastWarnings = diagnostics.lastWarnings.slice(-20);
+    }
+  }
+
   function sourceLayerVisible(character, layer, asset, sourceProperty) {
     const typeRecord = sourceProperty?.TypeRecord || null;
     // R130 centralizes AllowTypes, HideAs, pose and character-attribute checks in
@@ -1967,15 +2005,21 @@
     // source layer never reaches CommonDraw or URL generation.
     if (typeof globalThis.CharacterAppearanceIsLayerVisible === "function") {
       try { return CharacterAppearanceIsLayerVisible(character, layer, asset, typeRecord) === true; }
-      catch (_) { return false; }
+      catch (error) {
+        noteLayerVisibilityFallback(asset, layer, error);
+        // Some third-party layers carry partial metadata that the full R130
+        // predicate cannot inspect outside a formal worn item. Preserve the
+        // important AllowTypes check when possible; unconditional static layers
+        // are safe to keep instead of making the whole material disappear.
+        if (!layer?.AllowTypes) return true;
+      }
     }
-    // Compatibility fallback for older runtimes: an unconditional layer is safe.
-    // A conditional layer must fail closed unless BC exposes its AllowTypes
-    // evaluator, because guessing modular AND/OR semantics recreates invalid URLs.
+    // Compatibility fallback for older runtimes. Conditional layers still use
+    // BC's own modular type evaluator rather than reimplementing its AND/OR rules.
     if (!layer?.AllowTypes) return true;
     if (typeof globalThis.CharacterAppearanceAllowForTypes === "function") {
       try { return CharacterAppearanceAllowForTypes(layer.AllowTypes, typeRecord) === true; }
-      catch (_) { return false; }
+      catch (error) { noteLayerVisibilityFallback(asset, layer, error); }
     }
     return false;
   }
@@ -2018,9 +2062,19 @@
 
   function buildStaticSynthetic({ character, material, refs, asset, analysis, overall = null }) {
     const sourceProperty = sanitizeVisualProperty(material.sourceProperty || {}, analysis, asset);
-    const drawable = refs.map(ref => ({ ref, sourceLayer: resolveSourceLayer(asset, ref) }))
-      .filter(entry => isDrawableLayer(entry.sourceLayer) && sourceLayerVisible(character, entry.sourceLayer, asset, sourceProperty))
-      .sort((a, b) => (a.ref.sourceLayerIndex ?? asset.Layer.indexOf(a.sourceLayer)) - (b.ref.sourceLayerIndex ?? asset.Layer.indexOf(b.sourceLayer)));
+    const candidates = refs.map(ref => ({ ref, sourceLayer: resolveSourceLayer(asset, ref) }))
+      .filter(entry => isDrawableLayer(entry.sourceLayer));
+    let drawable = candidates.filter(entry => sourceLayerVisible(character, entry.sourceLayer, asset, sourceProperty));
+    // Third-party Extended Items occasionally require formal-item state that a
+    // static COE material deliberately does not instantiate. If every referenced
+    // layer is rejected, retaining the user's explicitly selected static layers is
+    // preferable to silently dropping the entire material. Partial matches remain
+    // strictly filtered, so ordinary typed variants still use BC's exact result.
+    if (!drawable.length && candidates.length && analysis?.provider === "third-party") {
+      drawable = candidates;
+      noteLayerVisibilityFallback(asset, null, "全部图层被条件判定拒绝，已保留显式选择的静态图层");
+    }
+    drawable.sort((a, b) => (a.ref.sourceLayerIndex ?? asset.Layer.indexOf(a.sourceLayer)) - (b.ref.sourceLayerIndex ?? asset.Layer.indexOf(b.sourceLayer)));
     if (!drawable.length) throw new Error("no-drawable-layer");
     // Byte budgets are enforced at persistence and remote-protocol boundaries.
     // Avoid serializing unchanged material data on every preview frame.
@@ -5107,43 +5161,59 @@
     search.focus();
   }
 
+  function materialPreviewPath(asset) {
+    const rawPath = typeof globalThis.AssetGetPreviewPath === "function"
+      ? `${AssetGetPreviewPath(asset)}/${asset.Name}.png`
+      : `Assets/${asset.Group?.Family || "Female3DCG"}/${asset.DynamicGroupName || asset.Group?.Name}/Preview/${asset.Name}.png`;
+    // Third-party providers normally hook BC's image cache loader rather than
+    // arbitrary DOM <img> requests. Resolve through DrawGetImage first so Echo
+    // and other image-mapping mods can replace the virtual BC path with a CDN URL.
+    if (typeof globalThis.DrawGetImage === "function") {
+      try {
+        const resolved = DrawGetImage(rawPath);
+        if (typeof resolved?.currentSrc === "string" && resolved.currentSrc) return resolved.currentSrc;
+        if (typeof resolved?.src === "string" && resolved.src) return resolved.src;
+      } catch (error) {
+        warn(`素材预览路径解析失败：${asset.Group?.Name || "?"}/${asset.Name || "?"}`, error);
+      }
+    }
+    return `./${rawPath}`;
+  }
+
   function renderMaterials(list, query) {
     list.innerHTML = "";
-    const assets = getMaterialAssets(query);
-    if (!assets.length) { list.innerHTML = '<div class="coe-empty">没有匹配的已加载素材。</div>'; return; }
-    const groups = new Map();
-    for (const asset of assets) {
-      const groupName = asset.Group?.Description || asset.Group?.Name || "未分类";
-      if (!groups.has(groupName)) groups.set(groupName, []);
-      groups.get(groupName).push(asset);
-    }
+    const groups = getMaterialAssetGroups(query);
+    if (!groups.length) { list.innerHTML = '<div class="coe-empty">没有匹配的已加载服装素材。</div>'; return; }
     const searching = typeof query === "string" && query.trim().length > 0;
-    for (const [groupName, groupAssets] of groups) {
+    for (const group of groups) {
+      const { key: groupKey, label: groupName, assets: groupAssets } = group;
       const section = document.createElement("section");
-      const collapsed = !searching && !expandedMaterialGroups.has(groupName);
+      const collapsed = !searching && !expandedMaterialGroups.has(groupKey);
       section.className = `coe-material-section${collapsed ? " coe-collapsed" : ""}`;
       section.innerHTML = `<h3 class="coe-material-group-title"><button type="button" class="coe-material-group-toggle" aria-expanded="${!collapsed}"><span>${collapsed ? "▶" : "▼"}</span><strong>${escapeHTML(groupName)}</strong><small>${groupAssets.length}</small></button></h3>`;
       section.querySelector(".coe-material-group-toggle").addEventListener("click", () => {
         if (searching) return;
-        if (expandedMaterialGroups.has(groupName)) expandedMaterialGroups.delete(groupName);
-        else expandedMaterialGroups.add(groupName);
+        if (expandedMaterialGroups.has(groupKey)) expandedMaterialGroups.delete(groupKey);
+        else expandedMaterialGroups.add(groupKey);
         renderMaterials(list, query);
       });
-      const grid = document.createElement("div");
-      grid.className = "coe-material-group";
-      for (const asset of groupAssets) {
-        const drawable = asset.Layer.filter(isDrawableLayer);
-        const button = document.createElement("button");
-        button.className = "coe-material";
-        button.title = "提取该素材的静态图片层；动画、脚本和物品功能不会复制";
-        const previewPath = typeof globalThis.AssetGetPreviewPath === "function"
-          ? `./${AssetGetPreviewPath(asset)}/${encodeURIComponent(asset.Name)}.png`
-          : `./Assets/${asset.Group?.Family || "Female3DCG"}/${asset.DynamicGroupName || asset.Group?.Name}/Preview/${encodeURIComponent(asset.Name)}.png`;
-        button.innerHTML = `<img loading="lazy" src="${escapeHTML(previewPath)}" alt=""><span><strong>${escapeHTML(asset.Description || asset.Name)}</strong><br><span class="coe-muted">${drawable.length} 层 · 静态提取</span></span>`;
-        button.addEventListener("click", () => addAssetLayers(asset));
-        grid.appendChild(button);
+      // Opening the picker only builds lightweight category headers. Asset cards,
+      // preview URL resolution and image requests begin when a category is opened.
+      if (!collapsed) {
+        const grid = document.createElement("div");
+        grid.className = "coe-material-group";
+        for (const asset of groupAssets) {
+          const drawable = asset.Layer.filter(isDrawableLayer);
+          const button = document.createElement("button");
+          button.className = "coe-material";
+          button.title = "提取该素材的静态图片层；动画、脚本和物品功能不会复制";
+          const previewPath = materialPreviewPath(asset);
+          button.innerHTML = `<img loading="lazy" src="${escapeHTML(previewPath)}" alt=""><span><strong>${escapeHTML(asset.Description || asset.Name)}</strong><br><span class="coe-muted">${drawable.length} 层 · 静态提取</span></span>`;
+          button.addEventListener("click", () => addAssetLayers(asset));
+          grid.appendChild(button);
+        }
+        section.appendChild(grid);
       }
-      section.appendChild(grid);
       list.appendChild(section);
     }
   }
@@ -6555,7 +6625,7 @@
       computeDefaultOverallCenter, resolveOverallTransform, resolveRenderableOverallTransform, resolveNumericOrigin, transformPointAroundOverallPivot, transformPointAroundOverallPivotAxes,
       stableInsertSyntheticLayers, coeAssetLayerSort: stableInsertSyntheticLayers, analyzeSourceAsset, sanitizePlainRecord,
       scanAlphaBounds, contentBoundsFromBounds, contentPivotFromBounds, resolveTextureContentPivot, resolveTextureContentBounds, cacheOverallLayerGeometry, cachedOverallCenter, buildSyntheticItems, buildLocalSyntheticItems, buildRemoteSyntheticItems, makeSyntheticLayers, syncLocalSyntheticRuntime, requestCharacterRefresh, statusSnapshot,
-      isDrawableLayer, normalizedMaterialColors, normalizePickerColor, nextCopyLayerLabel, localizedPoseLabel, clothingSlotGroups, registerTagAssets, isTagEquipped, equipTagForGroup, activateScheme, combineSchemes, combinedEquippedComposition, validateRemoteSnapshot, canonicalRemoteSnapshot, sha256Base64Url,
+      isDrawableLayer, isMaterialAsset, getMaterialAssets, getMaterialAssetGroups, materialPreviewPath, normalizedMaterialColors, normalizePickerColor, nextCopyLayerLabel, localizedPoseLabel, clothingSlotGroups, registerTagAssets, isTagEquipped, equipTagForGroup, activateScheme, combineSchemes, combinedEquippedComposition, validateRemoteSnapshot, canonicalRemoteSnapshot, sha256Base64Url,
       parseRemoteContent, serializeRemoteEnvelope, encodeRemoteText, decodeRemoteText, splitRemoteData,
       createRemoteStore, setRemoteDiscovery, setRemotePublication, getRemotePublication, markRemoteObjectWanted, noteRemoteWantAnnouncement,
       addRemoteDataChunk, missingRemoteDataIndexes, expireRemoteAssemblies, cacheRemoteObject, activateRemoteObject, activateCachedRemoteObject,

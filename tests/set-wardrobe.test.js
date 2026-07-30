@@ -47,11 +47,80 @@ test('isolated set previews stay pending until synthetic source textures load', 
   api.clearPreviewTextureTrackingForTest(preview);
 });
 
-test('set preview cache accepts only snapshots whose observed textures finished loading', () => {
+test('set preview cache commits only after a stable fully-ready resource fixed point', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'src', '09-set-wardrobe.js'), 'utf8');
-  assert.match(source, /!character\.MustDraw && !previewTexturesPending\(character\)/);
-  assert.match(source, /const cacheable = !previewTexturesPending\(character\)/);
+  assert.match(source, /beginPreviewResourcePass\(character\)/);
+  assert.match(source, /await waitForPreviewResourcePass\(character/);
+  assert.match(source, /resources\.pending === 0 && resources\.unknown === 0 && resources\.ready === resources\.total/);
+  assert.match(source, /resources\.key === previousKey/);
   assert.match(source, /if \(result\.cacheable\) \{\s*setPreviewCache\.set/);
+  assert.doesNotMatch(source, /attempt < 40/);
+});
+
+test('unknown native preview resources remain incomplete instead of poisoning the snapshot cache', () => {
+  const preview = { MustDraw: false };
+  const { api } = load({ globals: { GLDrawImageCache: new Map() } });
+  api.setPreviewCompositionForTest(preview, emptyComposition());
+  api.beginPreviewResourcePassForTest(preview);
+  api.trackPreviewTextureForTest(preview, 'Assets/Female3DCG/BodyUpper/FemaleBody_Base.png', 1, 1);
+  const summary = api.previewResourcePassSummaryForTest(preview);
+  assert.equal(summary.total, 1);
+  assert.equal(summary.unknown, 1);
+  assert.equal(api.previewTexturesPendingForTest(preview), true);
+});
+
+test('late image events from a previous worker job cannot settle the next job', () => {
+  const makePendingImage = () => {
+    const listeners = {};
+    return { image: { complete: false, naturalWidth: 0, naturalHeight: 0, addEventListener(name, listener) { listeners[name] = listener; } }, listeners };
+  };
+  const url = 'Assets/Female3DCG/BodyUpper/FemaleBody_Base.png';
+  const first = makePendingImage();
+  const second = makePendingImage();
+  const cache = new Map([[url, first.image]]);
+  const preview = { MustDraw: false };
+  const { api } = load({ globals: { GLDrawImageCache: cache } });
+  api.setPreviewCompositionForTest(preview, emptyComposition());
+  api.beginPreviewResourcePassForTest(preview);
+  api.trackPreviewTextureForTest(preview, url, 1, 1);
+  api.clearPreviewTextureTrackingForTest(preview);
+  cache.set(url, second.image);
+  api.beginPreviewResourcePassForTest(preview);
+  api.trackPreviewTextureForTest(preview, url, 1, 1);
+  first.listeners.load();
+  assert.equal(api.previewResourcePassSummaryForTest(preview).pending, 1);
+  assert.equal(preview.MustDraw, false);
+  second.listeners.load();
+  assert.equal(api.previewResourcePassSummaryForTest(preview).ready, 1);
+  assert.equal(preview.MustDraw, true);
+});
+
+test('preview resource barrier includes every native and synthetic callback URL', () => {
+  const body = appearanceAsset('BodyUpper', 'FemaleBody', false);
+  const preview = { AssetFamily: 'Female3DCG', Appearance: [{ Asset: body, Color: 'Default', Property: {} }], AppearanceLayers: [] };
+  const { api } = load({ assets: [body] });
+  api.setPreviewCompositionForTest(preview, emptyComposition());
+  const hooks = {};
+  api.installHooksForTest({ hookFunction(name, _priority, fn) { hooks[name] = fn; } });
+  preview.AppearanceLayers = hooks.CharacterAppearanceSortLayers([preview], () => [{ Asset: body, Priority: 0 }]);
+  let observedOptions;
+  const callbacks = {
+    drawImage(_src, _x, _y, options) { observedOptions = options; },
+    drawImageBlink() {}, drawImageColorize() {}, drawImageColorizeBlink() {},
+  };
+  hooks.CommonDrawAppearanceBuild([preview, callbacks], args => {
+    for (const _layer of preview.AppearanceLayers) args[1].drawImage('Assets/Female3DCG/BodyUpper/FemaleBody_Base.png', 0, 0, {});
+  });
+  assert.equal(observedOptions.__coePreviewCharacter, preview);
+});
+
+test('set thumbnails reuse one isolated worker and dispose it with the UI', () => {
+  const setSource = fs.readFileSync(path.join(__dirname, '..', 'src', '09-set-wardrobe.js'), 'utf8');
+  const shellSource = fs.readFileSync(path.join(__dirname, '..', 'src', '08-ui-shell.js'), 'utf8');
+  assert.match(setSource, /function getSetPreviewWorkerCharacter\(\)/);
+  assert.match(setSource, /setPreviewWorkerCharacter = CharacterLoadSimple/);
+  assert.match(setSource, /character !== setPreviewWorkerCharacter/);
+  assert.match(shellSource, /cancelSetPreviewQueue\(\{ dispose: true \}\)/);
 });
 
 test('set deletion uses the COE confirmation modal instead of the browser confirm dialog', () => {
@@ -262,7 +331,7 @@ test('deleting a referenced outfit removes only its references and rolls back on
   assert.deepEqual(plain(current.sets[1].customOutfits), []);
 });
 
-test('set apply plan replaces Appearance, preserves current expressions and reports missing content', () => {
+test('set apply replaces Appearance without applying expressions and reports missing content', () => {
   const body = appearanceAsset('BodyUpper', 'FemaleBody', false);
   const eyes = appearanceAsset('Eyes', 'AnimeEyes', false);
   const tag = appearanceAsset('Cloth', 'COECustomOutfit');
@@ -291,11 +360,34 @@ test('set apply plan replaces Appearance, preserves current expressions and repo
   };
   const plan = api.applySetTransaction(set, { persist() {} });
   assert.deepEqual(plain(player.Appearance.map(item => item.Asset.Group.Name).sort()), ['BodyUpper', 'Cloth', 'Eyes']);
-  assert.equal(player.Appearance.find(item => item.Asset.Group.Name === 'Eyes').Property.Expression, 'Closed');
+  assert.equal(player.Appearance.find(item => item.Asset.Group.Name === 'Eyes').Property.Expression, undefined);
   assert.equal(player.Appearance.some(item => item.Asset.Name === 'OldCoat'), false);
   assert.deepEqual(plain(api.getWardrobeForTest().equippedIds), ['dress']);
   assert.equal(plan.missingAppearance.length, 1);
   assert.equal(plan.missingSchemes.length, 1);
+});
+
+test('set apply never transfers a current genital expression to the saved target asset', () => {
+  const penis = appearanceAsset('Pussy', 'Penis', false);
+  const pussy = appearanceAsset('Pussy', 'Pussy1', false);
+  const player = {
+    AccountName: 'A', MemberNumber: 1, AssetFamily: 'Female3DCG',
+    Appearance: [{ Asset: penis, Color: 'Default', Property: { Expression: 'Hard' } }],
+    AppearanceLayers: [], ExtensionSettings: {}, Pose: ['Kneel'], Emoticon: 'Heart',
+  };
+  const { api } = load({ assets: [penis, pussy], player });
+  api.setWardrobeForTest({ schemaVersion: 3, schemes: [], sets: [], equippedIds: [] });
+
+  api.applySetTransaction({
+    id: 'set', name: '默认身体',
+    appearance: [{ group: 'Pussy', asset: 'Pussy1', color: 'Default', property: {} }],
+    customOutfits: [],
+  }, { persist() {}, sync: false });
+
+  assert.equal(player.Appearance[0].Asset.Name, 'Pussy1');
+  assert.equal(player.Appearance[0].Property.Expression, undefined);
+  assert.deepEqual(plain(player.Pose), ['Kneel']);
+  assert.equal(player.Emoticon, 'Heart');
 });
 
 test('set apply keeps required body Appearance fallback when an old set omitted it', () => {

@@ -343,6 +343,7 @@
   function openWardrobe(view = wardrobeView) {
     restoreEditorAppearance();
     wardrobeView = view === "sets" ? "sets" : "outfits";
+    if (wardrobeView !== "sets" && typeof cancelSetPreviewQueue === "function") cancelSetPreviewQueue({ dispose: true });
     loadWardrobe();
     ensureEquippedIds();
     syncEquippedSchemes();

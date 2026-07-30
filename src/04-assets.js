@@ -48,14 +48,44 @@
     return !!layer?.HasImage && !layer.LockLayer;
   }
 
+  // Body-replacement and cosmetic feature groups can be removable Appearance
+  // groups too, so AllowNone alone is not enough to identify clothing. Keep the
+  // material catalogue dynamic while excluding feature-editing groups. Ears and
+  // tails are intentionally absent from this deny pattern because cosplay body
+  // parts are valid clothing materials.
+  const NON_CLOTHING_MATERIAL_GROUP_PATTERN = /^(?:Body(?:Upper|Lower|Style|Size)|Head|Hair(?:Front|Back)?|Eyes?2?|Eyebrows?|Mouth|Nose|Hands?|Height|Blush|Emoticon|Pussy|Nipples?|Breast|Butt|Skin)|(?:身体|替用身体|身高|左眼|右眼|眼睛|前发|后发|额外头发|发型|发色|妆容|化妆|纹身|液体|痕迹|外观工具)/i;
+
+  function isMaterialAsset(asset) {
+    const group = asset?.Group;
+    if (!asset?.Wear || asset.IsLock || asset.Name === TAG_ASSET_NAME) return false;
+    if (!group || group.Category !== "Appearance" || group.AllowNone !== true || group.AllowCustomize === false) return false;
+    if (!asset.Layer?.some(isDrawableLayer)) return false;
+    if (group.Clothing === true || group.Underwear === true) return true;
+    if (group.BodyCosplay !== true && asset.BodyCosplay !== true) return false;
+    const semanticName = `${group.Name || ""} ${group.Description || ""}`;
+    return !NON_CLOTHING_MATERIAL_GROUP_PATTERN.test(semanticName);
+  }
+
+  function getMaterialAssetGroups(query = "") {
+    const q = String(query || "").trim().toLowerCase();
+    const groups = new Map();
+    for (const asset of globalThis.Asset || []) {
+      if (!isMaterialAsset(asset)) continue;
+      const text = `${asset.Group?.Name || ""} ${asset.Group?.Description || ""} ${asset.Name || ""} ${asset.Description || ""}`.toLowerCase();
+      if (q && !text.includes(q)) continue;
+      const key = asset.Group.Name;
+      let entry = groups.get(key);
+      if (!entry) {
+        entry = { key, label: asset.Group.Description || key, assets: [] };
+        groups.set(key, entry);
+      }
+      entry.assets.push(asset);
+    }
+    return [...groups.values()];
+  }
+
   function getMaterialAssets(query = "") {
-    const q = query.trim().toLowerCase();
-    return (globalThis.Asset || []).filter(asset => {
-      if (!asset?.Wear || asset.IsLock || asset.Name === TAG_ASSET_NAME) return false;
-      if (!asset.Layer?.some(isDrawableLayer)) return false;
-      const text = `${asset.Group?.Name || ""} ${asset.Name || ""} ${asset.Description || ""}`.toLowerCase();
-      return !q || text.includes(q);
-    }).slice(0, 800);
+    return getMaterialAssetGroups(query).flatMap(group => group.assets);
   }
 
   function clothingSlotGroups() {

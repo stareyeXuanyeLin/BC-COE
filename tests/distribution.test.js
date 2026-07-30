@@ -6,6 +6,10 @@ const vm = require('node:vm');
 
 const root = path.resolve(__dirname, '..');
 const read = relative => fs.readFileSync(path.join(root, relative), 'utf8');
+const readIfExists = relative => {
+  const target = path.join(root, relative);
+  return fs.existsSync(target) ? fs.readFileSync(target, 'utf8') : null;
+};
 
 test('public installation routes all resolve to main', () => {
   const header = read('src/00-userscript-header.js');
@@ -90,8 +94,12 @@ test('published core, docs and runtime agree on protocol and release version', (
   const sourceRuntime = read('src/01-runtime.js');
   const sourceProtocol = read('src/11-remote-protocol.js');
   const distCore = read('dist/CustomOutfitEditor.user.js');
-  const protocolSpec = read('docs/protocol-spec.md');
-  const limitations = read('docs/known-limitations.md');
+  // main deliberately keeps its own documentation set during dev promotion.
+  // Validate release documents when they exist without requiring dev-only files.
+  const releaseDocuments = Object.fromEntries([
+    ['protocolSpec', readIfExists('docs/protocol-spec.md')],
+    ['limitations', readIfExists('docs/known-limitations.md')],
+  ].filter(([, content]) => content != null));
   const packageVersion = require(path.join(root, 'package.json')).version;
 
   const headerVersion = sourceHeader.match(/@version\s+(\d+\.\d+\.\d+)/)?.[1];
@@ -99,8 +107,8 @@ test('published core, docs and runtime agree on protocol and release version', (
   assert.equal(headerVersion, packageVersion);
   assert.equal(runtimeVersion, packageVersion);
 
-  for (const [name, content] of Object.entries({ sourceProtocol, distCore, protocolSpec, limitations })) {
-    assert.match(content, /COE_RVS\/4/, `${name} must declare COE_RVS/4`);
+  for (const [name, content] of Object.entries({ sourceProtocol, distCore, ...releaseDocuments })) {
+    assert.match(content, /COE_RVP\/1/, `${name} must declare COE_RVP/1`);
   }
   assert.match(distCore, /const TAG_ASSET_NAME = "COECustomOutfit"/);
   assert.match(distCore, /registerTagAssets\(\)/);
@@ -112,8 +120,8 @@ test('formal public surfaces use only the Custom Outfit Editor name', () => {
     read('src/00-userscript-header.js'),
     read('dist/CustomOutfitEditor.loader.user.js'),
     read('dist/CustomOutfitEditor.user.js'),
-    read('docs/architecture.md'),
-    read('docs/known-limitations.md'),
-  ];
+    readIfExists('docs/architecture.md'),
+    readIfExists('docs/known-limitations.md'),
+  ].filter(content => content != null);
   for (const content of publicFiles) assert.doesNotMatch(content, /echo(?:\s*mirror)?/i);
 });

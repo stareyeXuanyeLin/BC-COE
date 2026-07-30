@@ -312,8 +312,8 @@ test('render callbacks keep local and overall transform layers separate', () => 
   const value = { v: 1, m: [{ g: 'Cloth', a: 'Dress', c: [], r: 0.2, s: 1.25, x: 4, y: -3 }], l: [{ m: 0, n: 'Base', i: 0, p: 1, x: 0, y: 0, o: 1, r: 0.4, s: 1.5 }] };
   const { api } = load({ assets: [asset], characters: [remote] });
   const canonical = api.canonicalRemoteSnapshot(value);
-  api.setPendingRequest(7, { requestId: 'request_A', session: 'session_7', revision: 1, hash: 'hash_A' });
-  api.acceptRemoteSnapshot(7, '7:identity', value, canonical);
+  const publication = api.setRemotePublication(7, { session: 'session_7', revision: 1, hash: 'hash_A', uncompressedBytes: canonical.length, compressedBytes: 1, count: 1 }).publication;
+  api.acceptRemoteSnapshot(7, publication, value, canonical);
   api.setRemotePrefsForTest({ receivingEnabled: true });
   api.cacheOverallLayerGeometry({
     __coeGeometryCharacter: remote,

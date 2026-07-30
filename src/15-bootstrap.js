@@ -146,7 +146,11 @@
       const readState = loadWardrobe();
       if (readState.status === "deferred") return;
       syncEquippedSchemes();
-      initializeRemoteController();
+      try {
+        if (!initializeRemoteController()) warn("Remote 消息处理器尚不可用，已在后台等待游戏接口就绪");
+      } catch (error) {
+        warn("Remote 初始化失败，本地衣柜仍将继续加载", error);
+      }
       exposeAPI();
       initialized = true;
       setInterval(updateEntryButton, 600);
@@ -169,18 +173,36 @@
       computeDefaultOverallCenter, resolveOverallTransform, resolveRenderableOverallTransform, resolveNumericOrigin, transformPointAroundOverallPivot, transformPointAroundOverallPivotAxes,
       stableInsertSyntheticLayers, coeAssetLayerSort: stableInsertSyntheticLayers, analyzeSourceAsset, sanitizePlainRecord,
       scanAlphaBounds, contentBoundsFromBounds, contentPivotFromBounds, resolveTextureContentPivot, resolveTextureContentBounds, cacheOverallLayerGeometry, cachedOverallCenter, buildSyntheticItems, buildLocalSyntheticItems, buildRemoteSyntheticItems, makeSyntheticLayers, syncLocalSyntheticRuntime, requestCharacterRefresh, statusSnapshot,
-      isDrawableLayer, normalizedMaterialColors, normalizePickerColor, nextCopyLayerLabel, localizedPoseLabel, clothingSlotGroups, registerTagAssets, isTagEquipped, equipTagForGroup, activateScheme, combineSchemes, combinedEquippedComposition, validateRemoteSnapshot, canonicalRemoteSnapshot, sha256Base64Url,
+      isDrawableLayer, isMaterialAsset, getMaterialAssets, getMaterialAssetGroups, materialPreviewPath, normalizedMaterialColors, normalizePickerColor, nextCopyLayerLabel, localizedPoseLabel, clothingSlotGroups, registerTagAssets, isTagEquipped, equipTagForGroup, activateScheme, combineSchemes, combinedEquippedComposition, validateRemoteSnapshot, canonicalRemoteSnapshot, sha256Base64Url,
       parseRemoteContent, serializeRemoteEnvelope, encodeRemoteText, decodeRemoteText, splitRemoteData,
-      createRemoteStore, setRemotePeer, setPendingRequest, pendingRequestFor, addRemoteChunk, expireRemoteAssemblies,
-      acceptRemoteSnapshot, clearRemoteMember, onRemoteMessage, handleRemoteEnvelope, buildLocalRemoteSnapshot, updateLocalRemoteSnapshot,
+      createRemoteStore, setRemoteDiscovery, setRemotePublication, getRemotePublication, markRemoteObjectWanted, noteRemoteWantAnnouncement,
+      addRemoteDataChunk, missingRemoteDataIndexes, expireRemoteAssemblies, cacheRemoteObject, activateRemoteObject, activateCachedRemoteObject,
+      acceptRemoteSnapshot, revokeRemotePublication, clearRemoteMember, onRemoteMessage, handleRemoteEnvelope, buildLocalRemoteSnapshot, updateLocalRemoteSnapshot,
+      enqueueRemoteEnvelope, enqueueRemoteDataBatch, cancelRemoteTransport, acceptPublishedRemoteData, clearRemoteDataBudget,
+      installRemoteMessageHandler, ensureRemoteMessageHandler, initializeRemoteController, scheduleLocalRemoteBuild, announceLocalRemotePublication, sendRemoteDiscover,
       getRemoteStoreForTest: () => remoteStore,
-      getLocalRemoteStateForTest: () => ({ session: localPeerSessionId, revision: localRemoteRevision, hash: localRemoteHash, canonical: localRemoteCanonical, snapshot: localRemoteSnapshot, buildToken: localRemoteBuildToken }),
+      getLocalRemoteStateForTest: () => ({ session: localPeerSessionId, revision: localRemoteRevision, hash: localRemoteHash, canonical: localRemoteCanonical, encoded: localRemoteEncoded, compressedBytes: localRemoteCompressedBytes, chunks: localRemoteChunks.slice(), snapshot: localRemoteSnapshot, buildToken: localRemoteBuildToken, dirty: localRemoteDirty }),
       resetRemoteRoomForTest: resetRemoteRoom,
       setRemotePrefsForTest: value => { remotePrefs = { sharingEnabled: value?.sharingEnabled === true, receivingEnabled: value?.receivingEnabled === true }; },
-      setLocalRemoteStateForTest: value => { localPeerSessionId = value.session; localRemoteRevision = value.revision; localRemoteHash = value.hash; localRemoteCanonical = value.canonical; localRemoteSnapshot = value.snapshot; localRemoteBuildToken = value.buildToken ?? localRemoteBuildToken; },
+      setLocalRemoteStateForTest: value => {
+        localPeerSessionId = value.session;
+        localRemoteRevision = value.revision;
+        localRemoteHash = value.hash;
+        localRemoteCanonical = value.canonical;
+        localRemoteEncoded = value.encoded ?? "";
+        localRemoteCompressedBytes = value.compressedBytes ?? 0;
+        localRemoteChunks = value.chunks ?? (localRemoteEncoded ? splitRemoteData(localRemoteEncoded) : []);
+        localRemoteSnapshot = value.snapshot;
+        localRemoteBuildToken = value.buildToken ?? localRemoteBuildToken;
+        localRemoteBuildInFlight = null;
+        localRemoteDirty = value.dirty ?? false;
+      },
       setActiveCompositionForTest: value => { activeComposition = value; },
       setPreviewCompositionForTest: (character, value) => { if (value) previewCompositionByCharacter.set(character, value); else previewCompositionByCharacter.delete(character); },
       trackPreviewTextureForTest: trackPreviewTextureLoad,
+      beginPreviewResourcePassForTest: beginPreviewResourcePass,
+      previewResourcePassSummaryForTest: previewResourcePassSummary,
+      waitForPreviewResourcePassForTest: waitForPreviewResourcePass,
       previewTexturesPendingForTest: previewTexturesPending,
       clearPreviewTextureTrackingForTest: clearPreviewTextureTracking,
       setWardrobeForTest: value => { wardrobe = normalizeWardrobe(value, { validateReferences: false }); },

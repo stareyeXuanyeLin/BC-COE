@@ -116,7 +116,7 @@
 
   function closeUI() {
     closeOwnedColorPicker();
-    if (typeof cancelSetPreviewQueue === "function") cancelSetPreviewQueue();
+    if (typeof cancelSetPreviewQueue === "function") cancelSetPreviewQueue({ dispose: true });
     restoreEditorAppearance();
     document.getElementById(ROOT_ID)?.remove();
     // Closing the local editor must not discard texture/geometry refreshes already

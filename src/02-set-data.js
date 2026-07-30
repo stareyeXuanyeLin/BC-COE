@@ -260,7 +260,10 @@
     const missingSchemes = [];
     const appearance = [];
     const storedGroups = new Set(normalized.appearance.map(bundle => bundle.group));
-    const expressions = new Map((character?.Appearance || []).map(item => [item?.Asset?.Group?.Name, item?.Property?.Expression]).filter(([, value]) => value != null));
+    // Expressions are transient character state, not part of a saved set. Do not
+    // copy them from either the stored bundle or the currently worn Appearance:
+    // moving a Group expression to a different Asset can create invalid image
+    // paths such as Penis/Hard -> Pussy1/Hard.
     // Keep the character's currently valid required body/face Appearance items
     // as a compatibility fallback when an older set was saved without them.
     // Clothing and AllowNone groups are intentionally excluded so old clothes
@@ -278,7 +281,6 @@
         continue;
       }
       const property = prepareSetAppearanceProperty(asset, bundle.property);
-      if (expressions.has(bundle.group)) property.Expression = cloneJSON(expressions.get(bundle.group));
       appearance.push({ Asset: asset, Color: cloneJSON(bundle.color), Property: property });
     }
     const schemeById = new Map((data?.schemes || []).map(entry => [entry.id, entry]));

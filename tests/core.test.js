@@ -151,10 +151,58 @@ test('transform targets come from persistent list selection without dropdown or 
   assert.match(source, /data-select-layer/);
 });
 
-test('material categories default to collapsed and matching search categories expand automatically', () => {
+test('material categories default to collapsed, lazy-render cards, and expand search matches', () => {
   const source = fs.readFileSync(path.join(root, 'src', '10-editor.js'), 'utf8');
   assert.match(source, /const searching =[^;]+query\.trim\(\)\.length > 0/);
-  assert.match(source, /const collapsed = !searching && !expandedMaterialGroups\.has\(groupName\)/);
+  assert.match(source, /const collapsed = !searching && !expandedMaterialGroups\.has\(groupKey\)/);
+  assert.match(source, /if \(!collapsed\) \{[\s\S]*materialPreviewPath\(asset\)/);
+});
+
+test('material catalogue is dynamic, uncapped, and limited to clothing plus cosplay wearables', () => {
+  const assets = Array.from({ length: 805 }, (_, index) => {
+    const asset = makeAsset('Cloth', `Dress${index}`);
+    asset.Group.Clothing = true;
+    return asset;
+  });
+  const echoCloth = makeAsset('长袖子_Luzi', 'EchoSleeve');
+  echoCloth.Group.Clothing = true;
+  echoCloth.Group.Description = '🍔长袖子';
+  const cosplayEars = makeAsset('CosplayEars', 'FoxEars', { BodyCosplay: true });
+  cosplayEars.Group.Description = '兽耳';
+  const eyes = makeAsset('Eyes', 'BlueEyes');
+  eyes.Group.AllowNone = false;
+  const hair = makeAsset('额外头发_Luzi', 'LongHair');
+  const height = makeAsset('额外身高_Luzi', 'Tall');
+  height.Group.BodyCosplay = true;
+  assets.push(echoCloth, cosplayEars, eyes, hair, height);
+  const { api } = load({ assets });
+  const result = Array.from(api.getMaterialAssets());
+  assert.equal(result.length, 807);
+  assert.equal(result.includes(echoCloth), true);
+  assert.equal(result.includes(cosplayEars), true);
+  assert.equal(result.includes(eyes), false);
+  assert.equal(result.includes(hair), false);
+  assert.equal(result.includes(height), false);
+  assert.equal(Array.from(api.getMaterialAssets('EchoSleeve')).length, 1);
+});
+
+test('material previews resolve virtual asset paths through the BC image cache hook', () => {
+  const asset = makeAsset('Wings', '蝴蝶结背饰');
+  asset.Group.Clothing = true;
+  asset.DynamicGroupName = 'Wings';
+  const seen = [];
+  const { api } = load({
+    assets: [asset],
+    globals: {
+      AssetGetPreviewPath: () => 'Assets/Female3DCG/Wings/Preview',
+      DrawGetImage(path) {
+        seen.push(path);
+        return { src: 'https://cdn.example.invalid/echo/Wings/Preview/bow.png', currentSrc: '' };
+      },
+    },
+  });
+  assert.equal(api.materialPreviewPath(asset), 'https://cdn.example.invalid/echo/Wings/Preview/bow.png');
+  assert.deepEqual(seen, ['Assets/Female3DCG/Wings/Preview/蝴蝶结背饰.png']);
 });
 
 test('editor exposes only clothing or underwear appearance slots and stores the selected slot', () => {
@@ -517,9 +565,33 @@ test('loadWardrobe backs up and automatically writes a legacy wardrobe in the cu
   assert.equal(local.migration.migrated, false);
   assert.equal(server.migration.migrated, false);
   assert.equal(local.data.schemes[0].id, 'friend-test');
-  const backup = JSON.parse(store.get('BC.CustomOutfitEditor.v1.1.migration-backup.v0'));
+  assert.equal(state.migration.backupKeys.length, 1);
+  const backup = JSON.parse(store.get(state.migration.backupKey));
+  assert.equal(backup.backupVersion, 2);
+  assert.deepEqual(Array.from(backup.sources), ['server', 'local']);
   assert.equal(backup.raw, oldPacked);
   assert.equal(backup.fromSchemaVersion, 0);
+});
+
+test('migration creates immutable backups for every distinct equivalent source before write-back', () => {
+  const serverRaw = 'json:{"version":7,"schemes":[],"equippedIds":[]}';
+  const localRaw = 'json:{"version":7,"schemes":[],"equippedIds":[],"legacyUiState":"ignored"}';
+  const store = new Map([['BC.CustomOutfitEditor.v1.1', localRaw]]);
+  const player = {
+    AccountName: 'A', MemberNumber: 1, AssetFamily: 'Female3DCG', Appearance: [], AppearanceLayers: [],
+    ExtensionSettings: { CustomOutfitEditor: serverRaw },
+  };
+  const syncCalls = [];
+  const { api } = load({ player, store, globals: { ServerPlayerExtensionSettingsSync: key => syncCalls.push(key) } });
+  const state = api.loadWardrobe();
+  assert.equal(state.migration.status, 'completed');
+  assert.equal(state.migration.backupKeys.length, 2);
+  const backupKeys = Array.from(state.migration.backupKeys);
+  assert.equal(new Set(backupKeys).size, 2);
+  const backups = backupKeys.map(key => JSON.parse(store.get(key)));
+  assert.deepEqual(new Set(backups.map(backup => backup.raw)), new Set([serverRaw, localRaw]));
+  assert.deepEqual(backups.map(backup => Array.from(backup.sources)).sort(), [['local'], ['server']]);
+  assert.deepEqual(syncCalls, ['CustomOutfitEditor']);
 });
 
 test('failed migration backup keeps legacy storage untouched and blocks automatic writes', () => {
@@ -743,6 +815,50 @@ test('drawable layer predicate consistently rejects missing images and locked la
   assert.equal(api.isDrawableLayer({ HasImage: false, LockLayer: false }), false);
   assert.equal(api.isDrawableLayer({ HasImage: true, LockLayer: true }), false);
   assert.equal(api.isDrawableLayer(null), false);
+});
+
+test('typed material keeps every mutually-exclusive layer for COE recombination', () => {
+  const asset = makeAsset('Cloth', 'OffTheShoulderTop');
+  const layerBase = { Priority: 10, HasImage: true, LockLayer: false, AllowColorize: true, ColorIndex: 0, Opacity: 1, MinOpacity: 0, MaxOpacity: 1, DrawingLeft: {}, DrawingTop: {}, ParentGroup: {}, PoseMapping: {}, CreateLayerTypes: [] };
+  asset.Layer = [
+    { ...layerBase, Name: 'Left', AllowTypes: { typed: 0 } },
+    { ...layerBase, Name: 'Right', AllowTypes: { typed: 1 } },
+  ];
+  let formalPredicateCalls = 0;
+  const env = load({
+    assets: [asset],
+    globals: { CharacterAppearanceIsLayerVisible: () => { formalPredicateCalls++; return false; } },
+  });
+  env.api.setEditingForTest({
+    version: 6, name: '露肩上衣素材', slotGroup: 'Cloth', recycle: [],
+    materials: [{ id: 'm1', sourceGroup: 'Cloth', sourceAsset: 'OffTheShoulderTop', colors: ['#fff'], sourceProperty: {} }],
+    layers: [
+      { materialId: 'm1', sourceGroup: 'Cloth', sourceAsset: 'OffTheShoulderTop', sourceLayer: 'Left', sourceLayerIndex: 0, priority: 10, offsetX: 0, offsetY: 0, opacity: 1 },
+      { materialId: 'm1', sourceGroup: 'Cloth', sourceAsset: 'OffTheShoulderTop', sourceLayer: 'Right', sourceLayerIndex: 1, priority: 10, offsetX: 0, offsetY: 0, opacity: 1 },
+    ],
+  });
+
+  const groups = env.api.buildSyntheticItems(env.player);
+  assert.deepEqual(Array.from(groups, group => group.drawable[0].sourceLayer.Name), ['Left', 'Right']);
+  assert.equal(formalPredicateCalls, 0);
+});
+
+test('pose-hidden material layers stay dynamic and are never restored by provider fallback', () => {
+  const asset = makeAsset('ClothAccessory', '姿势素材');
+  asset.Group.Clothing = true;
+  asset.Layer[0].PoseMapping = { Kneel: 'Hide' };
+  let pose = 'Kneel';
+  const env = load({
+    assets: [asset],
+    globals: {
+      PoseType: { HIDE: 'Hide' },
+      CommonDrawResolveAssetPose: () => pose,
+    },
+  });
+  env.api.setEditingForTest(compositionFor(asset));
+  assert.equal(env.api.buildSyntheticItems(env.player).length, 0);
+  pose = '';
+  assert.equal(env.api.buildSyntheticItems(env.player).length, 1);
 });
 
 test('material color normalization preserves fallback, padding and truncation behavior', () => {

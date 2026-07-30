@@ -14,7 +14,7 @@ test('content length and namespace are rejected before JSON parsing', () => {
   const { api } = load();
   assert.throws(() => api.parseRemoteContent('x'.repeat(1801)), /remote-content/);
   assert.throws(() => api.parseRemoteContent('OTHER|{'), /remote-content/);
-  assert.throws(() => api.parseRemoteContent('COE_RVS/4|{'), /remote-json/);
+  assert.throws(() => api.parseRemoteContent('COE_RVP/1|{'), /remote-json/);
 });
 
 test('snapshot validator rejects pollution keys, non-finite values and illegal Property', () => {
@@ -50,13 +50,18 @@ test('local remote snapshot contains only compact visual fields', () => {
   }
 });
 
-test('decoded byte budget is enforced and chunk split stays bounded', () => {
+test('gzip codec round-trips canonical text and enforces byte budgets', async () => {
   const { api } = load();
-  const encoded = api.encodeRemoteText('x'.repeat(32769));
-  assert.throws(() => api.decodeRemoteText(encoded), /decoded-budget/);
-  const chunks = api.splitRemoteData(api.encodeRemoteText('x'.repeat(2000)));
-  assert.ok(chunks.length > 1);
-  assert.ok(chunks.every(part => part.length <= 1200));
+  await assert.rejects(() => api.encodeRemoteText('x'.repeat(32769)), /encode-budget/);
+  const compressed = await api.encodeRemoteText('结构化快照'.repeat(400));
+  assert.equal(await api.decodeRemoteText(compressed.encoded, compressed.compressedBytes), '结构化快照'.repeat(400));
+  await assert.rejects(() => api.decodeRemoteText('!'), /base64url/);
+  await assert.rejects(() => api.decodeRemoteText('invalid'), /decompress-data/);
+  const noisy = Array.from({ length: 2000 }, (_, index) => String.fromCharCode(33 + (index % 90))).join('');
+  const encoded = (await api.encodeRemoteText(noisy)).encoded;
+  const chunks = api.splitRemoteData(encoded);
+  assert.ok(chunks.length >= 1);
+  assert.ok(chunks.every(part => part.length <= 1400));
 });
 
 test('local canonical visual changes increment revision while identical visual does not', async () => {
@@ -82,9 +87,10 @@ test('local canonical visual changes increment revision while identical visual d
   assert.equal(api.getLocalRemoteStateForTest().revision, 2);
 });
 
-test('envelope validator rejects same-revision conflict through peer store', () => {
+test('publication store rejects a same-revision hash conflict and accepts a new session', () => {
   const { api } = load();
-  api.setRemotePeer(7, { session: 'session_A', revision: 2, hash: 'hash_A', size: 10, sharing: true });
-  assert.throws(() => api.setRemotePeer(7, { session: 'session_A', revision: 2, hash: 'hash_B', size: 10, sharing: true }), /revision-hash-conflict/);
-  assert.doesNotThrow(() => api.setRemotePeer(7, { session: 'session_B', revision: 1, hash: 'hash_C', size: 10, sharing: true }));
+  api.setRemotePublication(7, { session: 'session_A', revision: 2, hash: 'hash_A', uncompressedBytes: 10, compressedBytes: 5, count: 1 });
+  assert.throws(() => api.setRemotePublication(7, { session: 'session_A', revision: 2, hash: 'hash_B', uncompressedBytes: 10, compressedBytes: 5, count: 1 }), /revision-hash-conflict/);
+  assert.throws(() => api.setRemotePublication(7, { session: 'session_A', revision: 2, hash: 'hash_A', uncompressedBytes: 11, compressedBytes: 5, count: 1 }), /metadata-conflict/);
+  assert.doesNotThrow(() => api.setRemotePublication(7, { session: 'session_B', revision: 1, hash: 'hash_C', uncompressedBytes: 10, compressedBytes: 5, count: 1 }));
 });

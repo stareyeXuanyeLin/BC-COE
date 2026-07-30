@@ -93,6 +93,7 @@
   let setPreviewQueue = [];
   let setPreviewRunning = false;
   let setPreviewCharacterSerial = 0;
+  let setPreviewWorkerCharacter = null;
   const setPreviewCache = new Map();
   let wardrobeReadState = { status: "absent", source: null, server: null, local: null, conflict: false };
   let persistenceBlocked = false;
@@ -974,7 +975,10 @@
     const missingSchemes = [];
     const appearance = [];
     const storedGroups = new Set(normalized.appearance.map(bundle => bundle.group));
-    const expressions = new Map((character?.Appearance || []).map(item => [item?.Asset?.Group?.Name, item?.Property?.Expression]).filter(([, value]) => value != null));
+    // Expressions are transient character state, not part of a saved set. Do not
+    // copy them from either the stored bundle or the currently worn Appearance:
+    // moving a Group expression to a different Asset can create invalid image
+    // paths such as Penis/Hard -> Pussy1/Hard.
     // Keep the character's currently valid required body/face Appearance items
     // as a compatibility fallback when an older set was saved without them.
     // Clothing and AllowNone groups are intentionally excluded so old clothes
@@ -992,7 +996,6 @@
         continue;
       }
       const property = prepareSetAppearanceProperty(asset, bundle.property);
-      if (expressions.has(bundle.group)) property.Expression = cloneJSON(expressions.get(bundle.group));
       appearance.push({ Asset: asset, Color: cloneJSON(bundle.color), Property: property });
     }
     const schemeById = new Map((data?.schemes || []).map(entry => [entry.id, entry]));
@@ -1269,34 +1272,71 @@
     catch (_) { return null; }
   }
 
-  function migrationBackupKey(fromVersion) {
-    return `${accountStorageKey()}.migration-backup.v${fromVersion}`;
+  function migrationBackupKey(fromVersion, fingerprint) {
+    const safeFingerprint = String(fingerprint || "unknown").replace(/[^a-zA-Z0-9_-]/g, "-");
+    return `${accountStorageKey()}.migration-backup.v${fromVersion}.${safeFingerprint}`;
   }
 
-  function preserveMigrationBackup(result, source) {
-    if (!result?.migration?.migrated || typeof result.raw !== "string") return null;
-    const key = migrationBackupKey(result.migration.fromVersion);
-    const fingerprint = storageFingerprint(result.raw);
-    let existing = null;
-    try { existing = JSON.parse(localStorage.getItem(key) || "null"); }
-    catch (_) { /* replace malformed backup */ }
-    if (existing?.fingerprint === fingerprint && existing?.raw === result.raw) return key;
-    const backup = JSON.stringify({
-      backupVersion: 1,
-      source,
-      fromSchemaVersion: result.migration.fromVersion,
-      toSchemaVersion: result.migration.toVersion,
-      createdAt: new Date().toISOString(),
-      fingerprint,
-      raw: result.raw,
-    });
-    try {
-      localStorage.setItem(key, backup);
-      if (localStorage.getItem(key) !== backup) throw new Error("backup-verification-failed");
-    } catch (error) {
-      throw wardrobeMigrationError("migration-backup-failed", `无法备份旧衣柜：${String(error?.message || error)}`);
+  function preserveMigrationBackups(entries) {
+    const unique = new Map();
+    for (const entry of entries || []) {
+      const result = entry?.result;
+      if (!result?.migration?.migrated || typeof result.raw !== "string") continue;
+      const fingerprint = storageFingerprint(result.raw);
+      const identity = `${result.migration.fromVersion}\u0000${fingerprint}\u0000${result.raw}`;
+      const existing = unique.get(identity);
+      if (existing) {
+        if (!existing.sources.includes(entry.source)) existing.sources.push(entry.source);
+        continue;
+      }
+      unique.set(identity, {
+        raw: result.raw,
+        fingerprint,
+        fromVersion: result.migration.fromVersion,
+        toVersion: result.migration.toVersion,
+        sources: [entry.source],
+      });
     }
-    return key;
+
+    const keys = [];
+    for (const backupEntry of unique.values()) {
+      const key = migrationBackupKey(backupEntry.fromVersion, backupEntry.fingerprint);
+      let existingRaw = null;
+      try { existingRaw = localStorage.getItem(key); }
+      catch (error) {
+        throw wardrobeMigrationError("migration-backup-failed", `无法读取旧衣柜备份：${String(error?.message || error)}`);
+      }
+      if (existingRaw != null) {
+        try {
+          const existing = JSON.parse(existingRaw);
+          if (existing?.fingerprint !== backupEntry.fingerprint || existing?.raw !== backupEntry.raw) {
+            throw new Error("backup-key-collision");
+          }
+        } catch (error) {
+          throw wardrobeMigrationError("migration-backup-conflict", `旧衣柜备份键冲突：${String(error?.message || error)}`);
+        }
+        keys.push(key);
+        continue;
+      }
+
+      const backup = JSON.stringify({
+        backupVersion: 2,
+        sources: backupEntry.sources,
+        fromSchemaVersion: backupEntry.fromVersion,
+        toSchemaVersion: backupEntry.toVersion,
+        createdAt: new Date().toISOString(),
+        fingerprint: backupEntry.fingerprint,
+        raw: backupEntry.raw,
+      });
+      try {
+        localStorage.setItem(key, backup);
+        if (localStorage.getItem(key) !== backup) throw new Error("backup-verification-failed");
+      } catch (error) {
+        throw wardrobeMigrationError("migration-backup-failed", `无法备份旧衣柜：${String(error?.message || error)}`);
+      }
+      keys.push(key);
+    }
+    return keys;
   }
 
   function loadWardrobe() {
@@ -1333,7 +1373,7 @@
       server: { status: server.status, error: server.error, raw: server.raw, migration: server.migration || null },
       local: { status: local.status, error: local.error, raw: local.raw, migration: local.migration || null },
       conflict,
-      migration: migrations.length ? { status: "pending", fromVersion: Math.min(...migrations.map(entry => entry.result.migration.fromVersion)), toVersion: WARDROBE_SCHEMA_VERSION, backupKey: null } : null,
+      migration: migrations.length ? { status: "pending", fromVersion: Math.min(...migrations.map(entry => entry.result.migration.fromVersion)), toVersion: WARDROBE_SCHEMA_VERSION, backupKey: null, backupKeys: [] } : null,
       sync: localOnly ? { mode: "local-only", reason: marker.reason, requestBytes: marker.requestBytes, maxRequestBytes: MAX_SERVER_SYNC_MESSAGE_BYTES } : null,
     };
     if (selected) wardrobe = selected;
@@ -1341,8 +1381,21 @@
     if (!persistenceBlocked && selected && migrations.length) {
       try {
         const preferred = migrations.find(entry => entry.source === source) || migrations[0];
-        const backupKey = preserveMigrationBackup(preferred.result, preferred.source);
-        persistWardrobe({ force: true, source: "migration", migration: { status: "completed", fromVersion: preferred.result.migration.fromVersion, toVersion: WARDROBE_SCHEMA_VERSION, backupKey } });
+        // This is a write-ahead barrier: every distinct source payload must have
+        // an immutable, verified local backup before either local or server data
+        // is replaced with the migrated wardrobe.
+        const backupKeys = preserveMigrationBackups(migrations);
+        persistWardrobe({
+          force: true,
+          source: "migration",
+          migration: {
+            status: "completed",
+            fromVersion: preferred.result.migration.fromVersion,
+            toVersion: WARDROBE_SCHEMA_VERSION,
+            backupKey: backupKeys[0] || null,
+            backupKeys,
+          },
+        });
       } catch (error) {
         persistenceBlocked = true;
         wardrobeReadState.status = "migration-failed";
@@ -1351,6 +1404,7 @@
           fromVersion: Math.min(...migrations.map(entry => entry.result.migration.fromVersion)),
           toVersion: WARDROBE_SCHEMA_VERSION,
           backupKey: null,
+          backupKeys: [],
           error: error?.code || String(error?.message || error),
         };
         const message = "旧衣柜迁移写回失败，已保留原始数据并停止自动保存";
@@ -1693,14 +1747,44 @@
     return !!layer?.HasImage && !layer.LockLayer;
   }
 
+  // Body-replacement and cosmetic feature groups can be removable Appearance
+  // groups too, so AllowNone alone is not enough to identify clothing. Keep the
+  // material catalogue dynamic while excluding feature-editing groups. Ears and
+  // tails are intentionally absent from this deny pattern because cosplay body
+  // parts are valid clothing materials.
+  const NON_CLOTHING_MATERIAL_GROUP_PATTERN = /^(?:Body(?:Upper|Lower|Style|Size)|Head|Hair(?:Front|Back)?|Eyes?2?|Eyebrows?|Mouth|Nose|Hands?|Height|Blush|Emoticon|Pussy|Nipples?|Breast|Butt|Skin)|(?:身体|替用身体|身高|左眼|右眼|眼睛|前发|后发|额外头发|发型|发色|妆容|化妆|纹身|液体|痕迹|外观工具)/i;
+
+  function isMaterialAsset(asset) {
+    const group = asset?.Group;
+    if (!asset?.Wear || asset.IsLock || asset.Name === TAG_ASSET_NAME) return false;
+    if (!group || group.Category !== "Appearance" || group.AllowNone !== true || group.AllowCustomize === false) return false;
+    if (!asset.Layer?.some(isDrawableLayer)) return false;
+    if (group.Clothing === true || group.Underwear === true) return true;
+    if (group.BodyCosplay !== true && asset.BodyCosplay !== true) return false;
+    const semanticName = `${group.Name || ""} ${group.Description || ""}`;
+    return !NON_CLOTHING_MATERIAL_GROUP_PATTERN.test(semanticName);
+  }
+
+  function getMaterialAssetGroups(query = "") {
+    const q = String(query || "").trim().toLowerCase();
+    const groups = new Map();
+    for (const asset of globalThis.Asset || []) {
+      if (!isMaterialAsset(asset)) continue;
+      const text = `${asset.Group?.Name || ""} ${asset.Group?.Description || ""} ${asset.Name || ""} ${asset.Description || ""}`.toLowerCase();
+      if (q && !text.includes(q)) continue;
+      const key = asset.Group.Name;
+      let entry = groups.get(key);
+      if (!entry) {
+        entry = { key, label: asset.Group.Description || key, assets: [] };
+        groups.set(key, entry);
+      }
+      entry.assets.push(asset);
+    }
+    return [...groups.values()];
+  }
+
   function getMaterialAssets(query = "") {
-    const q = query.trim().toLowerCase();
-    return (globalThis.Asset || []).filter(asset => {
-      if (!asset?.Wear || asset.IsLock || asset.Name === TAG_ASSET_NAME) return false;
-      if (!asset.Layer?.some(isDrawableLayer)) return false;
-      const text = `${asset.Group?.Name || ""} ${asset.Name || ""} ${asset.Description || ""}`.toLowerCase();
-      return !q || text.includes(q);
-    }).slice(0, 800);
+    return getMaterialAssetGroups(query).flatMap(group => group.assets);
   }
 
   function clothingSlotGroups() {
@@ -1958,6 +2042,40 @@
     return poseMapping === layer?.PoseMapping ? { ...layer } : { ...layer, PoseMapping: poseMapping };
   }
 
+  function noteLayerVisibilityWarning(asset, layer, reason) {
+    const message = `素材动态图层判定异常：${asset?.Group?.Name || "?"}/${asset?.Name || "?"}/${layer?.Name || "默认层"}：${String(reason?.message || reason)}`;
+    if (!diagnostics.lastWarnings.includes(message)) {
+      diagnostics.lastWarnings.push(message);
+      diagnostics.lastWarnings = diagnostics.lastWarnings.slice(-20);
+    }
+  }
+
+  function sourceLayerVisible(character, layer, asset) {
+    // COE is a layer material editor: Typed/Modular AllowTypes are intentionally
+    // ignored so mutually-exclusive source layers can be recombined by the user.
+    // Character-dependent visual state remains live, especially PoseMapping,
+    // otherwise pose-specific artwork would pile into the current pose.
+    if (layer?.HideAs && typeof globalThis.CharacterAppearanceVisible === "function") {
+      try {
+        if (!CharacterAppearanceVisible(character, layer.HideAs.Asset, layer.HideAs.Group)) return false;
+      } catch (error) { noteLayerVisibilityWarning(asset, layer, error); }
+    }
+
+    if (typeof globalThis.CommonDrawResolveAssetPose === "function") {
+      try {
+        const pose = CommonDrawResolveAssetPose(character, layer);
+        const hiddenPose = globalThis.PoseType?.HIDE ?? "Hide";
+        if (pose && layer?.PoseMapping?.[pose] === hiddenPose) return false;
+      } catch (error) { noteLayerVisibilityWarning(asset, layer, error); }
+    }
+
+    if (typeof character?.HasAttribute === "function") {
+      if (layer?.HideForAttribute?.some(attribute => character.HasAttribute(attribute))) return false;
+      if (layer?.ShowForAttribute?.every(attribute => !character.HasAttribute(attribute))) return false;
+    }
+    return true;
+  }
+
   function createVisualAssetProxy(asset, owner = asset) {
     const cached = visualAssetProxyCache.get(owner);
     if (cached) return cached;
@@ -1995,14 +2113,15 @@
   }
 
   function buildStaticSynthetic({ character, material, refs, asset, analysis, overall = null }) {
+    const sourceProperty = sanitizeVisualProperty(material.sourceProperty || {}, analysis, asset);
     const drawable = refs.map(ref => ({ ref, sourceLayer: resolveSourceLayer(asset, ref) }))
-      .filter(entry => isDrawableLayer(entry.sourceLayer))
+      .filter(entry => isDrawableLayer(entry.sourceLayer) && sourceLayerVisible(character, entry.sourceLayer, asset))
       .sort((a, b) => (a.ref.sourceLayerIndex ?? asset.Layer.indexOf(a.sourceLayer)) - (b.ref.sourceLayerIndex ?? asset.Layer.indexOf(b.sourceLayer)));
     if (!drawable.length) throw new Error("no-drawable-layer");
     // Byte budgets are enforced at persistence and remote-protocol boundaries.
     // Avoid serializing unchanged material data on every preview frame.
     const colors = resolveMaterialColors(material, asset, refs);
-    const baseProperty = sanitizeVisualProperty(material.sourceProperty || {}, analysis, asset);
+    const baseProperty = sourceProperty;
     // 每层生成独立的 Item，Property 各自携带该层的变换
     const results = drawable.map((entry, index) => {
       const { ref, sourceLayer } = entry;
@@ -2134,40 +2253,118 @@
   const CONTENT_MIN_PIXELS = 4;
   const CONTENT_SCAN_MAX_EDGE = 512;
   const textureContentPivotCache = new Map();
-  const pendingPreviewTexturesByCharacter = new WeakMap();
+  const previewResourcesByCharacter = new WeakMap();
+
+  function previewResourceState(character) {
+    let state = previewResourcesByCharacter.get(character);
+    if (!state) {
+      state = { resources: new Map(), observed: new Set(), pass: 0 };
+      previewResourcesByCharacter.set(character, state);
+    }
+    return state;
+  }
+
+  function settlePreviewResource(character, entry, status, error = null) {
+    if (!entry || previewResourcesByCharacter.get(character)?.resources.get(entry.url) !== entry) return;
+    if (entry.status === status && entry.error === error) return;
+    entry.status = status;
+    entry.error = error;
+    entry.settle?.();
+    entry.settle = null;
+    if (status === "ready") character.MustDraw = true;
+  }
+
+  function beginPreviewResourcePass(character) {
+    if (!isPreviewCompositionCharacter(character)) return;
+    const state = previewResourceState(character);
+    state.pass++;
+    state.observed = new Set();
+  }
 
   function trackPreviewTextureLoad(character, url, width, height) {
     if (!isPreviewCompositionCharacter(character) || !url) return;
-    let pending = pendingPreviewTexturesByCharacter.get(character);
+    const state = previewResourceState(character);
+    state.observed.add(url);
+    let entry = state.resources.get(url);
+    if (!entry) {
+      entry = { url, status: "unknown", error: null, image: null, promise: null, settle: null };
+      state.resources.set(url, entry);
+    }
     if (width > 1 && height > 1) {
-      pending?.delete(url);
+      settlePreviewResource(character, entry, "ready");
       return;
     }
     const image = typeof globalThis.GLDrawImageCache?.get === "function" ? globalThis.GLDrawImageCache.get(url) : null;
-    if (!image) return;
-    if (!pending) {
-      pending = new Set();
-      pendingPreviewTexturesByCharacter.set(character, pending);
-    }
-    if (image.complete === true && Number(image.naturalWidth || image.width) > 0) {
-      pending.delete(url);
-      character.MustDraw = true;
+    if (!image) {
+      entry.status = "unknown";
       return;
     }
-    if (pending.has(url)) return;
-    pending.add(url);
-    if (typeof image.addEventListener === "function") image.addEventListener("load", () => {
-      pending.delete(url);
-      character.MustDraw = true;
+    entry.image = image;
+    const naturalWidth = Number(image.naturalWidth || 0);
+    const naturalHeight = Number(image.naturalHeight || 0);
+    if (image.complete === true && naturalWidth > 0 && naturalHeight > 0) {
+      if (typeof image.decode === "function" && entry.status !== "ready") {
+        entry.status = "pending";
+        entry.promise ||= Promise.resolve().then(() => image.decode()).then(
+          () => settlePreviewResource(character, entry, "ready"),
+          error => settlePreviewResource(character, entry, "failed", error),
+        );
+      } else settlePreviewResource(character, entry, "ready");
+      return;
+    }
+    if (image.complete === true && "naturalWidth" in image && naturalWidth === 0) {
+      settlePreviewResource(character, entry, "failed", new Error("image-load-failed"));
+      return;
+    }
+    if (entry.status === "pending" && entry.image === image) return;
+    entry.status = "pending";
+    entry.promise = new Promise(resolve => { entry.settle = resolve; });
+    if (typeof image.addEventListener !== "function") return;
+    image.addEventListener("load", () => {
+      if (typeof image.decode === "function") {
+        Promise.resolve().then(() => image.decode()).then(
+          () => settlePreviewResource(character, entry, "ready"),
+          error => settlePreviewResource(character, entry, "failed", error),
+        );
+      } else settlePreviewResource(character, entry, "ready");
     }, { once: true });
+    image.addEventListener("error", error => settlePreviewResource(character, entry, "failed", error || new Error("image-load-failed")), { once: true });
+  }
+
+  function previewResourcePassSummary(character) {
+    const state = previewResourcesByCharacter.get(character);
+    if (!state) return { key: "", total: 0, ready: 0, pending: 0, unknown: 0, failed: 0, promises: [] };
+    const urls = [...state.observed].sort();
+    const summary = { key: JSON.stringify(urls), total: urls.length, ready: 0, pending: 0, unknown: 0, failed: 0, promises: [] };
+    for (const url of urls) {
+      const entry = state.resources.get(url);
+      const status = entry?.status || "unknown";
+      summary[status] = (summary[status] || 0) + 1;
+      if (status === "pending" && entry?.promise) summary.promises.push(entry.promise);
+    }
+    return summary;
+  }
+
+  async function waitForPreviewResourcePass(character, timeoutMs = 6000) {
+    let summary = previewResourcePassSummary(character);
+    if (!summary.pending) return summary;
+    let timer = 0;
+    await Promise.race([
+      Promise.allSettled(summary.promises),
+      new Promise(resolve => { timer = setTimeout(resolve, Math.max(0, timeoutMs)); }),
+    ]);
+    if (timer) clearTimeout(timer);
+    summary = previewResourcePassSummary(character);
+    return summary;
   }
 
   function previewTexturesPending(character) {
-    return (pendingPreviewTexturesByCharacter.get(character)?.size || 0) > 0;
+    const summary = previewResourcePassSummary(character);
+    return summary.pending > 0 || summary.unknown > 0;
   }
 
   function clearPreviewTextureTracking(character) {
-    if (character) pendingPreviewTexturesByCharacter.delete(character);
+    if (character) previewResourcesByCharacter.delete(character);
   }
 
   // Asset metadata in BC R130 does not contain rendered texture dimensions.
@@ -2607,15 +2804,20 @@
         var needsGeometryCapture = opts.__coeGeometryCharacter &&
           opts.__coeGeometryMaterialId != null && opts.__coeGeometryLayerKey != null &&
           opts.__coeGeometryIsBlink !== true;
-        // 普通 BC 图层没有 COE 几何身份；无变换时只走原始函数，避免为全局图层
-        // 额外调用底层纹理加载器。合成图层仍需读取一次尺寸供整体 pivot 使用。
+        var previewCharacter = opts.__coePreviewCharacter;
+        // 普通 BC 图层没有 COE 几何身份；只有套装预览事务需要额外读取
+        // 纹理状态，用来把身体、脸、普通服装与合成图层纳入同一资源屏障。
         if (!rotation && Math.abs(scale - 1) <= 0.001 && !mirrorX && !mirrorY &&
           !overallRotation && Math.abs(overallScale - 1) <= 0.001 && !overallMirrorX && !overallMirrorY &&
           !overallOffsetX && !overallOffsetY) {
           const result = drawOriginal();
-          if (!needsGeometryCapture) return result;
-          const textureInfo = typeof GLDrawLoadImage === "function" ? GLDrawLoadImage(gl, url) : null;
-          cacheOverallLayerGeometry(opts, dstX, dstY, offsetX, Number(textureInfo?.width), Number(textureInfo?.height), gl.canvas.height, url);
+          if (!needsGeometryCapture && !previewCharacter) return result;
+          const cachedImage = previewCharacter && typeof globalThis.GLDrawImageCache?.get === "function" ? globalThis.GLDrawImageCache.get(url) : null;
+          const textureInfo = needsGeometryCapture && typeof GLDrawLoadImage === "function" ? GLDrawLoadImage(gl, url) : null;
+          if (previewCharacter) trackPreviewTextureLoad(previewCharacter, url,
+            Number(textureInfo?.width || cachedImage?.naturalWidth || cachedImage?.width),
+            Number(textureInfo?.height || cachedImage?.naturalHeight || cachedImage?.height));
+          if (needsGeometryCapture) cacheOverallLayerGeometry(opts, dstX, dstY, offsetX, Number(textureInfo?.width), Number(textureInfo?.height), gl.canvas.height, url);
           return result;
         }
 
@@ -2634,6 +2836,7 @@
         // GLDrawLoadImage 返回的缓存尺寸才是可靠来源；URL 中通常是 Dress_Base.png，
         // 不能直接把完整文件名当作 AssetLayer.Name。
         var textureInfo = typeof GLDrawLoadImage === "function" ? GLDrawLoadImage(gl, url) : null;
+        if (previewCharacter) trackPreviewTextureLoad(previewCharacter, url, Number(textureInfo?.width), Number(textureInfo?.height));
         var dim = textureInfo && Number(textureInfo.width) > 0 && Number(textureInfo.height) > 0
           ? { w: textureInfo.width, h: textureInfo.height }
           : resolveTextureDimensions(url);
@@ -2914,7 +3117,8 @@
     modApi.hookFunction("CommonDrawAppearanceBuild", 10, (args, next) => {
       const character = args[0];
       const groups = syntheticByCharacter.get(character) || [];
-      if (!groups.length) return next(args);
+      const previewTransaction = isPreviewCompositionCharacter(character);
+      if (!groups.length && !previewTransaction) return next(args);
       const originalAppearance = character.Appearance;
       const originalLayers = character.AppearanceLayers;
       const originalCallbacks = args[1];
@@ -2925,7 +3129,7 @@
         const renderableAppearance = previewAssets
           ? (originalAppearance || []).filter(item => !(previewAssets.has(item?.Asset) && isEditorRemovableAsset(item?.Asset)))
           : (originalAppearance || []);
-        character.Appearance = groups.map(group => group.item).concat(renderableAppearance);
+        character.Appearance = groups.length ? groups.map(group => group.item).concat(renderableAppearance) : renderableAppearance;
         const drawLayers = (originalLayers || []).map(layer => {
           const marker = layer.__coeSyntheticLayer;
           if (!marker) return layer;
@@ -2962,9 +3166,12 @@
             callbacks[name] = function (...callbackArgs) {
               const marker = currentDrawLayer?.__coeSyntheticLayer;
               const ref = marker?.ref;
-              if (!ref) return callback.apply(this, callbackArgs);
               const options = callbackArgs[3] || {};
-              const transformed = { ...options };
+              const transformed = previewTransaction ? { ...options, __coePreviewCharacter: character } : { ...options };
+              if (!ref) {
+                if (previewTransaction) callbackArgs[3] = transformed;
+                return callback.apply(this, callbackArgs);
+              }
               if (typeof ref.rotation === "number" && isFinite(ref.rotation) && ref.rotation !== 0)
                 transformed.Rotation = clamp(ref.rotation, -Math.PI, Math.PI);
               if (typeof ref.scale === "number" && isFinite(ref.scale) && Math.abs(ref.scale - 1) > 0.001)
@@ -3127,7 +3334,7 @@
 
   function closeUI() {
     closeOwnedColorPicker();
-    if (typeof cancelSetPreviewQueue === "function") cancelSetPreviewQueue();
+    if (typeof cancelSetPreviewQueue === "function") cancelSetPreviewQueue({ dispose: true });
     restoreEditorAppearance();
     document.getElementById(ROOT_ID)?.remove();
     // Closing the local editor must not discard texture/geometry refreshes already
@@ -3759,9 +3966,23 @@
     try { if (character.CanvasBlink) { character.CanvasBlink.width = 0; character.CanvasBlink.height = 0; } } catch (_) { /* best effort */ }
   }
 
-  function cancelSetPreviewQueue() {
+  function getSetPreviewWorkerCharacter() {
+    if (setPreviewWorkerCharacter) return setPreviewWorkerCharacter;
+    if (typeof globalThis.CharacterLoadSimple !== "function") return null;
+    setPreviewWorkerCharacter = CharacterLoadSimple(`COESetPreviewWorker-${++setPreviewCharacterSerial}`);
+    return setPreviewWorkerCharacter;
+  }
+
+  function disposeSetPreviewWorker() {
+    const character = setPreviewWorkerCharacter;
+    setPreviewWorkerCharacter = null;
+    releaseSetPreviewCharacter(character);
+  }
+
+  function cancelSetPreviewQueue(options = {}) {
     setPreviewGeneration++;
     setPreviewQueue = [];
+    if (options.dispose === true) disposeSetPreviewWorker();
   }
 
   // A reconnect can leave the browser's image cache and the preview canvases at
@@ -3773,8 +3994,9 @@
   }
 
   async function buildSetPreviewSnapshot(set, generation) {
-    if (typeof globalThis.CharacterLoadSimple !== "function" || !globalThis.Player) return null;
-    const character = CharacterLoadSimple(`COESetPreview-${++setPreviewCharacterSerial}`);
+    if (!globalThis.Player) return null;
+    const character = getSetPreviewWorkerCharacter();
+    if (!character) return null;
     try {
       character.AssetFamily = Player.AssetFamily || "Female3DCG";
       character.Appearance = cloneAppearanceItems(Player.Appearance || []);
@@ -3784,37 +4006,57 @@
       const plan = buildSetApplyPlan(set, character, wardrobe);
       character.Appearance = plan.appearance;
       previewCompositionByCharacter.set(character, combineSchemes(plan.equippedIds, wardrobe));
+      clearPreviewTextureTracking(character);
       if (typeof globalThis.CharacterRefresh === "function") CharacterRefresh(character, false, false);
-      // Synthetic source textures are absent from the preview character's formal
-      // Appearance, so BC's DrawRefreshCharacterForImage cannot mark this isolated
-      // character dirty when their 1x1 placeholders finish loading. The renderer
-      // tracks those URLs for us; keep rebuilding until every observed texture is
-      // ready, with a bounded wait so a broken URL cannot stall the whole queue.
-      for (let attempt = 0; attempt < 40; attempt++) {
-        if (generation !== setPreviewGeneration) return null;
+
+      // CharacterLoadCanvas is a synchronous draw over asynchronous image caches.
+      // A quiet MustDraw flag cannot prove completeness, so each pass records every
+      // native and synthetic URL actually consumed by BC. Only two consecutive,
+      // identical, fully-ready dependency sets form a render fixed point.
+      const deadline = Date.now() + 10000;
+      let previousKey = null;
+      let stablePasses = 0;
+      for (let pass = 0; pass < 64 && Date.now() < deadline; pass++) {
+        if (generation !== setPreviewGeneration || character !== setPreviewWorkerCharacter) return null;
+        beginPreviewResourcePass(character);
+        character.MustDraw = true;
         if (typeof globalThis.CharacterLoadCanvas === "function") CharacterLoadCanvas(character);
-        await new Promise(resolve => setTimeout(resolve, attempt < 2 ? 0 : 60));
-        if (!character.MustDraw && !previewTexturesPending(character) && attempt >= 2) break;
+        character.MustDraw = false;
+        let resources = await waitForPreviewResourcePass(character, Math.max(0, deadline - Date.now()));
+        if (generation !== setPreviewGeneration || character !== setPreviewWorkerCharacter) return null;
+        if (resources.failed > 0) return null;
+        const complete = resources.total > 0 && resources.pending === 0 && resources.unknown === 0 && resources.ready === resources.total;
+        if (complete && resources.key === previousKey && !character.MustDraw) stablePasses++;
+        else stablePasses = 0;
+        previousKey = resources.key;
+        if (stablePasses >= 1) break;
+        if (resources.unknown > 0) await new Promise(resolve => setTimeout(resolve, 100));
+        else await new Promise(resolve => requestAnimationFrame(resolve));
       }
-      // The timeout is a safety boundary, not permission to capture a partial
-      // character. Capturing here used to poison setPreviewCache with a snapshot
-      // made from 1x1 texture placeholders; saving the same appearance to a new
-      // slot appeared to fix it only because that slot received a new fingerprint.
-      if (character.MustDraw || previewTexturesPending(character)) return null;
-      const cacheable = !previewTexturesPending(character);
+      const finalResources = previewResourcePassSummary(character);
+      if (stablePasses < 1 || character.MustDraw || finalResources.pending || finalResources.unknown || finalResources.failed) return null;
+
       const snapshot = document.createElement("canvas");
       snapshot.width = 500;
       snapshot.height = 1000;
       const context = snapshot.getContext?.("2d");
       if (!context) return null;
       context.clearRect(0, 0, snapshot.width, snapshot.height);
+      // BC's DrawCharacter handles CanvasUpperOverflow, HeightRatio,
+      // blink canvas selection and Invert offsets. Third-party appearance
+      // extensions may change these dimensions; only the
+      // native draw path keeps the correct coordinate space.
+      // MustDraw is already false after the fixed-point loop, so this
+      // composes the cached canvas without rebuilding or triggering
+      // dynamic asset scripts.
       if (typeof globalThis.DrawCharacter === "function") DrawCharacter(character, 0, 0, 1, false, context);
       else if (character.Canvas) context.drawImage(character.Canvas, 0, 0, snapshot.width, snapshot.height);
-      return { snapshot, plan, cacheable };
+      else return null;
+      return { snapshot, plan, cacheable: true, resources: finalResources };
     } catch (error) {
       warn(`套装「${set.name}」预览生成失败`, error);
       return null;
-    } finally { releaseSetPreviewCharacter(character); }
+    }
   }
 
   async function runSetPreviewQueue() {
@@ -4349,6 +4591,7 @@
   function openWardrobe(view = wardrobeView) {
     restoreEditorAppearance();
     wardrobeView = view === "sets" ? "sets" : "outfits";
+    if (wardrobeView !== "sets" && typeof cancelSetPreviewQueue === "function") cancelSetPreviewQueue({ dispose: true });
     loadWardrobe();
     ensureEquippedIds();
     syncEquippedSchemes();
@@ -5084,43 +5327,59 @@
     search.focus();
   }
 
+  function materialPreviewPath(asset) {
+    const rawPath = typeof globalThis.AssetGetPreviewPath === "function"
+      ? `${AssetGetPreviewPath(asset)}/${asset.Name}.png`
+      : `Assets/${asset.Group?.Family || "Female3DCG"}/${asset.DynamicGroupName || asset.Group?.Name}/Preview/${asset.Name}.png`;
+    // Third-party providers normally hook BC's image cache loader rather than
+    // arbitrary DOM <img> requests. Resolve through DrawGetImage first so
+    // image-mapping mods can replace the virtual BC path with a CDN URL.
+    if (typeof globalThis.DrawGetImage === "function") {
+      try {
+        const resolved = DrawGetImage(rawPath);
+        if (typeof resolved?.currentSrc === "string" && resolved.currentSrc) return resolved.currentSrc;
+        if (typeof resolved?.src === "string" && resolved.src) return resolved.src;
+      } catch (error) {
+        warn(`素材预览路径解析失败：${asset.Group?.Name || "?"}/${asset.Name || "?"}`, error);
+      }
+    }
+    return `./${rawPath}`;
+  }
+
   function renderMaterials(list, query) {
     list.innerHTML = "";
-    const assets = getMaterialAssets(query);
-    if (!assets.length) { list.innerHTML = '<div class="coe-empty">没有匹配的已加载素材。</div>'; return; }
-    const groups = new Map();
-    for (const asset of assets) {
-      const groupName = asset.Group?.Description || asset.Group?.Name || "未分类";
-      if (!groups.has(groupName)) groups.set(groupName, []);
-      groups.get(groupName).push(asset);
-    }
+    const groups = getMaterialAssetGroups(query);
+    if (!groups.length) { list.innerHTML = '<div class="coe-empty">没有匹配的已加载服装素材。</div>'; return; }
     const searching = typeof query === "string" && query.trim().length > 0;
-    for (const [groupName, groupAssets] of groups) {
+    for (const group of groups) {
+      const { key: groupKey, label: groupName, assets: groupAssets } = group;
       const section = document.createElement("section");
-      const collapsed = !searching && !expandedMaterialGroups.has(groupName);
+      const collapsed = !searching && !expandedMaterialGroups.has(groupKey);
       section.className = `coe-material-section${collapsed ? " coe-collapsed" : ""}`;
       section.innerHTML = `<h3 class="coe-material-group-title"><button type="button" class="coe-material-group-toggle" aria-expanded="${!collapsed}"><span>${collapsed ? "▶" : "▼"}</span><strong>${escapeHTML(groupName)}</strong><small>${groupAssets.length}</small></button></h3>`;
       section.querySelector(".coe-material-group-toggle").addEventListener("click", () => {
         if (searching) return;
-        if (expandedMaterialGroups.has(groupName)) expandedMaterialGroups.delete(groupName);
-        else expandedMaterialGroups.add(groupName);
+        if (expandedMaterialGroups.has(groupKey)) expandedMaterialGroups.delete(groupKey);
+        else expandedMaterialGroups.add(groupKey);
         renderMaterials(list, query);
       });
-      const grid = document.createElement("div");
-      grid.className = "coe-material-group";
-      for (const asset of groupAssets) {
-        const drawable = asset.Layer.filter(isDrawableLayer);
-        const button = document.createElement("button");
-        button.className = "coe-material";
-        button.title = "提取该素材的静态图片层；动画、脚本和物品功能不会复制";
-        const previewPath = typeof globalThis.AssetGetPreviewPath === "function"
-          ? `./${AssetGetPreviewPath(asset)}/${encodeURIComponent(asset.Name)}.png`
-          : `./Assets/${asset.Group?.Family || "Female3DCG"}/${asset.DynamicGroupName || asset.Group?.Name}/Preview/${encodeURIComponent(asset.Name)}.png`;
-        button.innerHTML = `<img loading="lazy" src="${escapeHTML(previewPath)}" alt=""><span><strong>${escapeHTML(asset.Description || asset.Name)}</strong><br><span class="coe-muted">${drawable.length} 层 · 静态提取</span></span>`;
-        button.addEventListener("click", () => addAssetLayers(asset));
-        grid.appendChild(button);
+      // Opening the picker only builds lightweight category headers. Asset cards,
+      // preview URL resolution and image requests begin when a category is opened.
+      if (!collapsed) {
+        const grid = document.createElement("div");
+        grid.className = "coe-material-group";
+        for (const asset of groupAssets) {
+          const drawable = asset.Layer.filter(isDrawableLayer);
+          const button = document.createElement("button");
+          button.className = "coe-material";
+          button.title = "提取该素材的静态图片层；动画、脚本和物品功能不会复制";
+          const previewPath = materialPreviewPath(asset);
+          button.innerHTML = `<img loading="lazy" src="${escapeHTML(previewPath)}" alt=""><span><strong>${escapeHTML(asset.Description || asset.Name)}</strong><br><span class="coe-muted">${drawable.length} 层 · 静态提取</span></span>`;
+          button.addEventListener("click", () => addAssetLayers(asset));
+          grid.appendChild(button);
+        }
+        section.appendChild(grid);
       }
-      section.appendChild(grid);
       list.appendChild(section);
     }
   }
@@ -5266,20 +5525,20 @@
 
 
 
-  const REMOTE_PROTOCOL = "COE_RVS/4";
+  const REMOTE_PROTOCOL = "COE_RVP/1";
   const REMOTE_PREFIX = `${REMOTE_PROTOCOL}|`;
+  const REMOTE_ENCODING = "gz";
   const REMOTE_LIMITS = Object.freeze({
-    content: 1800, chunkData: 1200, chunks: 32, snapshotBytes: 32768,
+    content: 1800, inlineData: 1300, chunkData: 1400, chunks: 24,
+    snapshotBytes: 32768, compressedBytes: 24576,
     materialBytes: 8192, materials: 32, layers: 120, string: 64, color: 40,
   });
-  const REMOTE_TYPES = new Set(["STATE", "REQUEST", "CHUNK", "CLEAR"]);
+  const REMOTE_TYPES = new Set(["D", "A", "W", "X", "N", "R"]);
   const POLLUTION_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 
   function remotePlainObject(value) {
     if (!value || Object.prototype.toString.call(value) !== "[object Object]") return false;
     const proto = Object.getPrototypeOf(value);
-    // JSON values created in another realm (tests/iframes) still have a plain
-    // Object prototype whose own prototype is null. Class instances do not.
     return proto === null || proto === Object.prototype || (Object.getPrototypeOf(proto) === null && proto.constructor?.name === "Object");
   }
 
@@ -5330,9 +5589,7 @@
     if (!remotePlainObject(value)) throw new Error("snapshot-property");
     const allowed = new Set(["Type", "Mirror", "Invert", "TypeRecord"]);
     const output = {};
-    for (const key of Object.keys(value)) {
-      if (!allowed.has(key) || POLLUTION_KEYS.has(key)) throw new Error("snapshot-property-key");
-    }
+    for (const key of Object.keys(value)) if (!allowed.has(key) || POLLUTION_KEYS.has(key)) throw new Error("snapshot-property-key");
     if (value.Type != null) output.Type = remoteString(value.Type, "property-type", 40);
     if (value.Mirror != null) {
       if (typeof value.Mirror !== "boolean") throw new Error("snapshot-property-mirror");
@@ -5358,8 +5615,7 @@
       if (material.w != null) output.w = remoteString(material.w, "wear-group");
       if (!Array.isArray(material.c) || material.c.length > 40) throw new Error("snapshot-colors");
       output.c = material.c.map(color => remoteString(color, "color", REMOTE_LIMITS.color));
-      const overallFields = [["r", -Math.PI, Math.PI], ["s", 0.25, 3.0], ["x", -1200, 1200], ["y", -1200, 1200]];
-      for (const [key, min, max] of overallFields) {
+      for (const [key, min, max] of [["r", -Math.PI, Math.PI], ["s", 0.25, 3.0], ["x", -1200, 1200], ["y", -1200, 1200]]) {
         if (material[key] == null) continue;
         if (typeof material[key] !== "number" || !Number.isFinite(material[key])) throw new Error(`snapshot-material-${key}`);
         output[key] = normalizeRemoteNumber(material[key], min, max);
@@ -5400,9 +5656,7 @@
       }
       return output;
     });
-    const snapshot = { v: 1 };
-    snapshot.m = materials;
-    snapshot.l = layers;
+    const snapshot = { v: 1, m: materials, l: layers };
     const canonical = JSON.stringify(snapshot);
     if (utf8Bytes(canonical) > REMOTE_LIMITS.snapshotBytes) throw new Error("snapshot-byte-budget");
     for (let index = 0; index < materials.length; index++) {
@@ -5412,15 +5666,12 @@
     return snapshot;
   }
 
-  function canonicalRemoteSnapshot(value) {
-    return JSON.stringify(validateRemoteSnapshot(value));
-  }
+  function canonicalRemoteSnapshot(value) { return JSON.stringify(validateRemoteSnapshot(value)); }
 
   async function sha256Base64Url(text) {
     const subtle = globalThis.crypto?.subtle;
     if (!subtle) throw new Error("crypto-subtle-unavailable");
-    const bytes = new TextEncoder().encode(text);
-    const digest = new Uint8Array(await subtle.digest("SHA-256", bytes));
+    const digest = new Uint8Array(await subtle.digest("SHA-256", new TextEncoder().encode(text)));
     return bytesToBase64Url(digest);
   }
 
@@ -5430,10 +5681,9 @@
     return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
   }
 
-  function base64UrlToBytes(value, maxBytes = REMOTE_LIMITS.snapshotBytes) {
+  function base64UrlToBytes(value, maxBytes = REMOTE_LIMITS.compressedBytes) {
     remoteString(value, "base64url", Math.ceil(maxBytes * 4 / 3) + 4, /^[A-Za-z0-9_-]+$/);
-    const estimated = Math.floor(value.length * 3 / 4);
-    if (estimated > maxBytes) throw new Error("remote-decoded-budget");
+    if (Math.floor(value.length * 3 / 4) > maxBytes) throw new Error("remote-decoded-budget");
     const padded = value.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((value.length + 3) % 4);
     let binary;
     try { binary = atob(padded); } catch (_) { throw new Error("remote-base64url"); }
@@ -5441,41 +5691,103 @@
     return Uint8Array.from(binary, char => char.charCodeAt(0));
   }
 
-  function encodeRemoteText(text) {
-    return bytesToBase64Url(new TextEncoder().encode(text));
+  async function remoteTransformBytes(bytes, format, outputLimit) {
+    const Constructor = format === "compress" ? globalThis.CompressionStream : globalThis.DecompressionStream;
+    if (typeof Constructor !== "function") throw new Error(`remote-${format}-unavailable`);
+    const stream = new Constructor("gzip");
+    const writer = stream.writable.getWriter();
+    const reader = stream.readable.getReader();
+    const parts = [];
+    let total = 0;
+    const reading = (async () => {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > outputLimit) throw new Error(`remote-${format}-budget`);
+        parts.push(value);
+      }
+      const output = new Uint8Array(total);
+      let offset = 0;
+      for (const part of parts) { output.set(part, offset); offset += part.byteLength; }
+      return output;
+    })();
+    let failure = null;
+    try {
+      await writer.write(bytes);
+      await writer.close();
+    } catch (error) {
+      failure = error;
+      try { await writer.abort(error); } catch (_) { /* closed */ }
+    }
+    let output = null;
+    try { output = await reading; }
+    catch (error) { failure ||= error; }
+    if (failure) {
+      try { await writer.abort(failure); } catch (_) { /* closed */ }
+      try { await reader.cancel(failure); } catch (_) { /* closed */ }
+      const wrapped = new Error(`remote-${format}-data`);
+      wrapped.cause = failure;
+      throw wrapped;
+    }
+    return output;
   }
 
-  function decodeRemoteText(value) {
-    return new TextDecoder("utf-8", { fatal: true }).decode(base64UrlToBytes(value));
+  async function encodeRemoteText(text) {
+    if (typeof text !== "string" || utf8Bytes(text) > REMOTE_LIMITS.snapshotBytes) throw new Error("remote-encode-budget");
+    const compressed = await remoteTransformBytes(new TextEncoder().encode(text), "compress", REMOTE_LIMITS.compressedBytes);
+    return { encoded: bytesToBase64Url(compressed), compressedBytes: compressed.byteLength };
+  }
+
+  async function decodeRemoteText(value, expectedBytes = null) {
+    const compressed = base64UrlToBytes(value);
+    if (expectedBytes != null && compressed.byteLength !== expectedBytes) throw new Error("remote-compressed-size");
+    const output = await remoteTransformBytes(compressed, "decompress", REMOTE_LIMITS.snapshotBytes);
+    return new TextDecoder("utf-8", { fatal: true }).decode(output);
   }
 
   function splitRemoteData(value) {
-    remoteString(value, "chunk-source", REMOTE_LIMITS.chunks * REMOTE_LIMITS.chunkData, /^[A-Za-z0-9_-]+$/);
+    remoteString(value, "chunk-source", Math.ceil(REMOTE_LIMITS.compressedBytes * 4 / 3) + 4, /^[A-Za-z0-9_-]+$/);
     const chunks = [];
     for (let index = 0; index < value.length; index += REMOTE_LIMITS.chunkData) chunks.push(value.slice(index, index + REMOTE_LIMITS.chunkData));
     if (!chunks.length || chunks.length > REMOTE_LIMITS.chunks) throw new Error("remote-chunk-count");
     return chunks;
   }
 
+  function remoteSession(value) { return remoteString(value, "session", 32, /^[A-Za-z0-9_-]+$/); }
+  function remoteHash(value) { return remoteString(value, "hash", 64, /^[A-Za-z0-9_-]+$/); }
+
   function validateRemoteEnvelope(value) {
     remoteAssertTree(value);
     if (!remotePlainObject(value) || !REMOTE_TYPES.has(value.t)) throw new Error("remote-envelope");
-    const allowed = value.t === "STATE" ? new Set(["t", "s", "r", "h", "z", "sharing"])
-      : value.t === "CLEAR" ? new Set(["t", "s"])
-      : value.t === "REQUEST" ? new Set(["t", "requestId", "session", "revision", "hash"])
-      : new Set(["t", "requestId", "session", "revision", "hash", "index", "count", "data"]);
-    for (const key of Object.keys(value)) if (!allowed.has(key)) throw new Error("remote-envelope-key");
-    if (value.t === "STATE") {
-      if (typeof value.sharing !== "boolean") throw new Error("remote-sharing");
-      const state = { t: "STATE", s: remoteString(value.s, "session", 32, /^[A-Za-z0-9_-]+$/), r: remoteInteger(value.r, "revision"), h: value.h === "" ? "" : remoteString(value.h, "hash", 64, /^[A-Za-z0-9_-]+$/), z: remoteInteger(value.z, "size", 0, REMOTE_LIMITS.snapshotBytes), sharing: value.sharing };
-      if (state.sharing !== (!!state.h && state.z > 0)) throw new Error("remote-state-consistency");
-      return state;
+    const allowedByType = {
+      D: new Set(["t", "s", "rx", "e"]), A: new Set(["t", "s", "r", "h", "u", "z", "n", "d"]),
+      W: new Set(["t", "o", "s", "r", "h"]), X: new Set(["t", "s", "r", "h", "i", "n", "d"]),
+      N: new Set(["t", "o", "s", "r", "h", "m"]), R: new Set(["t", "s", "r"]),
+    };
+    for (const key of Object.keys(value)) if (!allowedByType[value.t].has(key)) throw new Error("remote-envelope-key");
+    if (value.t === "D") {
+      if (typeof value.rx !== "boolean" || value.e !== REMOTE_ENCODING) throw new Error("remote-discover");
+      return { t: "D", s: remoteSession(value.s), rx: value.rx, e: REMOTE_ENCODING };
     }
-    if (value.t === "CLEAR") return { t: "CLEAR", s: remoteString(value.s, "session", 32, /^[A-Za-z0-9_-]+$/) };
-    if (value.t === "REQUEST") return { t: "REQUEST", requestId: remoteString(value.requestId, "request-id", 32, /^[A-Za-z0-9_-]+$/), session: remoteString(value.session, "session", 32, /^[A-Za-z0-9_-]+$/), revision: remoteInteger(value.revision, "revision"), hash: remoteString(value.hash, "hash", 64, /^[A-Za-z0-9_-]+$/) };
-    const chunk = { t: "CHUNK", requestId: remoteString(value.requestId, "request-id", 32, /^[A-Za-z0-9_-]+$/), session: remoteString(value.session, "session", 32, /^[A-Za-z0-9_-]+$/), revision: remoteInteger(value.revision, "revision"), hash: remoteString(value.hash, "hash", 64, /^[A-Za-z0-9_-]+$/), index: remoteInteger(value.index, "chunk-index", 0, REMOTE_LIMITS.chunks - 1), count: remoteInteger(value.count, "chunk-count", 1, REMOTE_LIMITS.chunks), data: remoteString(value.data, "chunk-data", REMOTE_LIMITS.chunkData, /^[A-Za-z0-9_-]+$/) };
-    if (chunk.index >= chunk.count) throw new Error("remote-chunk-index");
-    return chunk;
+    if (value.t === "A") {
+      const result = { t: "A", s: remoteSession(value.s), r: remoteInteger(value.r, "revision"), h: remoteHash(value.h), u: remoteInteger(value.u, "uncompressed-size", 1, REMOTE_LIMITS.snapshotBytes), z: remoteInteger(value.z, "compressed-size", 1, REMOTE_LIMITS.compressedBytes), n: remoteInteger(value.n, "chunk-count", 1, REMOTE_LIMITS.chunks) };
+      if (value.d != null) {
+        result.d = remoteString(value.d, "inline-data", REMOTE_LIMITS.inlineData, /^[A-Za-z0-9_-]+$/);
+        if (result.n !== 1) throw new Error("remote-inline-count");
+      }
+      return result;
+    }
+    if (value.t === "W") return { t: "W", o: remoteInteger(value.o, "owner", 1), s: remoteSession(value.s), r: remoteInteger(value.r, "revision"), h: remoteHash(value.h) };
+    if (value.t === "R") return { t: "R", s: remoteSession(value.s), r: remoteInteger(value.r, "revision") };
+    if (value.t === "N") {
+      if (!Array.isArray(value.m) || !value.m.length || value.m.length > REMOTE_LIMITS.chunks) throw new Error("remote-missing");
+      const missing = [...new Set(value.m.map(index => remoteInteger(index, "missing-index", 0, REMOTE_LIMITS.chunks - 1)))].sort((a, b) => a - b);
+      return { t: "N", o: remoteInteger(value.o, "owner", 1), s: remoteSession(value.s), r: remoteInteger(value.r, "revision"), h: remoteHash(value.h), m: missing };
+    }
+    const data = { t: "X", s: remoteSession(value.s), r: remoteInteger(value.r, "revision"), h: remoteHash(value.h), i: remoteInteger(value.i, "chunk-index", 0, REMOTE_LIMITS.chunks - 1), n: remoteInteger(value.n, "chunk-count", 1, REMOTE_LIMITS.chunks), d: remoteString(value.d, "chunk-data", REMOTE_LIMITS.chunkData, /^[A-Za-z0-9_-]+$/) };
+    if (data.i >= data.n) throw new Error("remote-chunk-index");
+    return data;
   }
 
   function parseRemoteContent(content) {
@@ -5494,15 +5806,25 @@
 
 
   function createRemoteStats() {
-    return { messagesSent: 0, messagesReceived: 0, messagesRejected: 0, rateLimited: 0, chunksExpired: 0, bytesSent: 0, bytesReceived: 0, remoteMaterialsSkipped: 0 };
+    return { messagesSent: 0, messagesReceived: 0, messagesRejected: 0, rateLimited: 0, chunksExpired: 0, bytesSent: 0, bytesReceived: 0, remoteMaterialsSkipped: 0, publicationsAccepted: 0, cacheHits: 0, wantsSuppressed: 0, repairsSent: 0 };
   }
 
   function createRemoteStore() {
+    const publications = new Map();
     return {
       roomGeneration: 0,
-      peers: new Map(), pendingRequests: new Map(), assemblies: new Map(), activeSnapshots: new Map(),
-      senderBuckets: new Map(), roomBucket: null, responseTimes: new Map(), requestTimes: new Map(),
-      helloReplied: new Set(), timers: new Set(), diagnostics: [], stats: createRemoteStats(), totalBytes: 0,
+      peers: publications,
+      publications,
+      discoveries: new Map(),
+      assemblies: new Map(),
+      objectCache: new Map(),
+      activeSnapshots: new Map(),
+      wantedObjects: new Set(),
+      announcedWants: new Set(),
+      wantRetryScheduled: new Set(),
+      dataMessageCounts: new Map(),
+      senderBuckets: new Map(), roomBucket: null,
+      timers: new Set(), diagnostics: [], stats: createRemoteStats(), totalBytes: 0,
     };
   }
 
@@ -5517,7 +5839,6 @@
       callback();
     }, delay);
     remoteStore.timers.add(timer);
-    // Node test timers support unref; browser timer ids simply ignore this.
     timer?.unref?.();
     return timer;
   }
@@ -5550,95 +5871,119 @@
 
   function acceptRemoteInboundRate(sender, now = remoteNow()) {
     const senderOk = remoteBucketConsume(remoteStore, sender, 12, 2, now);
-    const roomOk = remoteBucketConsume(remoteStore, null, 30, 5, now);
+    const roomOk = remoteBucketConsume(remoteStore, null, 40, 8, now);
     if (!senderOk || !roomOk) remoteStore.stats.rateLimited++;
     return senderOk && roomOk;
   }
 
   function remotePeerKey(memberNumber) { return Number(memberNumber); }
+  function remoteObjectKey(memberNumber, hash) { return `${remotePeerKey(memberNumber)}:${hash}`; }
+  function getRemotePublication(memberNumber) { return remoteStore.publications.get(remotePeerKey(memberNumber)) || null; }
 
-  function getRemotePeer(memberNumber) { return remoteStore.peers.get(remotePeerKey(memberNumber)) || null; }
-
-  function setRemotePeer(memberNumber, state) {
+  function setRemoteDiscovery(memberNumber, discovery) {
     const key = remotePeerKey(memberNumber);
-    if (!remoteStore.peers.has(key) && remoteStore.peers.size >= 10) throw new Error("remote-peer-limit");
-    const previous = remoteStore.peers.get(key);
+    if (!remoteStore.discoveries.has(key) && remoteStore.discoveries.size >= 20) throw new Error("remote-peer-limit");
+    const value = { memberNumber: key, session: discovery.session, receiving: discovery.receiving === true, encoding: discovery.encoding, seenAt: remoteNow() };
+    remoteStore.discoveries.set(key, value);
+    return value;
+  }
+
+  function setRemotePublication(memberNumber, state) {
+    const key = remotePeerKey(memberNumber);
+    if (!remoteStore.publications.has(key) && remoteStore.publications.size >= 20) throw new Error("remote-peer-limit");
+    const previous = remoteStore.publications.get(key);
     if (previous?.session === state.session) {
       if (state.revision < previous.revision) throw new Error("remote-stale-revision");
-      if (state.revision === previous.revision && previous.sharing && state.sharing && state.hash !== previous.hash) throw new Error("remote-revision-hash-conflict");
+      if (state.revision === previous.revision && state.hash !== previous.hash) throw new Error("remote-revision-hash-conflict");
+      if (state.revision === previous.revision && (state.uncompressedBytes !== previous.uncompressedBytes || state.compressedBytes !== previous.compressedBytes || state.count !== previous.count)) throw new Error("remote-revision-metadata-conflict");
     }
-    const peer = { memberNumber: key, session: state.session, revision: state.revision, hash: state.hash, size: state.size, sharing: state.sharing === true, seenAt: remoteNow() };
-    remoteStore.peers.set(key, peer);
-    return { peer, isNewSession: !previous || previous.session !== peer.session };
+    const publication = {
+      memberNumber: key, session: state.session, revision: state.revision, hash: state.hash,
+      uncompressedBytes: state.uncompressedBytes, compressedBytes: state.compressedBytes,
+      count: state.count, seenAt: remoteNow(),
+    };
+    remoteStore.publications.set(key, publication);
+    const changedSession = !previous || previous.session !== publication.session;
+    const changedObject = changedSession || previous.revision !== publication.revision || previous.hash !== publication.hash;
+    if (changedObject) {
+      const active = remoteStore.activeSnapshots.get(key);
+      if (active && active.hash !== publication.hash) remoteStore.activeSnapshots.delete(key);
+      for (const assemblyKey of [...remoteStore.assemblies.keys()]) if (assemblyKey.startsWith(`${key}:`)) remoteStore.assemblies.delete(assemblyKey);
+      for (const wanted of [...remoteStore.wantedObjects]) if (wanted.startsWith(`${key}:`)) remoteStore.wantedObjects.delete(wanted);
+    }
+    return { publication, changedSession, changedObject };
   }
 
-  function remoteIdentity(memberNumber, session) { return `${remoteStore.roomGeneration}:${memberNumber}:${session}`; }
-
-  function pendingRequestFor(memberNumber) { return remoteStore.pendingRequests.get(remotePeerKey(memberNumber)) || null; }
-
-  function setPendingRequest(memberNumber, request) {
-    const key = remotePeerKey(memberNumber);
-    const previous = remoteStore.pendingRequests.get(key);
-    const identityChanged = previous && (previous.session !== request.session || previous.revision !== request.revision || previous.hash !== request.hash);
-    if (identityChanged) remoteStore.assemblies.delete(key);
-    remoteStore.pendingRequests.set(key, { ...request, createdAt: remoteNow(), retries: request.retries || 0, generation: remoteStore.roomGeneration });
+  function publicationMatchesEnvelope(memberNumber, envelope) {
+    const publication = getRemotePublication(memberNumber);
+    return !!publication && publication.session === envelope.s && publication.revision === envelope.r && publication.hash === envelope.h && publication.count === envelope.n;
   }
 
-  function clearPendingRequest(memberNumber, requestId = null) {
-    const key = remotePeerKey(memberNumber);
-    const pending = remoteStore.pendingRequests.get(key);
-    if (pending && (requestId == null || pending.requestId === requestId)) remoteStore.pendingRequests.delete(key);
+  function markRemoteObjectWanted(memberNumber, hash) {
+    const key = remoteObjectKey(memberNumber, hash);
+    remoteStore.wantedObjects.add(key);
+    return key;
   }
 
-  function assemblyKey(memberNumber) { return remotePeerKey(memberNumber); }
+  function noteRemoteWantAnnouncement(memberNumber, hash) {
+    const key = remoteObjectKey(memberNumber, hash);
+    const existed = remoteStore.announcedWants.has(key);
+    remoteStore.announcedWants.add(key);
+    if (existed) remoteStore.stats.wantsSuppressed++;
+    return !existed;
+  }
 
-  function addRemoteChunk(memberNumber, envelope, now = remoteNow()) {
-    const key = assemblyKey(memberNumber);
-    const pending = pendingRequestFor(key);
-    if (!pending || pending.generation !== remoteStore.roomGeneration || pending.requestId !== envelope.requestId || pending.session !== envelope.session || pending.revision !== envelope.revision || pending.hash !== envelope.hash) throw new Error("remote-unsolicited-chunk");
+  function hasRemoteObject(hash) { return remoteStore.objectCache.has(hash); }
+
+  function addRemoteDataChunk(memberNumber, envelope, now = remoteNow()) {
+    const member = remotePeerKey(memberNumber);
+    if (!publicationMatchesEnvelope(member, envelope)) throw new Error("remote-unsolicited-data");
+    const publication = getRemotePublication(member);
+    const key = remoteObjectKey(member, envelope.h);
     let assembly = remoteStore.assemblies.get(key);
     if (!assembly) {
-      if (remoteStore.assemblies.size >= 4) throw new Error("remote-assembly-room-limit");
-      assembly = { requestId: envelope.requestId, session: envelope.session, revision: envelope.revision, hash: envelope.hash, count: envelope.count, parts: new Map(), encodedBytes: 0, startedAt: now, generation: remoteStore.roomGeneration };
+      if (remoteStore.assemblies.size >= 8) throw new Error("remote-assembly-room-limit");
+      assembly = {
+        memberNumber: member, session: envelope.s, revision: envelope.r, hash: envelope.h,
+        count: envelope.n, compressedBytes: publication.compressedBytes,
+        parts: new Map(), encodedChars: 0, startedAt: now, lastProgressAt: now,
+        generation: remoteStore.roomGeneration, repairAttempts: 0,
+      };
       remoteStore.assemblies.set(key, assembly);
-      const generation = remoteStore.roomGeneration;
-      const requestId = envelope.requestId;
-      scheduleRemoteTimer(() => {
-        if (generation !== remoteStore.roomGeneration) return;
-        const current = remoteStore.assemblies.get(key);
-        if (current?.requestId === requestId && remoteNow() - current.startedAt >= 20000) {
-          remoteStore.assemblies.delete(key);
-          remoteStore.stats.chunksExpired++;
-        }
-      }, 20000);
     }
-    if (assembly.requestId !== envelope.requestId || assembly.count !== envelope.count || assembly.hash !== envelope.hash) {
+    if (assembly.session !== envelope.s || assembly.revision !== envelope.r || assembly.count !== envelope.n) {
       remoteStore.assemblies.delete(key);
       throw new Error("remote-assembly-conflict");
     }
-    if (envelope.index >= assembly.count) throw new Error("remote-chunk-index");
-    const existing = assembly.parts.get(envelope.index);
+    const existing = assembly.parts.get(envelope.i);
     if (existing != null) {
-      if (existing === envelope.data) return { status: "duplicate", charged: 0 };
+      if (existing === envelope.d) return { status: "duplicate", charged: 0, assembly };
       remoteStore.assemblies.delete(key);
       throw new Error("remote-chunk-conflict");
     }
-    assembly.parts.set(envelope.index, envelope.data);
-    assembly.encodedBytes += envelope.data.length;
-    if (assembly.encodedBytes > REMOTE_LIMITS.chunks * REMOTE_LIMITS.chunkData) {
+    assembly.parts.set(envelope.i, envelope.d);
+    assembly.encodedChars += envelope.d.length;
+    assembly.lastProgressAt = now;
+    if (assembly.encodedChars > Math.ceil(REMOTE_LIMITS.compressedBytes * 4 / 3) + 4) {
       remoteStore.assemblies.delete(key);
       throw new Error("remote-assembly-budget");
     }
-    if (assembly.parts.size !== assembly.count) return { status: "partial", charged: envelope.data.length };
+    if (assembly.parts.size !== assembly.count) return { status: "partial", charged: envelope.d.length, assembly };
     const encoded = Array.from({ length: assembly.count }, (_, index) => assembly.parts.get(index)).join("");
     remoteStore.assemblies.delete(key);
-    return { status: "complete", charged: envelope.data.length, encoded };
+    return { status: "complete", charged: envelope.d.length, encoded, assembly };
+  }
+
+  function missingRemoteDataIndexes(memberNumber, hash) {
+    const assembly = remoteStore.assemblies.get(remoteObjectKey(memberNumber, hash));
+    if (!assembly) return [];
+    return Array.from({ length: assembly.count }, (_, index) => index).filter(index => !assembly.parts.has(index));
   }
 
   function expireRemoteAssemblies(now = remoteNow()) {
     let expired = 0;
     for (const [key, assembly] of remoteStore.assemblies) {
-      if (now - assembly.startedAt > 20000) {
+      if (now - assembly.lastProgressAt > 30000) {
         remoteStore.assemblies.delete(key);
         expired++;
       }
@@ -5647,31 +5992,66 @@
     return expired;
   }
 
-  function acceptRemoteSnapshot(memberNumber, identity, snapshot, canonical) {
-    const key = remotePeerKey(memberNumber);
+  function cacheRemoteObject(hash, snapshot, canonical) {
     const bytes = utf8Bytes(canonical);
-    const previous = remoteStore.activeSnapshots.get(key);
+    const previous = remoteStore.objectCache.get(hash);
     const nextTotal = remoteStore.totalBytes - (previous?.bytes || 0) + bytes;
     if (nextTotal > 262144) throw new Error("remote-room-byte-budget");
-    const pending = pendingRequestFor(key);
-    remoteStore.activeSnapshots.set(key, { identity, session: pending?.session || null, revision: pending?.revision ?? null, hash: pending?.hash || null, snapshot, canonical, bytes, acceptedAt: remoteNow() });
+    const object = { hash, snapshot, canonical, bytes, acceptedAt: remoteNow() };
+    remoteStore.objectCache.set(hash, object);
     remoteStore.totalBytes = nextTotal;
-    clearPendingRequest(key);
-    return snapshot;
+    return object;
+  }
+
+  function activateRemoteObject(memberNumber, publication, object) {
+    const key = remotePeerKey(memberNumber);
+    remoteStore.activeSnapshots.set(key, {
+      identity: `${remoteStore.roomGeneration}:${key}:${publication.session}`,
+      session: publication.session, revision: publication.revision, hash: publication.hash,
+      snapshot: object.snapshot, canonical: object.canonical, bytes: object.bytes, acceptedAt: remoteNow(),
+    });
+    remoteStore.wantedObjects.delete(remoteObjectKey(key, publication.hash));
+    remoteStore.stats.publicationsAccepted++;
+    return object.snapshot;
+  }
+
+  function activateCachedRemoteObject(memberNumber, publication) {
+    const object = remoteStore.objectCache.get(publication.hash);
+    if (!object) return null;
+    remoteStore.stats.cacheHits++;
+    return activateRemoteObject(memberNumber, publication, object);
+  }
+
+  function acceptRemoteSnapshot(memberNumber, publication, snapshot, canonical) {
+    const object = cacheRemoteObject(publication.hash, snapshot, canonical);
+    return activateRemoteObject(memberNumber, publication, object);
+  }
+
+  function revokeRemotePublication(memberNumber, session, revision = null) {
+    const key = remotePeerKey(memberNumber);
+    const publication = getRemotePublication(key);
+    if (publication && publication.session !== session) throw new Error("remote-revoke-session");
+    if (publication && revision != null && revision < publication.revision) return false;
+    remoteStore.publications.delete(key);
+    remoteStore.activeSnapshots.delete(key);
+    for (const assemblyKey of [...remoteStore.assemblies.keys()]) if (assemblyKey.startsWith(`${key}:`)) remoteStore.assemblies.delete(assemblyKey);
+    for (const wanted of [...remoteStore.wantedObjects]) if (wanted.startsWith(`${key}:`)) remoteStore.wantedObjects.delete(wanted);
+    syntheticByCharacter = new WeakMap();
+    return true;
   }
 
   function clearRemoteMember(memberNumber) {
     const key = remotePeerKey(memberNumber);
-    const previous = remoteStore.activeSnapshots.get(key);
-    if (previous) remoteStore.totalBytes -= previous.bytes;
-    remoteStore.peers.delete(key);
-    remoteStore.pendingRequests.delete(key);
-    remoteStore.assemblies.delete(key);
+    remoteStore.publications.delete(key);
+    remoteStore.discoveries.delete(key);
     remoteStore.activeSnapshots.delete(key);
     remoteStore.senderBuckets.delete(key);
-    remoteStore.responseTimes.delete(key);
-    remoteStore.requestTimes.delete(key);
-    for (const identity of remoteStore.helloReplied) if (identity.includes(`:${key}:`)) remoteStore.helloReplied.delete(identity);
+    for (const collection of [remoteStore.assemblies, remoteStore.dataMessageCounts]) {
+      for (const objectKey of [...collection.keys()]) if (objectKey.startsWith(`${key}:`)) collection.delete(objectKey);
+    }
+    for (const collection of [remoteStore.wantedObjects, remoteStore.announcedWants, remoteStore.wantRetryScheduled]) {
+      for (const objectKey of [...collection]) if (objectKey.startsWith(`${key}:`)) collection.delete(objectKey);
+    }
     syntheticByCharacter = new WeakMap();
   }
 
@@ -5683,59 +6063,56 @@
 
 
 
-  let remoteSendQueue = [];
-  let remoteSendTimer = 0;
-  let remoteSendTokens = 2;
-  let remoteSendTokenAt = 0;
   let remoteMessageHandlerDispose = null;
+  let remoteMessageHandlerRetryTimer = 0;
 
   function remoteRoomMember(memberNumber) {
     return (globalThis.ChatRoomCharacter || []).find(character => Number(character?.MemberNumber) === Number(memberNumber)) || null;
   }
 
   function cancelRemoteTransport() {
-    remoteSendQueue = [];
-    if (remoteSendTimer) {
-      clearTimeout(remoteSendTimer);
-      remoteStore.timers.delete(remoteSendTimer);
-    }
-    remoteSendTimer = 0;
+    // RVP/1 hands complete publication batches directly to BC's native queue.
+    // There is no plugin-owned timer queue to cancel; room generation invalidates
+    // all asynchronous protocol work in the controller and store.
   }
 
-  function enqueueRemoteEnvelope(envelope, target = null, options = {}) {
+  function enqueueRemoteEnvelope(envelope, target = null) {
     const content = serializeRemoteEnvelope(envelope);
-    remoteSendQueue.push({ content, target: Number.isInteger(target) ? target : null, generation: remoteStore.roomGeneration, earliest: Math.max(remoteNow(), Number(options.earliest) || 0) });
-    pumpRemoteSendQueue();
-  }
-
-  function pumpRemoteSendQueue() {
-    if (remoteSendTimer || !remoteSendQueue.length) return;
-    const now = remoteNow();
-    if (!remoteSendTokenAt) remoteSendTokenAt = now;
-    remoteSendTokens = Math.min(2, remoteSendTokens + Math.max(0, now - remoteSendTokenAt) * 2.5 / 1000);
-    remoteSendTokenAt = now;
-    while (remoteSendQueue.length && remoteSendQueue[0].generation !== remoteStore.roomGeneration) remoteSendQueue.shift();
-    if (!remoteSendQueue.length) return;
-    const entry = remoteSendQueue[0];
-    const delay = Math.max(entry.earliest - now, remoteSendTokens >= 1 ? 0 : Math.ceil((1 - remoteSendTokens) / 2.5 * 1000));
-    if (delay > 0) {
-      remoteSendTimer = scheduleRemoteTimer(() => { remoteSendTimer = 0; pumpRemoteSendQueue(); }, delay);
-      return;
-    }
-    remoteSendQueue.shift();
-    remoteSendTokens -= 1;
     try {
-      const packet = { Type: "Hidden", Content: entry.content };
-      if (entry.target != null) packet.Target = entry.target;
+      const packet = { Type: "Hidden", Content: content };
+      if (Number.isInteger(target)) packet.Target = target;
       ServerSend("ChatRoomChat", packet);
       remoteStore.stats.messagesSent++;
-      remoteStore.stats.bytesSent += utf8Bytes(entry.content);
+      remoteStore.stats.bytesSent += utf8Bytes(content);
+      return true;
     } catch (error) {
-      remoteDiagnostic("send-failed", entry.target, error?.message || error);
+      remoteDiagnostic("send-failed", target, error?.message || error);
+      return false;
     }
-    if (remoteSendQueue.length) {
-      remoteSendTimer = scheduleRemoteTimer(() => { remoteSendTimer = 0; pumpRemoteSendQueue(); }, 0);
+  }
+
+  function enqueueRemoteDataBatch(baseEnvelope, chunks, target = null, indexes = null) {
+    if (!Array.isArray(chunks) || !chunks.length) return 0;
+    const selected = Array.isArray(indexes) ? [...new Set(indexes)] : chunks.map((_, index) => index);
+    let sent = 0;
+    for (const index of selected) {
+      if (!Number.isInteger(index) || index < 0 || index >= chunks.length) continue;
+      if (enqueueRemoteEnvelope({ ...baseEnvelope, t: "X", i: index, n: chunks.length, d: chunks[index] }, target)) sent++;
     }
+    return sent;
+  }
+
+  function acceptPublishedRemoteData(senderNumber, envelope) {
+    if (!publicationMatchesEnvelope(senderNumber, envelope)) return false;
+    const key = remoteObjectKey(senderNumber, envelope.h);
+    const count = remoteStore.dataMessageCounts.get(key) || 0;
+    if (count >= envelope.n * 2 + 4) return false;
+    remoteStore.dataMessageCounts.set(key, count + 1);
+    return true;
+  }
+
+  function clearRemoteDataBudget(senderNumber, hash) {
+    remoteStore.dataMessageCounts.delete(remoteObjectKey(senderNumber, hash));
   }
 
   function onRemoteMessage(data) {
@@ -5752,15 +6129,18 @@
         return true;
       }
       if (senderNumber === Number(globalThis.Player?.MemberNumber)) return true;
-      if (!acceptRemoteInboundRate(senderNumber)) {
-        remoteStore.stats.messagesRejected++;
-        return true;
-      }
       let envelope;
       try { envelope = parseRemoteContent(data.Content); }
       catch (error) {
         remoteStore.stats.messagesRejected++;
         remoteDiagnostic("invalid-envelope", senderNumber, error?.message || error);
+        return true;
+      }
+      const accepted = envelope.t === "X"
+        ? acceptPublishedRemoteData(senderNumber, envelope)
+        : acceptRemoteInboundRate(senderNumber);
+      if (!accepted) {
+        remoteStore.stats.messagesRejected++;
         return true;
       }
       remoteStore.stats.messagesReceived++;
@@ -5777,24 +6157,49 @@
   }
 
   function installRemoteMessageHandler() {
-    if (typeof globalThis.ChatRoomRegisterMessageHandler !== "function" || remoteMessageHandlerDispose) return false;
-    remoteMessageHandlerDispose = ChatRoomRegisterMessageHandler({ Description: "COE Remote visual snapshot protocol", Priority: -50, Callback: onRemoteMessage }) || true;
+    if (remoteMessageHandlerDispose) return true;
+    if (typeof globalThis.ChatRoomRegisterMessageHandler !== "function") return false;
+    remoteMessageHandlerDispose = ChatRoomRegisterMessageHandler({ Description: "COE room visual publication protocol", Priority: -50, Callback: onRemoteMessage }) || true;
     return true;
+  }
+
+  function ensureRemoteMessageHandler() {
+    if (installRemoteMessageHandler()) {
+      if (remoteMessageHandlerRetryTimer) clearInterval(remoteMessageHandlerRetryTimer);
+      remoteMessageHandlerRetryTimer = 0;
+      return true;
+    }
+    if (!remoteMessageHandlerRetryTimer) {
+      remoteMessageHandlerRetryTimer = setInterval(() => {
+        if (!installRemoteMessageHandler()) return;
+        clearInterval(remoteMessageHandlerRetryTimer);
+        remoteMessageHandlerRetryTimer = 0;
+      }, 1000);
+      remoteMessageHandlerRetryTimer?.unref?.();
+    }
+    return false;
   }
 
 
 
   const REMOTE_PREFS_PREFIX = "BC.CustomOutfitEditor.RemotePrefs.v1";
+  const REMOTE_PUBLICATION_COHORT_MS = 2000;
   let remotePrefs = { sharingEnabled: false, receivingEnabled: false };
   let localPeerSessionId = "";
   let localRemoteRevision = 0;
   let localRemoteHash = "";
   let localRemoteCanonical = "";
+  let localRemoteEncoded = "";
+  let localRemoteCompressedBytes = 0;
+  let localRemoteChunks = [];
   let localRemoteSnapshot = null;
   let localRemoteBuildToken = 0;
   let localRemoteStateTimer = 0;
-  let localRemoteLastStateKey = "";
+  let localRemoteBuildInFlight = null;
+  let localRemoteDirty = true;
   let localRemotePreviouslyShared = false;
+  let remoteRoomSyncing = false;
+  let localPublicationFlights = new Map();
 
   function remoteRandomId(bytes = 12) {
     const data = new Uint8Array(bytes);
@@ -5820,24 +6225,27 @@
     try { localStorage.setItem(remotePrefsKey(), JSON.stringify({ sharingEnabled: remotePrefs.sharingEnabled === true, receivingEnabled: remotePrefs.receivingEnabled === true })); } catch (_) { /* privacy mode */ }
   }
 
+  function clearActiveRemotePublications() {
+    const members = [...remoteStore.activeSnapshots.keys()];
+    remoteStore.activeSnapshots.clear();
+    remoteStore.assemblies.clear();
+    remoteStore.wantedObjects.clear();
+    remoteStore.announcedWants.clear();
+    remoteStore.wantRetryScheduled.clear();
+    syntheticByCharacter = new WeakMap();
+    for (const memberNumber of members) {
+      const character = remoteRoomMember(memberNumber);
+      if (character) CharacterRefresh(character, false, false);
+    }
+  }
+
   function setRemotePrefs(next) {
     const previous = remotePrefs;
     remotePrefs = { sharingEnabled: next.sharingEnabled === true, receivingEnabled: next.receivingEnabled === true };
     saveRemotePrefs();
-    if (!remotePrefs.receivingEnabled && previous.receivingEnabled) {
-      for (const memberNumber of [...remoteStore.activeSnapshots.keys()]) {
-        remoteStore.activeSnapshots.delete(memberNumber);
-        const character = remoteRoomMember(memberNumber);
-        if (character) CharacterRefresh(character, false, false);
-      }
-      remoteStore.pendingRequests.clear();
-      remoteStore.assemblies.clear();
-      remoteStore.totalBytes = 0;
-      syntheticByCharacter = new WeakMap();
-    } else if (remotePrefs.receivingEnabled && !previous.receivingEnabled) {
-      for (const [memberNumber, peer] of remoteStore.peers) maybeRequestRemoteSnapshot(memberNumber, peer);
-    }
-    if (!remotePrefs.sharingEnabled && previous.sharingEnabled) sendRemoteClear();
+    if (!remotePrefs.receivingEnabled && previous.receivingEnabled) clearActiveRemotePublications();
+    if (remotePrefs.receivingEnabled && !previous.receivingEnabled) sendRemoteDiscover();
+    if (!remotePrefs.sharingEnabled && previous.sharingEnabled) sendRemoteRevoke();
     scheduleLocalRemoteBuild(true);
     return { ...remotePrefs };
   }
@@ -5846,14 +6254,12 @@
     if (!activeComposition) return { v: 1, m: [], l: [] };
     const composition = normalizeComposition(activeComposition);
     const visibleMaterials = [];
-    const materialIndexes = new Map();
     const layers = [];
     for (const material of composition.materials) {
       if (material.hidden || (material.wearGroup && !isTagEquipped(globalThis.Player, material.wearGroup))) continue;
       const refs = composition.layers.filter(ref => ref.materialId === material.id && !ref.hidden);
       if (!refs.length) continue;
       const index = visibleMaterials.length;
-      materialIndexes.set(material.id, index);
       const compact = { g: material.sourceGroup, a: material.sourceAsset, c: sanitizeColorArray(material.colors) };
       if (material.wearGroup) compact.w = material.wearGroup;
       if (typeof material.overallRotation === "number") compact.r = material.overallRotation;
@@ -5866,34 +6272,101 @@
       if (Object.keys(property).length) compact.p = property;
       visibleMaterials.push(compact);
       for (const ref of refs) {
-        var snapshotLayer = { m: index, n: ref.sourceLayer == null ? null : ref.sourceLayer, i: Number.isInteger(ref.sourceLayerIndex) ? ref.sourceLayerIndex : 0, p: ref.priority, x: ref.offsetX, y: ref.offsetY, o: ref.opacity };
-        if (typeof ref.rotation === "number" && ref.rotation !== 0) snapshotLayer.r = ref.rotation;
-        if (typeof ref.scale === "number" && Math.abs(ref.scale - 1) > 0.001) snapshotLayer.s = ref.scale;
-        if (ref.mirrorX === true) snapshotLayer.h = true;
-        if (ref.mirrorY === true) snapshotLayer.v = true;
-        layers.push(snapshotLayer);
+        const layer = { m: index, n: ref.sourceLayer == null ? null : ref.sourceLayer, i: Number.isInteger(ref.sourceLayerIndex) ? ref.sourceLayerIndex : 0, p: ref.priority, x: ref.offsetX, y: ref.offsetY, o: ref.opacity };
+        if (typeof ref.rotation === "number" && ref.rotation !== 0) layer.r = ref.rotation;
+        if (typeof ref.scale === "number" && Math.abs(ref.scale - 1) > 0.001) layer.s = ref.scale;
+        if (ref.mirrorX === true) layer.h = true;
+        if (ref.mirrorY === true) layer.v = true;
+        layers.push(layer);
       }
     }
     return validateRemoteSnapshot({ v: 1, m: visibleMaterials, l: layers });
   }
 
-  function scheduleLocalRemoteBuild(forceState = false) {
-    if (localRemoteStateTimer) {
-      clearTimeout(localRemoteStateTimer);
-      remoteStore.timers.delete(localRemoteStateTimer);
-    }
+  function cancelLocalRemoteBuildTimer() {
+    if (!localRemoteStateTimer) return;
+    clearTimeout(localRemoteStateTimer);
+    remoteStore.timers.delete(localRemoteStateTimer);
+    localRemoteStateTimer = 0;
+  }
+
+  function recordLocalRemoteBuildFailure(error) {
+    remoteDiagnostic("local-build-failed", null, error?.message || error);
+    if (localRemotePreviouslyShared) sendRemoteRevoke();
+  }
+
+  function scheduleLocalRemoteBuild(forcePublication = false) {
+    cancelLocalRemoteBuildTimer();
+    localRemoteDirty = true;
     const generation = remoteStore.roomGeneration;
     const token = ++localRemoteBuildToken;
     localRemoteStateTimer = scheduleRemoteTimer(() => {
       localRemoteStateTimer = 0;
-      updateLocalRemoteSnapshot(generation, token, forceState).catch(error => {
-        remoteDiagnostic("local-build-failed", null, error?.message || error);
-        if (localRemotePreviouslyShared) sendRemoteClear();
+      const record = { generation, token, promise: null };
+      record.promise = updateLocalRemoteSnapshot(generation, token, forcePublication).catch(error => {
+        recordLocalRemoteBuildFailure(error);
+        return false;
+      }).finally(() => {
+        if (localRemoteBuildInFlight === record) localRemoteBuildInFlight = null;
       });
+      localRemoteBuildInFlight = record;
     }, 500);
   }
 
-  async function updateLocalRemoteSnapshot(generation = remoteStore.roomGeneration, token = ++localRemoteBuildToken, forceState = false) {
+  function ensureFreshLocalRemoteSnapshot(generation) {
+    if (generation !== remoteStore.roomGeneration) return Promise.resolve(false);
+    if (!localRemoteDirty && localRemoteSnapshot !== null) return Promise.resolve(true);
+    if (localRemoteBuildInFlight && localRemoteBuildInFlight.generation === generation && localRemoteBuildInFlight.token === localRemoteBuildToken) return localRemoteBuildInFlight.promise;
+    const token = localRemoteStateTimer ? localRemoteBuildToken : ++localRemoteBuildToken;
+    cancelLocalRemoteBuildTimer();
+    const record = { generation, token, promise: null };
+    record.promise = updateLocalRemoteSnapshot(generation, token, false, true).catch(error => {
+      recordLocalRemoteBuildFailure(error);
+      return false;
+    }).finally(() => {
+      if (localRemoteBuildInFlight === record) localRemoteBuildInFlight = null;
+    });
+    localRemoteBuildInFlight = record;
+    return record.promise;
+  }
+
+  function currentRemoteAdvertiseEnvelope(includeInline = true) {
+    if (!localRemoteHash || !localRemoteCanonical || !localRemoteChunks.length) return null;
+    const envelope = {
+      t: "A", s: localPeerSessionId, r: localRemoteRevision, h: localRemoteHash,
+      u: utf8Bytes(localRemoteCanonical), z: localRemoteCompressedBytes, n: localRemoteChunks.length,
+    };
+    if (includeInline && localRemoteChunks.length === 1 && localRemoteEncoded.length <= REMOTE_LIMITS.inlineData) envelope.d = localRemoteEncoded;
+    return envelope;
+  }
+
+  function sendRemoteDiscover() {
+    if (!localPeerSessionId) return false;
+    return enqueueRemoteEnvelope({ t: "D", s: localPeerSessionId, rx: remotePrefs.receivingEnabled, e: REMOTE_ENCODING });
+  }
+
+  function sendRemoteRevoke() {
+    if (!localPeerSessionId) return false;
+    localRemotePreviouslyShared = false;
+    localPublicationFlights.clear();
+    return enqueueRemoteEnvelope({ t: "R", s: localPeerSessionId, r: localRemoteRevision });
+  }
+
+  function sendLocalRemoteAdvertisement(target = null) {
+    if (!remotePrefs.sharingEnabled) return false;
+    const envelope = currentRemoteAdvertiseEnvelope(true);
+    if (!envelope) return false;
+    localRemotePreviouslyShared = true;
+    return enqueueRemoteEnvelope(envelope, target);
+  }
+
+  function announceLocalRemotePublication(target = null, generation = remoteStore.roomGeneration) {
+    if (generation !== remoteStore.roomGeneration) return Promise.resolve(false);
+    if (!localRemoteDirty && localRemoteSnapshot !== null) return Promise.resolve(sendLocalRemoteAdvertisement(target));
+    return ensureFreshLocalRemoteSnapshot(generation).then(updated => updated ? sendLocalRemoteAdvertisement(target) : false);
+  }
+
+  async function updateLocalRemoteSnapshot(generation = remoteStore.roomGeneration, token = ++localRemoteBuildToken, forcePublication = false, suppressPublication = false) {
     let snapshot;
     try { snapshot = buildLocalRemoteSnapshot(); }
     catch (error) {
@@ -5901,182 +6374,211 @@
       throw error;
     }
     const canonical = canonicalRemoteSnapshot(snapshot);
-    const hash = snapshot.l.length ? await sha256Base64Url(canonical) : "";
+    let encoded = "";
+    let compressedBytes = 0;
+    let chunks = [];
+    let hash = "";
+    if (snapshot.l.length) {
+      const compressed = await encodeRemoteText(canonical);
+      encoded = compressed.encoded;
+      compressedBytes = compressed.compressedBytes;
+      chunks = splitRemoteData(encoded);
+      hash = await sha256Base64Url(canonical);
+    }
     if (generation !== remoteStore.roomGeneration || token !== localRemoteBuildToken) return false;
     const changed = hash !== localRemoteHash;
     if (changed) localRemoteRevision++;
     localRemoteSnapshot = snapshot;
     localRemoteCanonical = canonical;
+    localRemoteEncoded = encoded;
+    localRemoteCompressedBytes = compressedBytes;
+    localRemoteChunks = chunks;
     localRemoteHash = hash;
+    localRemoteDirty = false;
+    if (changed) localPublicationFlights.clear();
+    if (suppressPublication) return true;
     if (!snapshot.l.length) {
-      if (localRemotePreviouslyShared) sendRemoteClear();
-      sendRemoteState(null, true);
+      if (localRemotePreviouslyShared) sendRemoteRevoke();
       return true;
     }
-    if (remotePrefs.sharingEnabled) {
-      localRemotePreviouslyShared = true;
-      sendRemoteState(null, forceState || changed);
-    } else if (forceState) sendRemoteState(null, true);
+    if (remotePrefs.sharingEnabled && (changed || forcePublication)) sendLocalRemoteAdvertisement();
     return true;
   }
 
-  function currentRemoteStateEnvelope() {
-    const sharing = remotePrefs.sharingEnabled && !!localRemoteHash && !!localRemoteSnapshot?.l.length;
-    return { t: "STATE", s: localPeerSessionId, r: localRemoteRevision, h: sharing ? localRemoteHash : "", z: sharing ? utf8Bytes(localRemoteCanonical) : 0, sharing };
+  function sendLocalRemoteData(target = null, indexes = null) {
+    if (!remotePrefs.sharingEnabled || !localRemoteHash || !localRemoteChunks.length) return 0;
+    return enqueueRemoteDataBatch({ s: localPeerSessionId, r: localRemoteRevision, h: localRemoteHash }, localRemoteChunks, target, indexes);
   }
 
-  function sendRemoteState(target = null, force = false) {
-    if (!localPeerSessionId) return;
-    const envelope = currentRemoteStateEnvelope();
-    const key = `${target ?? "*"}|${envelope.s}|${envelope.r}|${envelope.h}|${envelope.sharing}`;
-    if (!force && key === localRemoteLastStateKey) return;
-    if (target == null) localRemoteLastStateKey = key;
-    enqueueRemoteEnvelope(envelope, target);
-  }
-
-  function sendRemoteClear() {
-    if (!localPeerSessionId) return;
-    enqueueRemoteEnvelope({ t: "CLEAR", s: localPeerSessionId });
-    localRemotePreviouslyShared = false;
-    localRemoteLastStateKey = "";
-  }
-
-  function maybeRequestRemoteSnapshot(memberNumber, peer) {
-    if (!remotePrefs.receivingEnabled || !peer.sharing || !peer.hash || peer.size > REMOTE_LIMITS.snapshotBytes) return false;
-    const active = remoteStore.activeSnapshots.get(memberNumber);
-    if (active?.identity === remoteIdentity(memberNumber, peer.session) && active.revision === peer.revision && active.hash === peer.hash) return false;
-    const pending = pendingRequestFor(memberNumber);
-    if (pending && pending.session === peer.session && pending.revision === peer.revision && pending.hash === peer.hash) return false;
-    const pendingIsStale = !!pending;
-    if (pendingIsStale) {
-      clearPendingRequest(memberNumber, pending.requestId);
-      remoteStore.assemblies.delete(remotePeerKey(memberNumber));
-    }
+  function respondToRemoteWant(requester, envelope) {
+    if (envelope.o !== Number(globalThis.Player?.MemberNumber) || envelope.s !== localPeerSessionId || envelope.r !== localRemoteRevision || envelope.h !== localRemoteHash) return false;
+    if (!remotePrefs.sharingEnabled || !localRemoteChunks.length) return false;
     const now = remoteNow();
-    if (!pendingIsStale && now - (remoteStore.requestTimes.get(memberNumber) || 0) < 5000) return false;
-    const request = { requestId: remoteRandomId(9), session: peer.session, revision: peer.revision, hash: peer.hash, retries: 0 };
-    setPendingRequest(memberNumber, request);
-    remoteStore.requestTimes.set(memberNumber, now);
-    enqueueRemoteEnvelope({ t: "REQUEST", requestId: request.requestId, session: request.session, revision: request.revision, hash: request.hash }, memberNumber);
-    scheduleRemoteRequestTimeout(memberNumber, request, remoteStore.roomGeneration);
+    const previous = localPublicationFlights.get(envelope.h);
+    if (!previous) {
+      localPublicationFlights.set(envelope.h, { broadcastAt: now });
+      sendLocalRemoteData();
+      return true;
+    }
+    if (now - previous.broadcastAt <= REMOTE_PUBLICATION_COHORT_MS) return true;
+    sendLocalRemoteData(Number(requester.MemberNumber));
     return true;
   }
 
-  function scheduleRemoteRequestTimeout(memberNumber, request, generation) {
-    scheduleRemoteTimer(() => {
-      if (generation !== remoteStore.roomGeneration) return;
-      const pending = pendingRequestFor(memberNumber);
-      if (!pending || pending.requestId !== request.requestId) return;
-      remoteStore.assemblies.delete(memberNumber);
-      if (pending.retries >= 1) {
-        clearPendingRequest(memberNumber, pending.requestId);
-        remoteDiagnostic("request-timeout", memberNumber);
-        return;
-      }
-      const retry = { ...pending, requestId: remoteRandomId(9), retries: pending.retries + 1 };
-      setPendingRequest(memberNumber, retry);
-      enqueueRemoteEnvelope({ t: "REQUEST", requestId: retry.requestId, session: retry.session, revision: retry.revision, hash: retry.hash }, memberNumber);
-      scheduleRemoteRequestTimeout(memberNumber, retry, generation);
-    }, 12000);
-  }
-
-  async function handleRemoteEnvelope(sender, envelope, generation) {
-    if (generation !== remoteStore.roomGeneration) return;
-    const memberNumber = Number(sender.MemberNumber);
-    if (envelope.t === "STATE") {
-      const previous = getRemotePeer(memberNumber);
-      const result = setRemotePeer(memberNumber, { session: envelope.s, revision: envelope.r, hash: envelope.h, size: envelope.z, sharing: envelope.sharing });
-      const identity = remoteIdentity(memberNumber, envelope.s);
-      if (result.isNewSession) {
-        const active = remoteStore.activeSnapshots.get(memberNumber);
-        if (active) remoteStore.totalBytes -= active.bytes;
-        remoteStore.activeSnapshots.delete(memberNumber);
-        clearPendingRequest(memberNumber);
-        remoteStore.assemblies.delete(memberNumber);
-        syntheticByCharacter = new WeakMap();
-        if (active) CharacterRefresh(sender, false, false);
-      }
-      if (!remoteStore.helloReplied.has(identity)) {
-        remoteStore.helloReplied.add(identity);
-        sendRemoteState(memberNumber, true);
-      }
-      if (!envelope.sharing) {
-        const active = remoteStore.activeSnapshots.get(memberNumber);
-        if (active) remoteStore.totalBytes -= active.bytes;
-        remoteStore.activeSnapshots.delete(memberNumber);
-        clearPendingRequest(memberNumber);
-        remoteStore.assemblies.delete(memberNumber);
-        if (active) CharacterRefresh(sender, false, false);
-      } else if (!previous || result.isNewSession || previous.revision !== envelope.r || previous.hash !== envelope.h || previous.sharing !== envelope.sharing) maybeRequestRemoteSnapshot(memberNumber, result.peer);
-      return;
-    }
-    if (envelope.t === "CLEAR") {
-      const peer = getRemotePeer(memberNumber);
-      if (peer && peer.session !== envelope.s) throw new Error("remote-clear-session");
-      if (peer) { peer.sharing = false; peer.size = 0; }
-      const previous = remoteStore.activeSnapshots.get(memberNumber);
-      if (previous) remoteStore.totalBytes -= previous.bytes;
-      remoteStore.activeSnapshots.delete(memberNumber);
-      clearPendingRequest(memberNumber);
-      syntheticByCharacter = new WeakMap();
-      CharacterRefresh(sender, false, false);
-      return;
-    }
-    if (envelope.t === "REQUEST") {
-      if (!remotePrefs.sharingEnabled || envelope.session !== localPeerSessionId || envelope.revision !== localRemoteRevision || envelope.hash !== localRemoteHash || !localRemoteCanonical) return;
-      const now = remoteNow();
-      if (now - (remoteStore.responseTimes.get(memberNumber) || 0) < 10000) return;
-      remoteStore.responseTimes.set(memberNumber, now);
-      const chunks = splitRemoteData(encodeRemoteText(localRemoteCanonical));
-      chunks.forEach((data, index) => enqueueRemoteEnvelope({ t: "CHUNK", requestId: envelope.requestId, session: localPeerSessionId, revision: localRemoteRevision, hash: localRemoteHash, index, count: chunks.length, data }, memberNumber, { earliest: now + index * 400 }));
-      return;
-    }
-    const assembled = addRemoteChunk(memberNumber, envelope);
-    if (assembled.status !== "complete") return;
-    const canonical = decodeRemoteText(assembled.encoded);
-    if (utf8Bytes(canonical) > REMOTE_LIMITS.snapshotBytes) throw new Error("remote-decoded-budget");
+  async function decodeAndAcceptRemotePublication(sender, publication, encoded, generation) {
+    const canonical = await decodeRemoteText(encoded, publication.compressedBytes);
+    if (generation !== remoteStore.roomGeneration) return false;
+    if (utf8Bytes(canonical) !== publication.uncompressedBytes) throw new Error("remote-uncompressed-size");
     let parsed;
     try { parsed = JSON.parse(canonical); } catch (_) { throw new Error("snapshot-json"); }
     const snapshot = validateRemoteSnapshot(parsed);
     const normalizedCanonical = JSON.stringify(snapshot);
     if (normalizedCanonical !== canonical) throw new Error("snapshot-not-canonical");
     const hash = await sha256Base64Url(canonical);
-    if (generation !== remoteStore.roomGeneration) return;
-    const pending = pendingRequestFor(memberNumber);
-    if (!pending || pending.requestId !== envelope.requestId || hash !== pending.hash || hash !== envelope.hash) throw new Error("snapshot-hash");
-    acceptRemoteSnapshot(memberNumber, remoteIdentity(memberNumber, envelope.session), snapshot, canonical);
+    if (generation !== remoteStore.roomGeneration) return false;
+    const current = getRemotePublication(sender.MemberNumber);
+    if (!current || current.session !== publication.session || current.revision !== publication.revision || current.hash !== hash) throw new Error("snapshot-hash");
+    acceptRemoteSnapshot(sender.MemberNumber, current, snapshot, canonical);
+    clearRemoteDataBudget(sender.MemberNumber, hash);
     syntheticByCharacter = new WeakMap();
     CharacterRefresh(sender, false, false);
+    return true;
+  }
+
+  function scheduleRemoteWantRetry(senderNumber, publication, generation) {
+    const key = remoteObjectKey(senderNumber, publication.hash);
+    if (remoteStore.wantRetryScheduled.has(key)) return;
+    remoteStore.wantRetryScheduled.add(key);
+    scheduleRemoteTimer(() => {
+      remoteStore.wantRetryScheduled.delete(key);
+      if (generation !== remoteStore.roomGeneration || !remotePrefs.receivingEnabled) return;
+      const current = getRemotePublication(senderNumber);
+      const active = remoteStore.activeSnapshots.get(senderNumber);
+      if (!current || current.session !== publication.session || current.revision !== publication.revision || current.hash !== publication.hash) return;
+      if (active?.hash === publication.hash || remoteStore.assemblies.has(key)) return;
+      enqueueRemoteEnvelope({ t: "W", o: senderNumber, s: publication.session, r: publication.revision, h: publication.hash });
+    }, 12000);
+  }
+
+  function scheduleRemoteAssemblyRepair(senderNumber, publication, generation) {
+    const key = remoteObjectKey(senderNumber, publication.hash);
+    const assembly = remoteStore.assemblies.get(key);
+    if (!assembly || assembly.repairTimer) return;
+    assembly.repairTimer = scheduleRemoteTimer(() => {
+      if (generation !== remoteStore.roomGeneration) return;
+      const current = remoteStore.assemblies.get(key);
+      if (!current || current.repairAttempts >= 1) return;
+      const missing = missingRemoteDataIndexes(senderNumber, publication.hash);
+      if (!missing.length) return;
+      current.repairAttempts++;
+      enqueueRemoteEnvelope({ t: "N", o: senderNumber, s: publication.session, r: publication.revision, h: publication.hash, m: missing });
+    }, 12000);
+  }
+
+  async function handleRemoteEnvelope(sender, envelope, generation) {
+    if (generation !== remoteStore.roomGeneration) return;
+    const memberNumber = Number(sender.MemberNumber);
+    if (envelope.t === "D") {
+      setRemoteDiscovery(memberNumber, { session: envelope.s, receiving: envelope.rx, encoding: envelope.e });
+      if (envelope.rx) await announceLocalRemotePublication(memberNumber, generation);
+      return;
+    }
+    if (envelope.t === "R") {
+      if (revokeRemotePublication(memberNumber, envelope.s, envelope.r)) CharacterRefresh(sender, false, false);
+      return;
+    }
+    if (envelope.t === "A") {
+      const hadActive = remoteStore.activeSnapshots.has(memberNumber);
+      const result = setRemotePublication(memberNumber, {
+        session: envelope.s, revision: envelope.r, hash: envelope.h,
+        uncompressedBytes: envelope.u, compressedBytes: envelope.z, count: envelope.n,
+      });
+      const publication = result.publication;
+      if (!remotePrefs.receivingEnabled) return;
+      if (activateCachedRemoteObject(memberNumber, publication)) {
+        syntheticByCharacter = new WeakMap();
+        CharacterRefresh(sender, false, false);
+        return;
+      }
+      if (result.changedObject && hadActive) {
+        syntheticByCharacter = new WeakMap();
+        CharacterRefresh(sender, false, false);
+      }
+      markRemoteObjectWanted(memberNumber, publication.hash);
+      if (envelope.d != null) {
+        await decodeAndAcceptRemotePublication(sender, publication, envelope.d, generation);
+        return;
+      }
+      if (noteRemoteWantAnnouncement(memberNumber, publication.hash)) {
+        enqueueRemoteEnvelope({ t: "W", o: memberNumber, s: publication.session, r: publication.revision, h: publication.hash });
+      }
+      scheduleRemoteWantRetry(memberNumber, publication, generation);
+      return;
+    }
+    if (envelope.t === "W") {
+      if (envelope.o === Number(globalThis.Player?.MemberNumber)) {
+        respondToRemoteWant(sender, envelope);
+        return;
+      }
+      const publication = getRemotePublication(envelope.o);
+      if (publication && publication.session === envelope.s && publication.revision === envelope.r && publication.hash === envelope.h) {
+        markRemoteObjectWanted(envelope.o, envelope.h);
+        noteRemoteWantAnnouncement(envelope.o, envelope.h);
+        scheduleRemoteWantRetry(envelope.o, publication, generation);
+      }
+      return;
+    }
+    if (envelope.t === "N") {
+      if (envelope.o !== Number(globalThis.Player?.MemberNumber) || envelope.s !== localPeerSessionId || envelope.r !== localRemoteRevision || envelope.h !== localRemoteHash) return;
+      if (!remotePrefs.sharingEnabled) return;
+      const sent = sendLocalRemoteData(null, envelope.m);
+      if (sent) remoteStore.stats.repairsSent += sent;
+      return;
+    }
+    const publication = getRemotePublication(memberNumber);
+    if (!publication || !remotePrefs.receivingEnabled) return;
+    const assembled = addRemoteDataChunk(memberNumber, envelope);
+    if (assembled.status === "partial") {
+      scheduleRemoteAssemblyRepair(memberNumber, publication, generation);
+      return;
+    }
+    if (assembled.status !== "complete") return;
+    await decodeAndAcceptRemotePublication(sender, publication, assembled.encoded, generation);
   }
 
   function installRemoteLifecycleHooks() {
     modApi.hookFunction("ChatRoomSync", 1000, (args, next) => {
+      ensureRemoteMessageHandler();
       cancelRemoteTransport();
       resetRemoteRoom();
+      localPublicationFlights = new Map();
+      remoteRoomSyncing = true;
       const generation = remoteStore.roomGeneration;
-      const result = next(args);
-      Promise.resolve(result).then(() => { if (generation === remoteStore.roomGeneration) scheduleLocalRemoteBuild(true); }).catch(() => {});
+      let result;
+      try { result = next(args); }
+      catch (error) { remoteRoomSyncing = false; throw error; }
+      Promise.resolve(result).then(async () => {
+        remoteRoomSyncing = false;
+        if (generation !== remoteStore.roomGeneration) return;
+        sendRemoteDiscover();
+        await announceLocalRemotePublication(null, generation);
+      }).catch(() => { remoteRoomSyncing = false; });
       return result;
     });
-    modApi.hookFunction("ChatRoomSyncMemberJoin", 1000, (args, next) => {
-      const result = next(args);
-      const memberNumber = Number(args[0]?.SourceMemberNumber ?? args[0]?.MemberNumber ?? args[0]);
-      const generation = remoteStore.roomGeneration;
-      scheduleRemoteTimer(() => { if (generation === remoteStore.roomGeneration && Number.isInteger(memberNumber)) sendRemoteState(memberNumber, true); }, 100 + Math.floor(Math.random() * 401));
-      return result;
-    });
+    modApi.hookFunction("ChatRoomSyncMemberJoin", 1000, (args, next) => next(args));
     modApi.hookFunction("ChatRoomSyncMemberLeave", 1000, (args, next) => {
       const memberNumber = Number(args[0]?.SourceMemberNumber ?? args[0]?.MemberNumber ?? args[0]);
       const result = next(args);
       if (Number.isInteger(memberNumber)) clearRemoteMember(memberNumber);
       return result;
     });
-    modApi.hookFunction("ChatRoomLeave", 1000, (args, next) => { cancelRemoteTransport(); resetRemoteRoom(); return next(args); });
+    modApi.hookFunction("ChatRoomLeave", 1000, (args, next) => { cancelRemoteTransport(); resetRemoteRoom(); localPublicationFlights = new Map(); return next(args); });
     modApi.hookFunction("ServerDisconnect", 1000, (args, next) => {
       captureSetReconnectIntent();
       invalidateSetPreviewCache();
       cancelRemoteTransport();
       resetRemoteRoom();
+      localPublicationFlights = new Map();
       return next(args);
     });
     modApi.hookFunction("CharacterLoadOnline", 1000, (args, next) => {
@@ -6099,9 +6601,17 @@
     localRemoteRevision = 0;
     localRemoteHash = "";
     localRemoteCanonical = "";
+    localRemoteEncoded = "";
+    localRemoteCompressedBytes = 0;
+    localRemoteChunks = [];
     localRemoteSnapshot = null;
-    if (!installRemoteMessageHandler()) throw new Error("remote-message-handler-unavailable");
+    localRemoteBuildInFlight = null;
+    localRemoteDirty = true;
+    remoteRoomSyncing = false;
+    localPublicationFlights = new Map();
+    const messageHandlerReady = ensureRemoteMessageHandler();
     scheduleLocalRemoteBuild(true);
+    return messageHandlerReady;
   }
 
 
@@ -6254,7 +6764,11 @@
       const readState = loadWardrobe();
       if (readState.status === "deferred") return;
       syncEquippedSchemes();
-      initializeRemoteController();
+      try {
+        if (!initializeRemoteController()) warn("Remote 消息处理器尚不可用，已在后台等待游戏接口就绪");
+      } catch (error) {
+        warn("Remote 初始化失败，本地衣柜仍将继续加载", error);
+      }
       exposeAPI();
       initialized = true;
       setInterval(updateEntryButton, 600);
@@ -6277,18 +6791,36 @@
       computeDefaultOverallCenter, resolveOverallTransform, resolveRenderableOverallTransform, resolveNumericOrigin, transformPointAroundOverallPivot, transformPointAroundOverallPivotAxes,
       stableInsertSyntheticLayers, coeAssetLayerSort: stableInsertSyntheticLayers, analyzeSourceAsset, sanitizePlainRecord,
       scanAlphaBounds, contentBoundsFromBounds, contentPivotFromBounds, resolveTextureContentPivot, resolveTextureContentBounds, cacheOverallLayerGeometry, cachedOverallCenter, buildSyntheticItems, buildLocalSyntheticItems, buildRemoteSyntheticItems, makeSyntheticLayers, syncLocalSyntheticRuntime, requestCharacterRefresh, statusSnapshot,
-      isDrawableLayer, normalizedMaterialColors, normalizePickerColor, nextCopyLayerLabel, localizedPoseLabel, clothingSlotGroups, registerTagAssets, isTagEquipped, equipTagForGroup, activateScheme, combineSchemes, combinedEquippedComposition, validateRemoteSnapshot, canonicalRemoteSnapshot, sha256Base64Url,
+      isDrawableLayer, isMaterialAsset, getMaterialAssets, getMaterialAssetGroups, materialPreviewPath, normalizedMaterialColors, normalizePickerColor, nextCopyLayerLabel, localizedPoseLabel, clothingSlotGroups, registerTagAssets, isTagEquipped, equipTagForGroup, activateScheme, combineSchemes, combinedEquippedComposition, validateRemoteSnapshot, canonicalRemoteSnapshot, sha256Base64Url,
       parseRemoteContent, serializeRemoteEnvelope, encodeRemoteText, decodeRemoteText, splitRemoteData,
-      createRemoteStore, setRemotePeer, setPendingRequest, pendingRequestFor, addRemoteChunk, expireRemoteAssemblies,
-      acceptRemoteSnapshot, clearRemoteMember, onRemoteMessage, handleRemoteEnvelope, buildLocalRemoteSnapshot, updateLocalRemoteSnapshot,
+      createRemoteStore, setRemoteDiscovery, setRemotePublication, getRemotePublication, markRemoteObjectWanted, noteRemoteWantAnnouncement,
+      addRemoteDataChunk, missingRemoteDataIndexes, expireRemoteAssemblies, cacheRemoteObject, activateRemoteObject, activateCachedRemoteObject,
+      acceptRemoteSnapshot, revokeRemotePublication, clearRemoteMember, onRemoteMessage, handleRemoteEnvelope, buildLocalRemoteSnapshot, updateLocalRemoteSnapshot,
+      enqueueRemoteEnvelope, enqueueRemoteDataBatch, cancelRemoteTransport, acceptPublishedRemoteData, clearRemoteDataBudget,
+      installRemoteMessageHandler, ensureRemoteMessageHandler, initializeRemoteController, scheduleLocalRemoteBuild, announceLocalRemotePublication, sendRemoteDiscover,
       getRemoteStoreForTest: () => remoteStore,
-      getLocalRemoteStateForTest: () => ({ session: localPeerSessionId, revision: localRemoteRevision, hash: localRemoteHash, canonical: localRemoteCanonical, snapshot: localRemoteSnapshot, buildToken: localRemoteBuildToken }),
+      getLocalRemoteStateForTest: () => ({ session: localPeerSessionId, revision: localRemoteRevision, hash: localRemoteHash, canonical: localRemoteCanonical, encoded: localRemoteEncoded, compressedBytes: localRemoteCompressedBytes, chunks: localRemoteChunks.slice(), snapshot: localRemoteSnapshot, buildToken: localRemoteBuildToken, dirty: localRemoteDirty }),
       resetRemoteRoomForTest: resetRemoteRoom,
       setRemotePrefsForTest: value => { remotePrefs = { sharingEnabled: value?.sharingEnabled === true, receivingEnabled: value?.receivingEnabled === true }; },
-      setLocalRemoteStateForTest: value => { localPeerSessionId = value.session; localRemoteRevision = value.revision; localRemoteHash = value.hash; localRemoteCanonical = value.canonical; localRemoteSnapshot = value.snapshot; localRemoteBuildToken = value.buildToken ?? localRemoteBuildToken; },
+      setLocalRemoteStateForTest: value => {
+        localPeerSessionId = value.session;
+        localRemoteRevision = value.revision;
+        localRemoteHash = value.hash;
+        localRemoteCanonical = value.canonical;
+        localRemoteEncoded = value.encoded ?? "";
+        localRemoteCompressedBytes = value.compressedBytes ?? 0;
+        localRemoteChunks = value.chunks ?? (localRemoteEncoded ? splitRemoteData(localRemoteEncoded) : []);
+        localRemoteSnapshot = value.snapshot;
+        localRemoteBuildToken = value.buildToken ?? localRemoteBuildToken;
+        localRemoteBuildInFlight = null;
+        localRemoteDirty = value.dirty ?? false;
+      },
       setActiveCompositionForTest: value => { activeComposition = value; },
       setPreviewCompositionForTest: (character, value) => { if (value) previewCompositionByCharacter.set(character, value); else previewCompositionByCharacter.delete(character); },
       trackPreviewTextureForTest: trackPreviewTextureLoad,
+      beginPreviewResourcePassForTest: beginPreviewResourcePass,
+      previewResourcePassSummaryForTest: previewResourcePassSummary,
+      waitForPreviewResourcePassForTest: waitForPreviewResourcePass,
       previewTexturesPendingForTest: previewTexturesPending,
       clearPreviewTextureTrackingForTest: clearPreviewTextureTracking,
       setWardrobeForTest: value => { wardrobe = normalizeWardrobe(value, { validateReferences: false }); },

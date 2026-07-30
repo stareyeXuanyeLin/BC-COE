@@ -1,17 +1,17 @@
-  const REMOTE_PROTOCOL = "COE_RVS/4";
+  const REMOTE_PROTOCOL = "COE_RVP/1";
   const REMOTE_PREFIX = `${REMOTE_PROTOCOL}|`;
+  const REMOTE_ENCODING = "gz";
   const REMOTE_LIMITS = Object.freeze({
-    content: 1800, chunkData: 1200, chunks: 32, snapshotBytes: 32768,
+    content: 1800, inlineData: 1300, chunkData: 1400, chunks: 24,
+    snapshotBytes: 32768, compressedBytes: 24576,
     materialBytes: 8192, materials: 32, layers: 120, string: 64, color: 40,
   });
-  const REMOTE_TYPES = new Set(["STATE", "REQUEST", "CHUNK", "CLEAR"]);
+  const REMOTE_TYPES = new Set(["D", "A", "W", "X", "N", "R"]);
   const POLLUTION_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 
   function remotePlainObject(value) {
     if (!value || Object.prototype.toString.call(value) !== "[object Object]") return false;
     const proto = Object.getPrototypeOf(value);
-    // JSON values created in another realm (tests/iframes) still have a plain
-    // Object prototype whose own prototype is null. Class instances do not.
     return proto === null || proto === Object.prototype || (Object.getPrototypeOf(proto) === null && proto.constructor?.name === "Object");
   }
 
@@ -62,9 +62,7 @@
     if (!remotePlainObject(value)) throw new Error("snapshot-property");
     const allowed = new Set(["Type", "Mirror", "Invert", "TypeRecord"]);
     const output = {};
-    for (const key of Object.keys(value)) {
-      if (!allowed.has(key) || POLLUTION_KEYS.has(key)) throw new Error("snapshot-property-key");
-    }
+    for (const key of Object.keys(value)) if (!allowed.has(key) || POLLUTION_KEYS.has(key)) throw new Error("snapshot-property-key");
     if (value.Type != null) output.Type = remoteString(value.Type, "property-type", 40);
     if (value.Mirror != null) {
       if (typeof value.Mirror !== "boolean") throw new Error("snapshot-property-mirror");
@@ -90,8 +88,7 @@
       if (material.w != null) output.w = remoteString(material.w, "wear-group");
       if (!Array.isArray(material.c) || material.c.length > 40) throw new Error("snapshot-colors");
       output.c = material.c.map(color => remoteString(color, "color", REMOTE_LIMITS.color));
-      const overallFields = [["r", -Math.PI, Math.PI], ["s", 0.25, 3.0], ["x", -1200, 1200], ["y", -1200, 1200]];
-      for (const [key, min, max] of overallFields) {
+      for (const [key, min, max] of [["r", -Math.PI, Math.PI], ["s", 0.25, 3.0], ["x", -1200, 1200], ["y", -1200, 1200]]) {
         if (material[key] == null) continue;
         if (typeof material[key] !== "number" || !Number.isFinite(material[key])) throw new Error(`snapshot-material-${key}`);
         output[key] = normalizeRemoteNumber(material[key], min, max);
@@ -132,9 +129,7 @@
       }
       return output;
     });
-    const snapshot = { v: 1 };
-    snapshot.m = materials;
-    snapshot.l = layers;
+    const snapshot = { v: 1, m: materials, l: layers };
     const canonical = JSON.stringify(snapshot);
     if (utf8Bytes(canonical) > REMOTE_LIMITS.snapshotBytes) throw new Error("snapshot-byte-budget");
     for (let index = 0; index < materials.length; index++) {
@@ -144,15 +139,12 @@
     return snapshot;
   }
 
-  function canonicalRemoteSnapshot(value) {
-    return JSON.stringify(validateRemoteSnapshot(value));
-  }
+  function canonicalRemoteSnapshot(value) { return JSON.stringify(validateRemoteSnapshot(value)); }
 
   async function sha256Base64Url(text) {
     const subtle = globalThis.crypto?.subtle;
     if (!subtle) throw new Error("crypto-subtle-unavailable");
-    const bytes = new TextEncoder().encode(text);
-    const digest = new Uint8Array(await subtle.digest("SHA-256", bytes));
+    const digest = new Uint8Array(await subtle.digest("SHA-256", new TextEncoder().encode(text)));
     return bytesToBase64Url(digest);
   }
 
@@ -162,10 +154,9 @@
     return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
   }
 
-  function base64UrlToBytes(value, maxBytes = REMOTE_LIMITS.snapshotBytes) {
+  function base64UrlToBytes(value, maxBytes = REMOTE_LIMITS.compressedBytes) {
     remoteString(value, "base64url", Math.ceil(maxBytes * 4 / 3) + 4, /^[A-Za-z0-9_-]+$/);
-    const estimated = Math.floor(value.length * 3 / 4);
-    if (estimated > maxBytes) throw new Error("remote-decoded-budget");
+    if (Math.floor(value.length * 3 / 4) > maxBytes) throw new Error("remote-decoded-budget");
     const padded = value.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((value.length + 3) % 4);
     let binary;
     try { binary = atob(padded); } catch (_) { throw new Error("remote-base64url"); }
@@ -173,41 +164,103 @@
     return Uint8Array.from(binary, char => char.charCodeAt(0));
   }
 
-  function encodeRemoteText(text) {
-    return bytesToBase64Url(new TextEncoder().encode(text));
+  async function remoteTransformBytes(bytes, format, outputLimit) {
+    const Constructor = format === "compress" ? globalThis.CompressionStream : globalThis.DecompressionStream;
+    if (typeof Constructor !== "function") throw new Error(`remote-${format}-unavailable`);
+    const stream = new Constructor("gzip");
+    const writer = stream.writable.getWriter();
+    const reader = stream.readable.getReader();
+    const parts = [];
+    let total = 0;
+    const reading = (async () => {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > outputLimit) throw new Error(`remote-${format}-budget`);
+        parts.push(value);
+      }
+      const output = new Uint8Array(total);
+      let offset = 0;
+      for (const part of parts) { output.set(part, offset); offset += part.byteLength; }
+      return output;
+    })();
+    let failure = null;
+    try {
+      await writer.write(bytes);
+      await writer.close();
+    } catch (error) {
+      failure = error;
+      try { await writer.abort(error); } catch (_) { /* closed */ }
+    }
+    let output = null;
+    try { output = await reading; }
+    catch (error) { failure ||= error; }
+    if (failure) {
+      try { await writer.abort(failure); } catch (_) { /* closed */ }
+      try { await reader.cancel(failure); } catch (_) { /* closed */ }
+      const wrapped = new Error(`remote-${format}-data`);
+      wrapped.cause = failure;
+      throw wrapped;
+    }
+    return output;
   }
 
-  function decodeRemoteText(value) {
-    return new TextDecoder("utf-8", { fatal: true }).decode(base64UrlToBytes(value));
+  async function encodeRemoteText(text) {
+    if (typeof text !== "string" || utf8Bytes(text) > REMOTE_LIMITS.snapshotBytes) throw new Error("remote-encode-budget");
+    const compressed = await remoteTransformBytes(new TextEncoder().encode(text), "compress", REMOTE_LIMITS.compressedBytes);
+    return { encoded: bytesToBase64Url(compressed), compressedBytes: compressed.byteLength };
+  }
+
+  async function decodeRemoteText(value, expectedBytes = null) {
+    const compressed = base64UrlToBytes(value);
+    if (expectedBytes != null && compressed.byteLength !== expectedBytes) throw new Error("remote-compressed-size");
+    const output = await remoteTransformBytes(compressed, "decompress", REMOTE_LIMITS.snapshotBytes);
+    return new TextDecoder("utf-8", { fatal: true }).decode(output);
   }
 
   function splitRemoteData(value) {
-    remoteString(value, "chunk-source", REMOTE_LIMITS.chunks * REMOTE_LIMITS.chunkData, /^[A-Za-z0-9_-]+$/);
+    remoteString(value, "chunk-source", Math.ceil(REMOTE_LIMITS.compressedBytes * 4 / 3) + 4, /^[A-Za-z0-9_-]+$/);
     const chunks = [];
     for (let index = 0; index < value.length; index += REMOTE_LIMITS.chunkData) chunks.push(value.slice(index, index + REMOTE_LIMITS.chunkData));
     if (!chunks.length || chunks.length > REMOTE_LIMITS.chunks) throw new Error("remote-chunk-count");
     return chunks;
   }
 
+  function remoteSession(value) { return remoteString(value, "session", 32, /^[A-Za-z0-9_-]+$/); }
+  function remoteHash(value) { return remoteString(value, "hash", 64, /^[A-Za-z0-9_-]+$/); }
+
   function validateRemoteEnvelope(value) {
     remoteAssertTree(value);
     if (!remotePlainObject(value) || !REMOTE_TYPES.has(value.t)) throw new Error("remote-envelope");
-    const allowed = value.t === "STATE" ? new Set(["t", "s", "r", "h", "z", "sharing"])
-      : value.t === "CLEAR" ? new Set(["t", "s"])
-      : value.t === "REQUEST" ? new Set(["t", "requestId", "session", "revision", "hash"])
-      : new Set(["t", "requestId", "session", "revision", "hash", "index", "count", "data"]);
-    for (const key of Object.keys(value)) if (!allowed.has(key)) throw new Error("remote-envelope-key");
-    if (value.t === "STATE") {
-      if (typeof value.sharing !== "boolean") throw new Error("remote-sharing");
-      const state = { t: "STATE", s: remoteString(value.s, "session", 32, /^[A-Za-z0-9_-]+$/), r: remoteInteger(value.r, "revision"), h: value.h === "" ? "" : remoteString(value.h, "hash", 64, /^[A-Za-z0-9_-]+$/), z: remoteInteger(value.z, "size", 0, REMOTE_LIMITS.snapshotBytes), sharing: value.sharing };
-      if (state.sharing !== (!!state.h && state.z > 0)) throw new Error("remote-state-consistency");
-      return state;
+    const allowedByType = {
+      D: new Set(["t", "s", "rx", "e"]), A: new Set(["t", "s", "r", "h", "u", "z", "n", "d"]),
+      W: new Set(["t", "o", "s", "r", "h"]), X: new Set(["t", "s", "r", "h", "i", "n", "d"]),
+      N: new Set(["t", "o", "s", "r", "h", "m"]), R: new Set(["t", "s", "r"]),
+    };
+    for (const key of Object.keys(value)) if (!allowedByType[value.t].has(key)) throw new Error("remote-envelope-key");
+    if (value.t === "D") {
+      if (typeof value.rx !== "boolean" || value.e !== REMOTE_ENCODING) throw new Error("remote-discover");
+      return { t: "D", s: remoteSession(value.s), rx: value.rx, e: REMOTE_ENCODING };
     }
-    if (value.t === "CLEAR") return { t: "CLEAR", s: remoteString(value.s, "session", 32, /^[A-Za-z0-9_-]+$/) };
-    if (value.t === "REQUEST") return { t: "REQUEST", requestId: remoteString(value.requestId, "request-id", 32, /^[A-Za-z0-9_-]+$/), session: remoteString(value.session, "session", 32, /^[A-Za-z0-9_-]+$/), revision: remoteInteger(value.revision, "revision"), hash: remoteString(value.hash, "hash", 64, /^[A-Za-z0-9_-]+$/) };
-    const chunk = { t: "CHUNK", requestId: remoteString(value.requestId, "request-id", 32, /^[A-Za-z0-9_-]+$/), session: remoteString(value.session, "session", 32, /^[A-Za-z0-9_-]+$/), revision: remoteInteger(value.revision, "revision"), hash: remoteString(value.hash, "hash", 64, /^[A-Za-z0-9_-]+$/), index: remoteInteger(value.index, "chunk-index", 0, REMOTE_LIMITS.chunks - 1), count: remoteInteger(value.count, "chunk-count", 1, REMOTE_LIMITS.chunks), data: remoteString(value.data, "chunk-data", REMOTE_LIMITS.chunkData, /^[A-Za-z0-9_-]+$/) };
-    if (chunk.index >= chunk.count) throw new Error("remote-chunk-index");
-    return chunk;
+    if (value.t === "A") {
+      const result = { t: "A", s: remoteSession(value.s), r: remoteInteger(value.r, "revision"), h: remoteHash(value.h), u: remoteInteger(value.u, "uncompressed-size", 1, REMOTE_LIMITS.snapshotBytes), z: remoteInteger(value.z, "compressed-size", 1, REMOTE_LIMITS.compressedBytes), n: remoteInteger(value.n, "chunk-count", 1, REMOTE_LIMITS.chunks) };
+      if (value.d != null) {
+        result.d = remoteString(value.d, "inline-data", REMOTE_LIMITS.inlineData, /^[A-Za-z0-9_-]+$/);
+        if (result.n !== 1) throw new Error("remote-inline-count");
+      }
+      return result;
+    }
+    if (value.t === "W") return { t: "W", o: remoteInteger(value.o, "owner", 1), s: remoteSession(value.s), r: remoteInteger(value.r, "revision"), h: remoteHash(value.h) };
+    if (value.t === "R") return { t: "R", s: remoteSession(value.s), r: remoteInteger(value.r, "revision") };
+    if (value.t === "N") {
+      if (!Array.isArray(value.m) || !value.m.length || value.m.length > REMOTE_LIMITS.chunks) throw new Error("remote-missing");
+      const missing = [...new Set(value.m.map(index => remoteInteger(index, "missing-index", 0, REMOTE_LIMITS.chunks - 1)))].sort((a, b) => a - b);
+      return { t: "N", o: remoteInteger(value.o, "owner", 1), s: remoteSession(value.s), r: remoteInteger(value.r, "revision"), h: remoteHash(value.h), m: missing };
+    }
+    const data = { t: "X", s: remoteSession(value.s), r: remoteInteger(value.r, "revision"), h: remoteHash(value.h), i: remoteInteger(value.i, "chunk-index", 0, REMOTE_LIMITS.chunks - 1), n: remoteInteger(value.n, "chunk-count", 1, REMOTE_LIMITS.chunks), d: remoteString(value.d, "chunk-data", REMOTE_LIMITS.chunkData, /^[A-Za-z0-9_-]+$/) };
+    if (data.i >= data.n) throw new Error("remote-chunk-index");
+    return data;
   }
 
   function parseRemoteContent(content) {

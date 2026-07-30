@@ -1,56 +1,53 @@
-  let remoteSendQueue = [];
-  let remoteSendTimer = 0;
-  let remoteSendTokens = 2;
-  let remoteSendTokenAt = 0;
   let remoteMessageHandlerDispose = null;
+  let remoteMessageHandlerRetryTimer = 0;
 
   function remoteRoomMember(memberNumber) {
     return (globalThis.ChatRoomCharacter || []).find(character => Number(character?.MemberNumber) === Number(memberNumber)) || null;
   }
 
   function cancelRemoteTransport() {
-    remoteSendQueue = [];
-    if (remoteSendTimer) {
-      clearTimeout(remoteSendTimer);
-      remoteStore.timers.delete(remoteSendTimer);
-    }
-    remoteSendTimer = 0;
+    // RVP/1 hands complete publication batches directly to BC's native queue.
+    // There is no plugin-owned timer queue to cancel; room generation invalidates
+    // all asynchronous protocol work in the controller and store.
   }
 
-  function enqueueRemoteEnvelope(envelope, target = null, options = {}) {
+  function enqueueRemoteEnvelope(envelope, target = null) {
     const content = serializeRemoteEnvelope(envelope);
-    remoteSendQueue.push({ content, target: Number.isInteger(target) ? target : null, generation: remoteStore.roomGeneration, earliest: Math.max(remoteNow(), Number(options.earliest) || 0) });
-    pumpRemoteSendQueue();
-  }
-
-  function pumpRemoteSendQueue() {
-    if (remoteSendTimer || !remoteSendQueue.length) return;
-    const now = remoteNow();
-    if (!remoteSendTokenAt) remoteSendTokenAt = now;
-    remoteSendTokens = Math.min(2, remoteSendTokens + Math.max(0, now - remoteSendTokenAt) * 2.5 / 1000);
-    remoteSendTokenAt = now;
-    while (remoteSendQueue.length && remoteSendQueue[0].generation !== remoteStore.roomGeneration) remoteSendQueue.shift();
-    if (!remoteSendQueue.length) return;
-    const entry = remoteSendQueue[0];
-    const delay = Math.max(entry.earliest - now, remoteSendTokens >= 1 ? 0 : Math.ceil((1 - remoteSendTokens) / 2.5 * 1000));
-    if (delay > 0) {
-      remoteSendTimer = scheduleRemoteTimer(() => { remoteSendTimer = 0; pumpRemoteSendQueue(); }, delay);
-      return;
-    }
-    remoteSendQueue.shift();
-    remoteSendTokens -= 1;
     try {
-      const packet = { Type: "Hidden", Content: entry.content };
-      if (entry.target != null) packet.Target = entry.target;
+      const packet = { Type: "Hidden", Content: content };
+      if (Number.isInteger(target)) packet.Target = target;
       ServerSend("ChatRoomChat", packet);
       remoteStore.stats.messagesSent++;
-      remoteStore.stats.bytesSent += utf8Bytes(entry.content);
+      remoteStore.stats.bytesSent += utf8Bytes(content);
+      return true;
     } catch (error) {
-      remoteDiagnostic("send-failed", entry.target, error?.message || error);
+      remoteDiagnostic("send-failed", target, error?.message || error);
+      return false;
     }
-    if (remoteSendQueue.length) {
-      remoteSendTimer = scheduleRemoteTimer(() => { remoteSendTimer = 0; pumpRemoteSendQueue(); }, 0);
+  }
+
+  function enqueueRemoteDataBatch(baseEnvelope, chunks, target = null, indexes = null) {
+    if (!Array.isArray(chunks) || !chunks.length) return 0;
+    const selected = Array.isArray(indexes) ? [...new Set(indexes)] : chunks.map((_, index) => index);
+    let sent = 0;
+    for (const index of selected) {
+      if (!Number.isInteger(index) || index < 0 || index >= chunks.length) continue;
+      if (enqueueRemoteEnvelope({ ...baseEnvelope, t: "X", i: index, n: chunks.length, d: chunks[index] }, target)) sent++;
     }
+    return sent;
+  }
+
+  function acceptPublishedRemoteData(senderNumber, envelope) {
+    if (!publicationMatchesEnvelope(senderNumber, envelope)) return false;
+    const key = remoteObjectKey(senderNumber, envelope.h);
+    const count = remoteStore.dataMessageCounts.get(key) || 0;
+    if (count >= envelope.n * 2 + 4) return false;
+    remoteStore.dataMessageCounts.set(key, count + 1);
+    return true;
+  }
+
+  function clearRemoteDataBudget(senderNumber, hash) {
+    remoteStore.dataMessageCounts.delete(remoteObjectKey(senderNumber, hash));
   }
 
   function onRemoteMessage(data) {
@@ -67,15 +64,18 @@
         return true;
       }
       if (senderNumber === Number(globalThis.Player?.MemberNumber)) return true;
-      if (!acceptRemoteInboundRate(senderNumber)) {
-        remoteStore.stats.messagesRejected++;
-        return true;
-      }
       let envelope;
       try { envelope = parseRemoteContent(data.Content); }
       catch (error) {
         remoteStore.stats.messagesRejected++;
         remoteDiagnostic("invalid-envelope", senderNumber, error?.message || error);
+        return true;
+      }
+      const accepted = envelope.t === "X"
+        ? acceptPublishedRemoteData(senderNumber, envelope)
+        : acceptRemoteInboundRate(senderNumber);
+      if (!accepted) {
+        remoteStore.stats.messagesRejected++;
         return true;
       }
       remoteStore.stats.messagesReceived++;
@@ -92,7 +92,25 @@
   }
 
   function installRemoteMessageHandler() {
-    if (typeof globalThis.ChatRoomRegisterMessageHandler !== "function" || remoteMessageHandlerDispose) return false;
-    remoteMessageHandlerDispose = ChatRoomRegisterMessageHandler({ Description: "COE Remote visual snapshot protocol", Priority: -50, Callback: onRemoteMessage }) || true;
+    if (remoteMessageHandlerDispose) return true;
+    if (typeof globalThis.ChatRoomRegisterMessageHandler !== "function") return false;
+    remoteMessageHandlerDispose = ChatRoomRegisterMessageHandler({ Description: "COE room visual publication protocol", Priority: -50, Callback: onRemoteMessage }) || true;
     return true;
+  }
+
+  function ensureRemoteMessageHandler() {
+    if (installRemoteMessageHandler()) {
+      if (remoteMessageHandlerRetryTimer) clearInterval(remoteMessageHandlerRetryTimer);
+      remoteMessageHandlerRetryTimer = 0;
+      return true;
+    }
+    if (!remoteMessageHandlerRetryTimer) {
+      remoteMessageHandlerRetryTimer = setInterval(() => {
+        if (!installRemoteMessageHandler()) return;
+        clearInterval(remoteMessageHandlerRetryTimer);
+        remoteMessageHandlerRetryTimer = 0;
+      }, 1000);
+      remoteMessageHandlerRetryTimer?.unref?.();
+    }
+    return false;
   }

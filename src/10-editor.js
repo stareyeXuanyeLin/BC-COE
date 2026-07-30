@@ -589,43 +589,59 @@
     search.focus();
   }
 
+  function materialPreviewPath(asset) {
+    const rawPath = typeof globalThis.AssetGetPreviewPath === "function"
+      ? `${AssetGetPreviewPath(asset)}/${asset.Name}.png`
+      : `Assets/${asset.Group?.Family || "Female3DCG"}/${asset.DynamicGroupName || asset.Group?.Name}/Preview/${asset.Name}.png`;
+    // Third-party providers normally hook BC's image cache loader rather than
+    // arbitrary DOM <img> requests. Resolve through DrawGetImage first so
+    // image-mapping mods can replace the virtual BC path with a CDN URL.
+    if (typeof globalThis.DrawGetImage === "function") {
+      try {
+        const resolved = DrawGetImage(rawPath);
+        if (typeof resolved?.currentSrc === "string" && resolved.currentSrc) return resolved.currentSrc;
+        if (typeof resolved?.src === "string" && resolved.src) return resolved.src;
+      } catch (error) {
+        warn(`素材预览路径解析失败：${asset.Group?.Name || "?"}/${asset.Name || "?"}`, error);
+      }
+    }
+    return `./${rawPath}`;
+  }
+
   function renderMaterials(list, query) {
     list.innerHTML = "";
-    const assets = getMaterialAssets(query);
-    if (!assets.length) { list.innerHTML = '<div class="coe-empty">没有匹配的已加载素材。</div>'; return; }
-    const groups = new Map();
-    for (const asset of assets) {
-      const groupName = asset.Group?.Description || asset.Group?.Name || "未分类";
-      if (!groups.has(groupName)) groups.set(groupName, []);
-      groups.get(groupName).push(asset);
-    }
+    const groups = getMaterialAssetGroups(query);
+    if (!groups.length) { list.innerHTML = '<div class="coe-empty">没有匹配的已加载服装素材。</div>'; return; }
     const searching = typeof query === "string" && query.trim().length > 0;
-    for (const [groupName, groupAssets] of groups) {
+    for (const group of groups) {
+      const { key: groupKey, label: groupName, assets: groupAssets } = group;
       const section = document.createElement("section");
-      const collapsed = !searching && !expandedMaterialGroups.has(groupName);
+      const collapsed = !searching && !expandedMaterialGroups.has(groupKey);
       section.className = `coe-material-section${collapsed ? " coe-collapsed" : ""}`;
       section.innerHTML = `<h3 class="coe-material-group-title"><button type="button" class="coe-material-group-toggle" aria-expanded="${!collapsed}"><span>${collapsed ? "▶" : "▼"}</span><strong>${escapeHTML(groupName)}</strong><small>${groupAssets.length}</small></button></h3>`;
       section.querySelector(".coe-material-group-toggle").addEventListener("click", () => {
         if (searching) return;
-        if (expandedMaterialGroups.has(groupName)) expandedMaterialGroups.delete(groupName);
-        else expandedMaterialGroups.add(groupName);
+        if (expandedMaterialGroups.has(groupKey)) expandedMaterialGroups.delete(groupKey);
+        else expandedMaterialGroups.add(groupKey);
         renderMaterials(list, query);
       });
-      const grid = document.createElement("div");
-      grid.className = "coe-material-group";
-      for (const asset of groupAssets) {
-        const drawable = asset.Layer.filter(isDrawableLayer);
-        const button = document.createElement("button");
-        button.className = "coe-material";
-        button.title = "提取该素材的静态图片层；动画、脚本和物品功能不会复制";
-        const previewPath = typeof globalThis.AssetGetPreviewPath === "function"
-          ? `./${AssetGetPreviewPath(asset)}/${encodeURIComponent(asset.Name)}.png`
-          : `./Assets/${asset.Group?.Family || "Female3DCG"}/${asset.DynamicGroupName || asset.Group?.Name}/Preview/${encodeURIComponent(asset.Name)}.png`;
-        button.innerHTML = `<img loading="lazy" src="${escapeHTML(previewPath)}" alt=""><span><strong>${escapeHTML(asset.Description || asset.Name)}</strong><br><span class="coe-muted">${drawable.length} 层 · 静态提取</span></span>`;
-        button.addEventListener("click", () => addAssetLayers(asset));
-        grid.appendChild(button);
+      // Opening the picker only builds lightweight category headers. Asset cards,
+      // preview URL resolution and image requests begin when a category is opened.
+      if (!collapsed) {
+        const grid = document.createElement("div");
+        grid.className = "coe-material-group";
+        for (const asset of groupAssets) {
+          const drawable = asset.Layer.filter(isDrawableLayer);
+          const button = document.createElement("button");
+          button.className = "coe-material";
+          button.title = "提取该素材的静态图片层；动画、脚本和物品功能不会复制";
+          const previewPath = materialPreviewPath(asset);
+          button.innerHTML = `<img loading="lazy" src="${escapeHTML(previewPath)}" alt=""><span><strong>${escapeHTML(asset.Description || asset.Name)}</strong><br><span class="coe-muted">${drawable.length} 层 · 静态提取</span></span>`;
+          button.addEventListener("click", () => addAssetLayers(asset));
+          grid.appendChild(button);
+        }
+        section.appendChild(grid);
       }
-      section.appendChild(grid);
       list.appendChild(section);
     }
   }

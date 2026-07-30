@@ -51,6 +51,40 @@
     return poseMapping === layer?.PoseMapping ? { ...layer } : { ...layer, PoseMapping: poseMapping };
   }
 
+  function noteLayerVisibilityWarning(asset, layer, reason) {
+    const message = `素材动态图层判定异常：${asset?.Group?.Name || "?"}/${asset?.Name || "?"}/${layer?.Name || "默认层"}：${String(reason?.message || reason)}`;
+    if (!diagnostics.lastWarnings.includes(message)) {
+      diagnostics.lastWarnings.push(message);
+      diagnostics.lastWarnings = diagnostics.lastWarnings.slice(-20);
+    }
+  }
+
+  function sourceLayerVisible(character, layer, asset) {
+    // COE is a layer material editor: Typed/Modular AllowTypes are intentionally
+    // ignored so mutually-exclusive source layers can be recombined by the user.
+    // Character-dependent visual state remains live, especially PoseMapping,
+    // otherwise pose-specific artwork would pile into the current pose.
+    if (layer?.HideAs && typeof globalThis.CharacterAppearanceVisible === "function") {
+      try {
+        if (!CharacterAppearanceVisible(character, layer.HideAs.Asset, layer.HideAs.Group)) return false;
+      } catch (error) { noteLayerVisibilityWarning(asset, layer, error); }
+    }
+
+    if (typeof globalThis.CommonDrawResolveAssetPose === "function") {
+      try {
+        const pose = CommonDrawResolveAssetPose(character, layer);
+        const hiddenPose = globalThis.PoseType?.HIDE ?? "Hide";
+        if (pose && layer?.PoseMapping?.[pose] === hiddenPose) return false;
+      } catch (error) { noteLayerVisibilityWarning(asset, layer, error); }
+    }
+
+    if (typeof character?.HasAttribute === "function") {
+      if (layer?.HideForAttribute?.some(attribute => character.HasAttribute(attribute))) return false;
+      if (layer?.ShowForAttribute?.every(attribute => !character.HasAttribute(attribute))) return false;
+    }
+    return true;
+  }
+
   function createVisualAssetProxy(asset, owner = asset) {
     const cached = visualAssetProxyCache.get(owner);
     if (cached) return cached;
@@ -88,14 +122,15 @@
   }
 
   function buildStaticSynthetic({ character, material, refs, asset, analysis, overall = null }) {
+    const sourceProperty = sanitizeVisualProperty(material.sourceProperty || {}, analysis, asset);
     const drawable = refs.map(ref => ({ ref, sourceLayer: resolveSourceLayer(asset, ref) }))
-      .filter(entry => isDrawableLayer(entry.sourceLayer))
+      .filter(entry => isDrawableLayer(entry.sourceLayer) && sourceLayerVisible(character, entry.sourceLayer, asset))
       .sort((a, b) => (a.ref.sourceLayerIndex ?? asset.Layer.indexOf(a.sourceLayer)) - (b.ref.sourceLayerIndex ?? asset.Layer.indexOf(b.sourceLayer)));
     if (!drawable.length) throw new Error("no-drawable-layer");
     // Byte budgets are enforced at persistence and remote-protocol boundaries.
     // Avoid serializing unchanged material data on every preview frame.
     const colors = resolveMaterialColors(material, asset, refs);
-    const baseProperty = sanitizeVisualProperty(material.sourceProperty || {}, analysis, asset);
+    const baseProperty = sourceProperty;
     // 每层生成独立的 Item，Property 各自携带该层的变换
     const results = drawable.map((entry, index) => {
       const { ref, sourceLayer } = entry;

@@ -51,38 +51,38 @@
     return poseMapping === layer?.PoseMapping ? { ...layer } : { ...layer, PoseMapping: poseMapping };
   }
 
-  function noteLayerVisibilityFallback(asset, layer, reason) {
-    const message = `素材图层判定回退：${asset?.Group?.Name || "?"}/${asset?.Name || "?"}/${layer?.Name || "默认层"}：${String(reason?.message || reason)}`;
+  function noteLayerVisibilityWarning(asset, layer, reason) {
+    const message = `素材动态图层判定异常：${asset?.Group?.Name || "?"}/${asset?.Name || "?"}/${layer?.Name || "默认层"}：${String(reason?.message || reason)}`;
     if (!diagnostics.lastWarnings.includes(message)) {
       diagnostics.lastWarnings.push(message);
       diagnostics.lastWarnings = diagnostics.lastWarnings.slice(-20);
     }
   }
 
-  function sourceLayerVisible(character, layer, asset, sourceProperty) {
-    const typeRecord = sourceProperty?.TypeRecord || null;
-    // R130 centralizes AllowTypes, HideAs, pose and character-attribute checks in
-    // this predicate. Reuse it before COE creates a visual proxy so an invalid
-    // source layer never reaches CommonDraw or URL generation.
-    if (typeof globalThis.CharacterAppearanceIsLayerVisible === "function") {
-      try { return CharacterAppearanceIsLayerVisible(character, layer, asset, typeRecord) === true; }
-      catch (error) {
-        noteLayerVisibilityFallback(asset, layer, error);
-        // Some third-party layers carry partial metadata that the full R130
-        // predicate cannot inspect outside a formal worn item. Preserve the
-        // important AllowTypes check when possible; unconditional static layers
-        // are safe to keep instead of making the whole material disappear.
-        if (!layer?.AllowTypes) return true;
-      }
+  function sourceLayerVisible(character, layer, asset) {
+    // COE is a layer material editor: Typed/Modular AllowTypes are intentionally
+    // ignored so mutually-exclusive source layers can be recombined by the user.
+    // Character-dependent visual state remains live, especially PoseMapping,
+    // otherwise pose-specific artwork would pile into the current pose.
+    if (layer?.HideAs && typeof globalThis.CharacterAppearanceVisible === "function") {
+      try {
+        if (!CharacterAppearanceVisible(character, layer.HideAs.Asset, layer.HideAs.Group)) return false;
+      } catch (error) { noteLayerVisibilityWarning(asset, layer, error); }
     }
-    // Compatibility fallback for older runtimes. Conditional layers still use
-    // BC's own modular type evaluator rather than reimplementing its AND/OR rules.
-    if (!layer?.AllowTypes) return true;
-    if (typeof globalThis.CharacterAppearanceAllowForTypes === "function") {
-      try { return CharacterAppearanceAllowForTypes(layer.AllowTypes, typeRecord) === true; }
-      catch (error) { noteLayerVisibilityFallback(asset, layer, error); }
+
+    if (typeof globalThis.CommonDrawResolveAssetPose === "function") {
+      try {
+        const pose = CommonDrawResolveAssetPose(character, layer);
+        const hiddenPose = globalThis.PoseType?.HIDE ?? "Hide";
+        if (pose && layer?.PoseMapping?.[pose] === hiddenPose) return false;
+      } catch (error) { noteLayerVisibilityWarning(asset, layer, error); }
     }
-    return false;
+
+    if (typeof character?.HasAttribute === "function") {
+      if (layer?.HideForAttribute?.some(attribute => character.HasAttribute(attribute))) return false;
+      if (layer?.ShowForAttribute?.every(attribute => !character.HasAttribute(attribute))) return false;
+    }
+    return true;
   }
 
   function createVisualAssetProxy(asset, owner = asset) {
@@ -123,19 +123,9 @@
 
   function buildStaticSynthetic({ character, material, refs, asset, analysis, overall = null }) {
     const sourceProperty = sanitizeVisualProperty(material.sourceProperty || {}, analysis, asset);
-    const candidates = refs.map(ref => ({ ref, sourceLayer: resolveSourceLayer(asset, ref) }))
-      .filter(entry => isDrawableLayer(entry.sourceLayer));
-    let drawable = candidates.filter(entry => sourceLayerVisible(character, entry.sourceLayer, asset, sourceProperty));
-    // Third-party Extended Items occasionally require formal-item state that a
-    // static COE material deliberately does not instantiate. If every referenced
-    // layer is rejected, retaining the user's explicitly selected static layers is
-    // preferable to silently dropping the entire material. Partial matches remain
-    // strictly filtered, so ordinary typed variants still use BC's exact result.
-    if (!drawable.length && candidates.length && analysis?.provider === "third-party") {
-      drawable = candidates;
-      noteLayerVisibilityFallback(asset, null, "全部图层被条件判定拒绝，已保留显式选择的静态图层");
-    }
-    drawable.sort((a, b) => (a.ref.sourceLayerIndex ?? asset.Layer.indexOf(a.sourceLayer)) - (b.ref.sourceLayerIndex ?? asset.Layer.indexOf(b.sourceLayer)));
+    const drawable = refs.map(ref => ({ ref, sourceLayer: resolveSourceLayer(asset, ref) }))
+      .filter(entry => isDrawableLayer(entry.sourceLayer) && sourceLayerVisible(character, entry.sourceLayer, asset))
+      .sort((a, b) => (a.ref.sourceLayerIndex ?? asset.Layer.indexOf(a.sourceLayer)) - (b.ref.sourceLayerIndex ?? asset.Layer.indexOf(b.sourceLayer)));
     if (!drawable.length) throw new Error("no-drawable-layer");
     // Byte budgets are enforced at persistence and remote-protocol boundaries.
     // Avoid serializing unchanged material data on every preview frame.

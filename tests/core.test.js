@@ -793,62 +793,48 @@ test('drawable layer predicate consistently rejects missing images and locked la
   assert.equal(api.isDrawableLayer(null), false);
 });
 
-test('synthetic renderer delegates conditional layer visibility to the BC R130 predicate', () => {
-  const asset = makeAsset('Cloth', 'TypedDress');
-  const layerBase = { Priority: 10, HasImage: true, LockLayer: false, AllowColorize: true, ColorIndex: 0, Opacity: 1, MinOpacity: 0, MaxOpacity: 1, DrawingLeft: {}, DrawingTop: {}, ParentGroup: {}, PoseMapping: {}, CreateLayerTypes: ['variant'] };
+test('typed material keeps every mutually-exclusive layer for COE recombination', () => {
+  const asset = makeAsset('Cloth', 'OffTheShoulderTop');
+  const layerBase = { Priority: 10, HasImage: true, LockLayer: false, AllowColorize: true, ColorIndex: 0, Opacity: 1, MinOpacity: 0, MaxOpacity: 1, DrawingLeft: {}, DrawingTop: {}, ParentGroup: {}, PoseMapping: {}, CreateLayerTypes: [] };
   asset.Layer = [
-    { ...layerBase, Name: 'Variant0', AllowTypes: { marker: 0 } },
-    { ...layerBase, Name: 'Variant1', AllowTypes: { marker: 1 } },
+    { ...layerBase, Name: 'Left', AllowTypes: { typed: 0 } },
+    { ...layerBase, Name: 'Right', AllowTypes: { typed: 1 } },
   ];
-  const seen = [];
+  let formalPredicateCalls = 0;
+  const env = load({
+    assets: [asset],
+    globals: { CharacterAppearanceIsLayerVisible: () => { formalPredicateCalls++; return false; } },
+  });
+  env.api.setEditingForTest({
+    version: 6, name: '露肩上衣素材', slotGroup: 'Cloth', recycle: [],
+    materials: [{ id: 'm1', sourceGroup: 'Cloth', sourceAsset: 'OffTheShoulderTop', colors: ['#fff'], sourceProperty: {} }],
+    layers: [
+      { materialId: 'm1', sourceGroup: 'Cloth', sourceAsset: 'OffTheShoulderTop', sourceLayer: 'Left', sourceLayerIndex: 0, priority: 10, offsetX: 0, offsetY: 0, opacity: 1 },
+      { materialId: 'm1', sourceGroup: 'Cloth', sourceAsset: 'OffTheShoulderTop', sourceLayer: 'Right', sourceLayerIndex: 1, priority: 10, offsetX: 0, offsetY: 0, opacity: 1 },
+    ],
+  });
+
+  const groups = env.api.buildSyntheticItems(env.player);
+  assert.deepEqual(Array.from(groups, group => group.drawable[0].sourceLayer.Name), ['Left', 'Right']);
+  assert.equal(formalPredicateCalls, 0);
+});
+
+test('pose-hidden material layers stay dynamic and are never restored by provider fallback', () => {
+  const asset = makeAsset('ClothAccessory', '姿势素材');
+  asset.Group.Clothing = true;
+  asset.Layer[0].PoseMapping = { Kneel: 'Hide' };
+  let pose = 'Kneel';
   const env = load({
     assets: [asset],
     globals: {
-      CharacterAppearanceIsLayerVisible(_character, layer, _asset, typeRecord) {
-        seen.push({ name: layer.Name, typeRecord: { ...typeRecord } });
-        return layer.Name === `Variant${typeRecord.variant}`;
-      },
+      PoseType: { HIDE: 'Hide' },
+      CommonDrawResolveAssetPose: () => pose,
     },
   });
-  env.api.setEditingForTest({
-    version: 6, name: '条件图层', slotGroup: 'Cloth', recycle: [],
-    materials: [{ id: 'm1', sourceGroup: 'Cloth', sourceAsset: 'TypedDress', colors: ['#fff'], sourceProperty: { TypeRecord: { variant: 1 } } }],
-    layers: [
-      { materialId: 'm1', sourceGroup: 'Cloth', sourceAsset: 'TypedDress', sourceLayer: 'Variant0', sourceLayerIndex: 0, priority: 10, offsetX: 0, offsetY: 0, opacity: 1 },
-      { materialId: 'm1', sourceGroup: 'Cloth', sourceAsset: 'TypedDress', sourceLayer: 'Variant1', sourceLayerIndex: 1, priority: 10, offsetX: 0, offsetY: 0, opacity: 1 },
-    ],
-  });
-
-  const groups = env.api.buildSyntheticItems(env.player);
-  assert.equal(groups.length, 1);
-  assert.equal(groups[0].drawable[0].sourceLayer.Name, 'Variant1');
-  assert.deepEqual(seen.map(entry => entry.name), ['Variant0', 'Variant1']);
-  assert.deepEqual(seen[0].typeRecord, { variant: 1 });
-});
-
-test('third-party material keeps explicit static layers when formal visibility rejects every layer', () => {
-  const asset = makeAsset('ClothAccessory', '复杂服装');
-  asset.Group.Clothing = true;
-  const base = asset.Layer[0];
-  asset.Layer = [
-    { ...base, Name: 'VariantA', AllowTypes: { typed: 1 } },
-    { ...base, Name: 'VariantB', AllowTypes: { typed: 2 } },
-  ];
-  const env = load({
-    assets: [asset],
-    globals: { CharacterAppearanceIsLayerVisible: () => false },
-  });
-  env.api.setEditingForTest({
-    version: 6, name: '第三方条件服装', slotGroup: 'Cloth', recycle: [],
-    materials: [{ id: 'm1', sourceGroup: 'ClothAccessory', sourceAsset: '复杂服装', colors: ['#fff'], sourceProperty: {} }],
-    layers: [
-      { materialId: 'm1', sourceGroup: 'ClothAccessory', sourceAsset: '复杂服装', sourceLayer: 'VariantA', sourceLayerIndex: 0, priority: 10, offsetX: 0, offsetY: 0, opacity: 1 },
-      { materialId: 'm1', sourceGroup: 'ClothAccessory', sourceAsset: '复杂服装', sourceLayer: 'VariantB', sourceLayerIndex: 1, priority: 10, offsetX: 0, offsetY: 0, opacity: 1 },
-    ],
-  });
-  const groups = env.api.buildSyntheticItems(env.player);
-  assert.equal(groups.length, 2);
-  assert.match(env.api.statusSnapshot().lastWarnings.at(-1), /全部图层被条件判定拒绝/);
+  env.api.setEditingForTest(compositionFor(asset));
+  assert.equal(env.api.buildSyntheticItems(env.player).length, 0);
+  pose = '';
+  assert.equal(env.api.buildSyntheticItems(env.player).length, 1);
 });
 
 test('material color normalization preserves fallback, padding and truncation behavior', () => {

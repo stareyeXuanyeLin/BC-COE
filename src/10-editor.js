@@ -594,8 +594,8 @@
       ? `${AssetGetPreviewPath(asset)}/${asset.Name}.png`
       : `Assets/${asset.Group?.Family || "Female3DCG"}/${asset.DynamicGroupName || asset.Group?.Name}/Preview/${asset.Name}.png`;
     // Third-party providers normally hook BC's image cache loader rather than
-    // arbitrary DOM <img> requests. Resolve through DrawGetImage first so Echo
-    // and other image-mapping mods can replace the virtual BC path with a CDN URL.
+    // arbitrary DOM <img> requests. Resolve through DrawGetImage first so
+    // image-mapping mods can replace the virtual BC path with a CDN URL.
     if (typeof globalThis.DrawGetImage === "function") {
       try {
         const resolved = DrawGetImage(rawPath);
